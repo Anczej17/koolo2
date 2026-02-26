@@ -73,7 +73,6 @@ document.addEventListener('DOMContentLoaded', function () {
         general: false,
         client: false,
         scheduler: false,
-        characterCreation: false,
     };
 
     const levelingClasses = new Set([
@@ -98,7 +97,6 @@ document.addEventListener('DOMContentLoaded', function () {
         'sectionScheduler',
         'sectionMuling',   // [Added]
         'sectionShopping', // [Added]
-        'sectionCharacterCreation', // [Added]
     ];
     let sectionSelectAllCheckbox = null;
 
@@ -312,18 +310,6 @@ document.addEventListener('DOMContentLoaded', function () {
         return JSON.stringify(pairs);
     }
 
-    function snapshotCharacterCreationState() {
-        const form = document.querySelector('form');
-        if (!form) {
-            return '';
-        }
-        const autoCreateCharacter = !!form.querySelector('input[name="autoCreateCharacter"]')?.checked;
-        const state = {
-            autoCreateCharacter,
-        };
-        return JSON.stringify(state);
-    }
-
     function refreshSectionDirtyIndicators() {
         const healthCheckbox = document.getElementById('sectionHealth');
         const mercCheckbox = document.getElementById('sectionMerc');
@@ -333,7 +319,6 @@ document.addEventListener('DOMContentLoaded', function () {
         const generalCheckbox = document.getElementById('sectionGeneral');
         const clientCheckbox = document.getElementById('sectionClient');
         const schedulerCheckbox = document.getElementById('sectionScheduler');
-        const characterCreationCheckbox = document.getElementById('sectionCharacterCreation'); // [Added]
         // Muling/Shopping labels not yet tracked for dirty state, so skipped here.
 
         const healthLabelSpan = healthCheckbox && healthCheckbox.nextElementSibling;
@@ -344,7 +329,6 @@ document.addEventListener('DOMContentLoaded', function () {
         const generalLabelSpan = generalCheckbox && generalCheckbox.nextElementSibling;
         const clientLabelSpan = clientCheckbox && clientCheckbox.nextElementSibling;
         const schedulerLabelSpan = schedulerCheckbox && schedulerCheckbox.nextElementSibling;
-        const characterCreationLabelSpan = characterCreationCheckbox && characterCreationCheckbox.nextElementSibling; // [Added]
 
         if (healthLabelSpan) {
             if (sectionDirty.health) {
@@ -400,13 +384,6 @@ document.addEventListener('DOMContentLoaded', function () {
                 schedulerLabelSpan.classList.add('section-dirty');
             } else {
                 schedulerLabelSpan.classList.remove('section-dirty');
-            }
-        }
-        if (characterCreationLabelSpan) {
-            if (sectionDirty.characterCreation) {
-                characterCreationLabelSpan.classList.add('section-dirty');
-            } else {
-                characterCreationLabelSpan.classList.remove('section-dirty');
             }
         }
     }
@@ -465,12 +442,6 @@ document.addEventListener('DOMContentLoaded', function () {
         refreshSectionDirtyIndicators();
     }
 
-    function updateCharacterCreationDirty() {
-        const current = snapshotCharacterCreationState();
-        sectionDirty.characterCreation = current !== initialSectionState.characterCreation;
-        refreshSectionDirtyIndicators();
-    }
-
     // Initialize snapshots
     initialSectionState.health = snapshotHealthState();
     initialSectionState.merc = snapshotMercState();
@@ -479,7 +450,6 @@ document.addEventListener('DOMContentLoaded', function () {
     initialSectionState.general = snapshotGeneralState();
     initialSectionState.client = snapshotClientState();
     initialSectionState.scheduler = snapshotSchedulerState();
-    initialSectionState.characterCreation = snapshotCharacterCreationState();
     refreshSectionDirtyIndicators();
 
     if (bulkOpenButton) {
@@ -568,10 +538,6 @@ document.addEventListener('DOMContentLoaded', function () {
             + '  <label>'
             + '    <input type="checkbox" id="sectionShopping">'
             + '    <span>Shopping settings</span>'
-            + '  </label>'
-            + '  <label>'
-            + '    <input type="checkbox" id="sectionCharacterCreation">'
-            + '    <span>Character creation</span>'
             + '  </label>'
             + '</div>'
             + '<div class="run-detail-toggles">'
@@ -849,10 +815,6 @@ document.addEventListener('DOMContentLoaded', function () {
         'hide_portraits',
     ]);
 
-    const CHARACTER_CREATION_FIELD_NAMES = new Set([
-        'autoCreateCharacter',
-    ]);
-
     document.addEventListener('change', function (event) {
         const target = event.target;
         if (!(target instanceof HTMLInputElement)) {
@@ -886,11 +848,6 @@ document.addEventListener('DOMContentLoaded', function () {
 
         if (CLIENT_FIELD_NAMES.has(target.name)) {
             updateClientDirty();
-            return;
-        }
-
-        if (CHARACTER_CREATION_FIELD_NAMES.has(target.name)) {
-            updateCharacterCreationDirty();
             return;
         }
 
@@ -943,7 +900,6 @@ document.addEventListener('DOMContentLoaded', function () {
         const schedulerCheckbox = document.getElementById('sectionScheduler');
         const mulingCheckbox = document.getElementById('sectionMuling');     // [Added]
         const shoppingCheckbox = document.getElementById('sectionShopping'); // [Added]
-        const characterCreationCheckbox = document.getElementById('sectionCharacterCreation'); // [Added]
 
         return {
             health: !!(healthCheckbox && healthCheckbox.checked),
@@ -957,7 +913,6 @@ document.addEventListener('DOMContentLoaded', function () {
             scheduler: !!(schedulerCheckbox && schedulerCheckbox.checked),
             muling: !!(mulingCheckbox && mulingCheckbox.checked),       // [Added]
             shopping: !!(shoppingCheckbox && shoppingCheckbox.checked), // [Added]
-            characterCreation: !!(characterCreationCheckbox && characterCreationCheckbox.checked), // [Added]
         };
     }
 

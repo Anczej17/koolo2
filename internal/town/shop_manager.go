@@ -28,72 +28,56 @@ func BuyConsumables(forceRefill bool) {
 	ctx := context.Get()
 
 	missingHealingPotionInBelt := ctx.BeltManager.GetMissingCount(data.HealingPotion)
-	missingManaPotionInBelt := ctx.BeltManager.GetMissingCount(data.ManaPotion)
+	missingManaPotiontInBelt := ctx.BeltManager.GetMissingCount(data.ManaPotion)
 	missingHealingPotionInInventory := ctx.Data.MissingPotionCountInInventory(data.HealingPotion)
 	missingManaPotionInInventory := ctx.Data.MissingPotionCountInInventory(data.ManaPotion)
-	shouldBuyTPs := ShouldBuyTPs()
 
 	// We traverse the items in reverse order because vendor has the best potions at the end
 	healingPot, healingPotfound := findFirstMatch("superhealingpotion", "greaterhealingpotion", "healingpotion", "lighthealingpotion", "minorhealingpotion")
 	manaPot, manaPotfound := findFirstMatch("supermanapotion", "greatermanapotion", "manapotion", "lightmanapotion", "minormanapotion")
 
-	ctx.Logger.Debug(fmt.Sprintf("Buying: %d Healing potions and %d Mana potions for belt", missingHealingPotionInBelt, missingManaPotionInBelt))
+	ctx.Logger.Debug(fmt.Sprintf("Buying: %d Healing potions and %d Mana potions for belt", missingHealingPotionInBelt, missingManaPotiontInBelt))
 
-	if shouldBuyTPs || forceRefill {
+	if ShouldBuyTPs() || forceRefill {
 		if _, found := ctx.Data.Inventory.Find(item.TomeOfTownPortal, item.LocationInventory); !found && ctx.Data.PlayerUnit.TotalPlayerGold() > 450 {
 			ctx.Logger.Info("TP Tome not found, buying one...")
 			if itm, itmFound := ctx.Data.Inventory.Find(item.TomeOfTownPortal, item.LocationVendor); itmFound {
-				// Abort the vendor shopping sequence on the first failed purchase to avoid gold spam.
-				if !buyItemOrAbortOnNoGold(itm, 1) {
-					return
-				}
+				BuyItem(itm, 1)
 			}
 		}
 	}
 
 	// buy for belt first
 	if healingPotfound && missingHealingPotionInBelt > 0 {
-		if !buyItemOrAbortOnNoGold(healingPot, missingHealingPotionInBelt) {
-			return
-		}
+		BuyItem(healingPot, missingHealingPotionInBelt)
 		missingHealingPotionInBelt = 0
 	}
 
-	if manaPotfound && missingManaPotionInBelt > 0 {
-		if !buyItemOrAbortOnNoGold(manaPot, missingManaPotionInBelt) {
-			return
-		}
-		missingManaPotionInBelt = 0
+	if manaPotfound && missingManaPotiontInBelt > 0 {
+		BuyItem(manaPot, missingManaPotiontInBelt)
+		missingManaPotiontInBelt = 0
 	}
 
 	ctx.Logger.Debug(fmt.Sprintf("Buying: %d Healing potions and %d Mana potions for inventory", missingHealingPotionInInventory, missingManaPotionInInventory))
 
 	// then buy for inventory
 	if healingPotfound && missingHealingPotionInInventory > 0 {
-		if !buyItemOrAbortOnNoGold(healingPot, missingHealingPotionInInventory) {
-			return
-		}
+		BuyItem(healingPot, missingHealingPotionInInventory)
 		missingHealingPotionInInventory = 0
 	}
 
 	if manaPotfound && missingManaPotionInInventory > 0 {
-		if !buyItemOrAbortOnNoGold(manaPot, missingManaPotionInInventory) {
-			return
-		}
+		BuyItem(manaPot, missingManaPotionInInventory)
 		missingManaPotionInInventory = 0
 	}
 
-	if shouldBuyTPs || forceRefill {
+	if ShouldBuyTPs() || forceRefill {
 		ctx.Logger.Debug("Filling TP Tome...")
 		if itm, found := ctx.Data.Inventory.Find(item.ScrollOfTownPortal, item.LocationVendor); found {
 			if ctx.Data.PlayerUnit.TotalPlayerGold() > 6000 {
-				if !buyFullStack(itm, -1) { // -1 for irrelevant currentKeysInInventory
-					return
-				}
+				buyFullStack(itm, -1) // -1 for irrelevant currentKeysInInventory
 			} else {
-				if !buyItemOrAbortOnNoGold(itm, 1) {
-					return
-				}
+				BuyItem(itm, 1)
 			}
 		}
 	}
@@ -109,51 +93,36 @@ func BuyConsumables(forceRefill bool) {
 		disableIDs = !isLeveling
 	}
 
-	shouldBuyIDs := false
-	if !disableIDs {
-		shouldBuyIDs = ShouldBuyIDs()
-	}
-
 	if disableIDs {
 		ctx.Logger.Debug("DisableIdentifyTome enabled – skipping ID tome/scroll purchases.")
-	} else if shouldBuyIDs || forceRefill {
+	} else if ShouldBuyIDs() || forceRefill {
 
 		if _, found := ctx.Data.Inventory.Find(item.TomeOfIdentify, item.LocationInventory); !found && ctx.Data.PlayerUnit.TotalPlayerGold() > 360 {
 			ctx.Logger.Info("ID Tome not found, buying one...")
 			if itm, itmFound := ctx.Data.Inventory.Find(item.TomeOfIdentify, item.LocationVendor); itmFound {
-				if !buyItemOrAbortOnNoGold(itm, 1) {
-					return
-				}
+				BuyItem(itm, 1)
 			}
 		}
 		ctx.Logger.Debug("Filling IDs Tome...")
 		if itm, found := ctx.Data.Inventory.Find(item.ScrollOfIdentify, item.LocationVendor); found {
 			if ctx.Data.PlayerUnit.TotalPlayerGold() > 16000 {
-				if !buyFullStack(itm, -1) { // -1 for irrelevant currentKeysInInventory
-					return
-				}
+				buyFullStack(itm, -1) // -1 for irrelevant currentKeysInInventory
 			} else {
-				if !buyItemOrAbortOnNoGold(itm, 1) {
-					return
-				}
+				BuyItem(itm, 1)
 			}
 		}
 	}
 
-	if ctx.Data.PlayerUnit.Class != data.Assassin {
-		keyQuantity, shouldBuyKeys := ShouldBuyKeys() // keyQuantity is total keys in inventory
-		if shouldBuyKeys || forceRefill {
-			if itm, found := ctx.Data.Inventory.Find(item.Key, item.LocationVendor); found {
-				ctx.Logger.Debug("Vendor with keys detected, provisioning...")
+	keyQuantity, shouldBuyKeys := ShouldBuyKeys() // keyQuantity is total keys in inventory
+	if ctx.Data.PlayerUnit.Class != data.Assassin && (shouldBuyKeys || forceRefill) {
+		if itm, found := ctx.Data.Inventory.Find(item.Key, item.LocationVendor); found {
+			ctx.Logger.Debug("Vendor with keys detected, provisioning...")
 
-				// Only buy if vendor has keys and we have less than 12
-				qtyVendor, _ := itm.FindStat(stat.Quantity, 0)
-				if (qtyVendor.Value > 0) && (keyQuantity < 12) {
-					// Pass keyQuantity to buyFullStack so it knows how many keys we had initially
-					if !buyFullStack(itm, keyQuantity) {
-						return
-					}
-				}
+			// Only buy if vendor has keys and we have less than 12
+			qtyVendor, _ := itm.FindStat(stat.Quantity, 0)
+			if (qtyVendor.Value > 0) && (keyQuantity < 12) {
+				// Pass keyQuantity to buyFullStack so it knows how many keys we had initially
+				buyFullStack(itm, keyQuantity)
 			}
 		}
 	}
@@ -374,39 +343,9 @@ func BuyItem(i data.Item, quantity int) {
 	}
 }
 
-func buyItemOrAbortOnNoGold(i data.Item, quantity int) bool {
-	ctx := context.Get()
-	screenPos := ui.GetScreenCoordsForItem(i)
-
-	utils.PingSleep(utils.Medium, 250) // Medium operation: Pre-buy delay
-	for k := 0; k < quantity; k++ {
-		goldBefore := ctx.Data.PlayerUnit.TotalPlayerGold()
-		ctx.HID.Click(game.RightButton, screenPos.X, screenPos.Y)
-		utils.PingSleep(utils.Medium, 600) // Medium operation: Wait for purchase to process
-		ctx.RefreshGameData()
-		if shouldAbortVendorPurchase(ctx, i, goldBefore) {
-			return false
-		}
-		ctx.Logger.Debug(fmt.Sprintf("Purchased %s [X:%d Y:%d]", i.Desc().Name, i.Position.X, i.Position.Y))
-	}
-	return true
-}
-
-// Centralize "no gold" detection so the log message and abort logic stay consistent.
-func shouldAbortVendorPurchase(ctx *context.Status, i data.Item, goldBefore int) bool {
-	if ctx.Data.PlayerUnit.TotalPlayerGold() >= goldBefore {
-		ctx.Logger.Info("Not enough gold to continue vendor purchases, aborting",
-			"item", i.Desc().Name,
-			"gold", goldBefore,
-		)
-		return true
-	}
-	return false
-}
-
 // buyFullStack is for buying full stacks of items from a vendor (e.g., potions, scrolls, keys)
 // For keys, currentKeysInInventory determines if a special double-click behavior is needed.
-func buyFullStack(i data.Item, currentKeysInInventory int) bool {
+func buyFullStack(i data.Item, currentKeysInInventory int) {
 	ctx := context.Get()
 	screenPos := ui.GetScreenCoordsForItem(i)
 
@@ -416,26 +355,16 @@ func buyFullStack(i data.Item, currentKeysInInventory int) bool {
 	// As per user's observation:
 	// - If 0 keys: this buys 1 key.
 	// - If >0 keys: this fills the current stack.
-	goldBefore := ctx.Data.PlayerUnit.TotalPlayerGold()
 	ctx.HID.ClickWithModifier(game.RightButton, screenPos.X, screenPos.Y, game.ShiftKey)
 	utils.PingSleep(utils.Light, 200) // Light operation: Wait for first purchase
-	ctx.RefreshGameData()
-	if shouldAbortVendorPurchase(ctx, i, goldBefore) {
-		return false
-	}
 
 	// Special handling for keys: only perform a second click if starting from 0 keys.
 	if i.Name == item.Key {
 		if currentKeysInInventory == 0 {
 			// As per user: if 0 keys, first click buys 1, second click fills the stack.
 			ctx.Logger.Debug("Initial keys were 0. Performing second Shift+Right Click to fill key stack.")
-			goldBefore = ctx.Data.PlayerUnit.TotalPlayerGold()
 			ctx.HID.ClickWithModifier(game.RightButton, screenPos.X, screenPos.Y, game.ShiftKey)
 			utils.PingSleep(utils.Light, 200) // Light operation: Wait for second purchase
-			ctx.RefreshGameData()
-			if shouldAbortVendorPurchase(ctx, i, goldBefore) {
-				return false
-			}
 		} else {
 			// As per user: if > 0 keys, the first click should have already filled the stack.
 			// No second click is needed to avoid buying an unnecessary extra key/stack.
@@ -444,7 +373,6 @@ func buyFullStack(i data.Item, currentKeysInInventory int) bool {
 	}
 
 	ctx.Logger.Debug(fmt.Sprintf("Finished full stack purchase attempt for %s", i.Desc().Name))
-	return true
 }
 
 func ItemsToBeSold(lockConfig ...[][]int) (items []data.Item) {

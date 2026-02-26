@@ -1,9 +1,9 @@
 package action
 
 import (
-	"errors"
 	"fmt"
 	"log/slog"
+	"time"
 
 	"github.com/hectorgimenez/d2go/pkg/data"
 	"github.com/hectorgimenez/d2go/pkg/data/npc"
@@ -116,25 +116,89 @@ func clearRoom(room data.Room, filter data.MonsterFilter) error {
 	ctx := context.Get()
 	ctx.SetLastAction("clearRoom")
 
-	path, _, found := ctx.PathFinder.GetClosestWalkablePath(room.GetCenter())
-	if !found {
-		return errors.New("failed to find a path to the room center")
+	const (
+		maxRoomCenterAttempts  = 2              // Max attempts to reach room center (reduced from 3)
+		maxClearIterations     = 50             // Safety limit: max monster kill iterations per room
+		stuckPositionThreshold = 5              // If in same position for this many iterations, we're stuck
+		stuckTimeoutSeconds    = 60             // If position doesn't change for 60s, skip room
+	)
+
+	// Attempt to move to room center with retries
+	movedToCenter := false
+	for attempt := 0; attempt < maxRoomCenterAttempts; attempt++ {
+		path, _, found := ctx.PathFinder.GetClosestWalkablePath(room.GetCenter())
+		if !found {
+			ctx.Logger.Debug("No path to room center, will clear from current position",
+				slog.Int("attempt", attempt+1),
+				slog.Any("roomCenter", room.GetCenter()))
+			break
+		}
+
+		to := data.Position{
+			X: path.To().X + ctx.Data.AreaOrigin.X,
+			Y: path.To().Y + ctx.Data.AreaOrigin.Y,
+		}
+
+		err := MoveToCoords(to, step.WithMonsterFilter(filter))
+		if err == nil {
+			movedToCenter = true
+			break
+		}
+
+		ctx.Logger.Debug("Failed moving to room center, retrying",
+			slog.Int("attempt", attempt+1),
+			slog.String("error", err.Error()))
 	}
 
-	to := data.Position{
-		X: path.To().X + ctx.Data.AreaOrigin.X,
-		Y: path.To().Y + ctx.Data.AreaOrigin.Y,
+	if !movedToCenter {
+		ctx.Logger.Debug("Could not reach room center, clearing from current position")
 	}
 
-	err := MoveToCoords(to, step.WithMonsterFilter(filter))
-	if err != nil {
-		return fmt.Errorf("failed moving to room center: %w", err)
-	}
+	// Track stuck detection (both iteration-based and time-based)
+	var lastPlayerPos data.Position
+	stuckCounter := 0
+	iterationCount := 0
+	lastPositionChangeTime := time.Now()
+	var lastRecordedPos data.Position
 
+	// Main clearing loop with safety limits
 	for {
 		ctx.PauseIfNotPriority()
 		if err := checkPlayerDeath(ctx); err != nil {
 			return err
+		}
+
+		// Track position for time-based stuck detection
+		// Safety: only apply timeout when NOT in town (defensive check)
+		currentPos := ctx.Data.PlayerUnit.Position
+		inTown := ctx.Data.PlayerUnit.Area.IsTown()
+
+		if !inTown {
+			if currentPos != lastRecordedPos {
+				lastRecordedPos = currentPos
+				lastPositionChangeTime = time.Now()
+			} else {
+				// Position hasn't changed, check timeout
+				stuckDuration := time.Since(lastPositionChangeTime)
+				if stuckDuration > stuckTimeoutSeconds*time.Second {
+					remaining := getMonstersInRoom(room, filter)
+					ctx.Logger.Warn("Position stuck timeout - skipping room",
+						slog.Duration("stuckFor", stuckDuration),
+						slog.Int("monstersRemaining", len(remaining)),
+						slog.Any("stuckPosition", currentPos))
+					return nil
+				}
+			}
+		}
+
+		// Safety: prevent infinite loop
+		iterationCount++
+		if iterationCount > maxClearIterations {
+			remaining := getMonstersInRoom(room, filter)
+			ctx.Logger.Warn("Room clear iteration limit reached, moving on",
+				slog.Int("iterations", iterationCount),
+				slog.Int("monstersRemaining", len(remaining)))
+			return nil
 		}
 
 		monsters := getMonstersInRoom(room, filter)
@@ -144,42 +208,69 @@ func clearRoom(room data.Room, filter data.MonsterFilter) error {
 
 		SortEnemiesByPriority(&monsters)
 
-		// Check if there are monsters that can summon new monsters, and kill them first
+		// Find valid target (priority already handled by SortEnemiesByPriority)
+		// Herald > Monster Raisers > Others (by distance)
 		targetMonster := data.Monster{}
 		for _, m := range monsters {
 			if !ctx.Char.ShouldIgnoreMonster(m) {
-				if m.IsMonsterRaiser() {
-					targetMonster = m
-					break
-				} else if targetMonster.UnitID == 0 {
-					targetMonster = m
-				}
+				targetMonster = m
+				break // Take first non-ignored monster (already sorted by priority)
 			}
 		}
 
 		if targetMonster.UnitID == 0 {
-			//No valid targets, done
+			// No valid targets (all ignored/unreachable), done
 			return nil
 		}
 
+		// Check if we can path to the monster
 		_, _, mPathFound := ctx.PathFinder.GetPath(targetMonster.Position)
-		if mPathFound {
-			if !ctx.Data.CanTeleport() {
-				hasDoorBetween, door := ctx.PathFinder.HasDoorBetween(ctx.Data.PlayerUnit.Position, targetMonster.Position)
-				if hasDoorBetween && door.Selectable {
-					ctx.Logger.Debug("Door is blocking the path to the monster, moving closer")
-					MoveTo(func() (data.Position, bool) { return door.Position, true })
+		if !mPathFound {
+			ctx.Logger.Debug("No path to monster, skipping",
+				slog.String("monster", string(targetMonster.Name)),
+				slog.Any("position", targetMonster.Position))
+
+			// Skip this monster and continue to next
+			// Mark position to detect if we're looping on unreachable monsters
+			currentPos := ctx.Data.PlayerUnit.Position
+			if currentPos == lastPlayerPos {
+				stuckCounter++
+				if stuckCounter >= stuckPositionThreshold {
+					ctx.Logger.Warn("Stuck trying to reach unreachable monsters, skipping room",
+						slog.Int("stuckCount", stuckCounter))
+					return nil
 				}
+			} else {
+				stuckCounter = 0
+				lastPlayerPos = currentPos
 			}
+			continue
+		}
 
-			ctx.Char.KillMonsterSequence(func(d game.Data) (data.UnitID, bool) {
-				m, found := d.Monsters.FindByID(targetMonster.UnitID)
-				if found && m.Stats[stat.Life] > 0 {
-					return targetMonster.UnitID, true
-				}
+		// Handle doors blocking path
+		if !ctx.Data.CanTeleport() {
+			hasDoorBetween, door := ctx.PathFinder.HasDoorBetween(ctx.Data.PlayerUnit.Position, targetMonster.Position)
+			if hasDoorBetween && door.Selectable {
+				ctx.Logger.Debug("Door is blocking the path to the monster, moving closer")
+				MoveTo(func() (data.Position, bool) { return door.Position, true })
+			}
+		}
 
-				return 0, false
-			}, nil)
+		// Kill the monster
+		ctx.Char.KillMonsterSequence(func(d game.Data) (data.UnitID, bool) {
+			m, found := d.Monsters.FindByID(targetMonster.UnitID)
+			if found && m.Stats[stat.Life] > 0 {
+				return targetMonster.UnitID, true
+			}
+			return 0, false
+		}, nil)
+
+		// Reset iteration-based stuck counter after successful kill attempt
+		// (time-based tracking is handled at top of loop)
+		newPos := ctx.Data.PlayerUnit.Position
+		if newPos != lastPlayerPos {
+			stuckCounter = 0
+			lastPlayerPos = newPos
 		}
 	}
 }

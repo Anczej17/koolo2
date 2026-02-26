@@ -72,7 +72,6 @@ type ArmoryCharacter struct {
 	SharedStash3  []ArmoryItem `json:"sharedStash3"`
 	SharedStash4  []ArmoryItem `json:"sharedStash4"`
 	SharedStash5  []ArmoryItem `json:"sharedStash5"`
-	SharedStash6  []ArmoryItem `json:"sharedStash6"` // DLC may have 6th page in memory
 	GemsTab       []ArmoryItem `json:"gemsTab"`
 	MaterialsTab  []ArmoryItem `json:"materialsTab"`
 	RunesTab      []ArmoryItem `json:"runesTab"`
@@ -328,8 +327,6 @@ func dumpArmoryData(characterName string, gameData *game.Data, gameName string) 
 				armory.SharedStash4 = append(armory.SharedStash4, armoryItem)
 			case 5:
 				armory.SharedStash5 = append(armory.SharedStash5, armoryItem)
-			case 6:
-				armory.SharedStash6 = append(armory.SharedStash6, armoryItem)
 			default:
 				armory.SharedStash1 = append(armory.SharedStash1, armoryItem)
 			}

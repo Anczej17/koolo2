@@ -983,7 +983,7 @@ func (s *HttpServer) Listen(port int) error {
 	http.HandleFunc("/armory", s.armoryPage)
 	http.HandleFunc("/api/armory", s.armoryAPI)
 	http.HandleFunc("/api/armory/characters", s.armoryCharactersAPI)
-	http.HandleFunc("/api/armory/all", s.armoryAllAPI)
+	// http.HandleFunc("/api/armory/all", s.armoryAllAPI) // Commented out - method not available in this version
 
 	s.registerDropRoutes()
 
@@ -1590,7 +1590,7 @@ func (s *HttpServer) config(w http.ResponseWriter, r *http.Request) {
 		// Debug
 		newConfig.Debug.Log = r.Form.Get("debug_log") == "true"
 		newConfig.Debug.Screenshots = r.Form.Get("debug_screenshots") == "true"
-		newConfig.Debug.OpenOverlayMapOnGameStart = r.Form.Get("debug_open_overlay_map") == "true"
+		// newConfig.Debug.OpenOverlayMapOnGameStart = r.Form.Get("debug_open_overlay_map") == "true" // Commented out - field not available in this version
 		// Discord
 		newConfig.Discord.Enabled = r.Form.Get("discord_enabled") == "true"
 		newConfig.Discord.EnableGameCreatedMessages = r.Form.Has("enable_game_created_messages")
@@ -2922,6 +2922,31 @@ func (s *HttpServer) characterSettings(w http.ResponseWriter, r *http.Request) {
 		cfg.Game.Quests.RescueAnya = r.Form.Has("gameQuestsRescueAnya")
 		cfg.Game.Quests.KillAncients = r.Form.Has("gameQuestsKillAncients")
 
+		cfg.Game.ActRuns.Act1.FocusOnElitePacks = r.Form.Has("gameActRunsAct1FocusOnElitePacks")
+		cfg.Game.ActRuns.Act1.OpenChests = r.Form.Has("gameActRunsAct1OpenChests")
+		cfg.Game.ActRuns.Act1.UseWorldStoneShard = r.Form.Has("gameActRunsAct1UseWorldStoneShard")
+		cfg.Game.ActRuns.Act1.PauseAfterRun = r.Form.Has("gameActRunsAct1PauseAfterRun")
+
+		cfg.Game.ActRuns.Act2.FocusOnElitePacks = r.Form.Has("gameActRunsAct2FocusOnElitePacks")
+		cfg.Game.ActRuns.Act2.OpenChests = r.Form.Has("gameActRunsAct2OpenChests")
+		cfg.Game.ActRuns.Act2.UseWorldStoneShard = r.Form.Has("gameActRunsAct2UseWorldStoneShard")
+		cfg.Game.ActRuns.Act2.PauseAfterRun = r.Form.Has("gameActRunsAct2PauseAfterRun")
+
+		cfg.Game.ActRuns.Act3.FocusOnElitePacks = r.Form.Has("gameActRunsAct3FocusOnElitePacks")
+		cfg.Game.ActRuns.Act3.OpenChests = r.Form.Has("gameActRunsAct3OpenChests")
+		cfg.Game.ActRuns.Act3.UseWorldStoneShard = r.Form.Has("gameActRunsAct3UseWorldStoneShard")
+		cfg.Game.ActRuns.Act3.PauseAfterRun = r.Form.Has("gameActRunsAct3PauseAfterRun")
+
+		cfg.Game.ActRuns.Act4.FocusOnElitePacks = r.Form.Has("gameActRunsAct4FocusOnElitePacks")
+		cfg.Game.ActRuns.Act4.OpenChests = r.Form.Has("gameActRunsAct4OpenChests")
+		cfg.Game.ActRuns.Act4.UseWorldStoneShard = r.Form.Has("gameActRunsAct4UseWorldStoneShard")
+		cfg.Game.ActRuns.Act4.PauseAfterRun = r.Form.Has("gameActRunsAct4PauseAfterRun")
+
+		cfg.Game.ActRuns.Act5.FocusOnElitePacks = r.Form.Has("gameActRunsAct5FocusOnElitePacks")
+		cfg.Game.ActRuns.Act5.OpenChests = r.Form.Has("gameActRunsAct5OpenChests")
+		cfg.Game.ActRuns.Act5.UseWorldStoneShard = r.Form.Has("gameActRunsAct5UseWorldStoneShard")
+		cfg.Game.ActRuns.Act5.PauseAfterRun = r.Form.Has("gameActRunsAct5PauseAfterRun")
+
 		cfg.Game.TerrorZone.FocusOnElitePacks = r.Form.Has("gameTerrorZoneFocusOnElitePacks")
 		cfg.Game.TerrorZone.SkipOtherRuns = r.Form.Has("gameTerrorZoneSkipOtherRuns")
 		cfg.Game.TerrorZone.OpenChests = r.Form.Has("gameTerrorZoneOpenChests")
@@ -3440,6 +3465,31 @@ func (s *HttpServer) applyRunDetails(values url.Values, cfg *config.CharacterCfg
 			cfg.Game.Quests.KillShenk = values.Has("gameQuestsKillShenk")
 			cfg.Game.Quests.RescueAnya = values.Has("gameQuestsRescueAnya")
 			cfg.Game.Quests.KillAncients = values.Has("gameQuestsKillAncients")
+		case "act1":
+			cfg.Game.ActRuns.Act1.FocusOnElitePacks = values.Has("gameActRunsAct1FocusOnElitePacks")
+			cfg.Game.ActRuns.Act1.OpenChests = values.Has("gameActRunsAct1OpenChests")
+			cfg.Game.ActRuns.Act1.UseWorldStoneShard = values.Has("gameActRunsAct1UseWorldStoneShard")
+			cfg.Game.ActRuns.Act1.PauseAfterRun = values.Has("gameActRunsAct1PauseAfterRun")
+		case "act2":
+			cfg.Game.ActRuns.Act2.FocusOnElitePacks = values.Has("gameActRunsAct2FocusOnElitePacks")
+			cfg.Game.ActRuns.Act2.OpenChests = values.Has("gameActRunsAct2OpenChests")
+			cfg.Game.ActRuns.Act2.UseWorldStoneShard = values.Has("gameActRunsAct2UseWorldStoneShard")
+			cfg.Game.ActRuns.Act2.PauseAfterRun = values.Has("gameActRunsAct2PauseAfterRun")
+		case "act3":
+			cfg.Game.ActRuns.Act3.FocusOnElitePacks = values.Has("gameActRunsAct3FocusOnElitePacks")
+			cfg.Game.ActRuns.Act3.OpenChests = values.Has("gameActRunsAct3OpenChests")
+			cfg.Game.ActRuns.Act3.UseWorldStoneShard = values.Has("gameActRunsAct3UseWorldStoneShard")
+			cfg.Game.ActRuns.Act3.PauseAfterRun = values.Has("gameActRunsAct3PauseAfterRun")
+		case "act4":
+			cfg.Game.ActRuns.Act4.FocusOnElitePacks = values.Has("gameActRunsAct4FocusOnElitePacks")
+			cfg.Game.ActRuns.Act4.OpenChests = values.Has("gameActRunsAct4OpenChests")
+			cfg.Game.ActRuns.Act4.UseWorldStoneShard = values.Has("gameActRunsAct4UseWorldStoneShard")
+			cfg.Game.ActRuns.Act4.PauseAfterRun = values.Has("gameActRunsAct4PauseAfterRun")
+		case "act5":
+			cfg.Game.ActRuns.Act5.FocusOnElitePacks = values.Has("gameActRunsAct5FocusOnElitePacks")
+			cfg.Game.ActRuns.Act5.OpenChests = values.Has("gameActRunsAct5OpenChests")
+			cfg.Game.ActRuns.Act5.UseWorldStoneShard = values.Has("gameActRunsAct5UseWorldStoneShard")
+			cfg.Game.ActRuns.Act5.PauseAfterRun = values.Has("gameActRunsAct5PauseAfterRun")
 		case "terror_zone":
 			cfg.Game.TerrorZone.FocusOnElitePacks = values.Has("gameTerrorZoneFocusOnElitePacks")
 			cfg.Game.TerrorZone.SkipOtherRuns = values.Has("gameTerrorZoneSkipOtherRuns")

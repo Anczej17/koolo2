@@ -81,19 +81,3 @@ func (s *HttpServer) armoryCharactersAPI(w http.ResponseWriter, r *http.Request)
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(charactersWithArmory)
 }
-
-// armoryAllAPI returns all armory data for all characters (for cross-character search)
-func (s *HttpServer) armoryAllAPI(w http.ResponseWriter, r *http.Request) {
-	supervisors := s.manager.AvailableSupervisors()
-	allArmories := make(map[string]*bot.ArmoryCharacter)
-
-	for _, name := range supervisors {
-		armory, err := bot.LoadArmoryData(name)
-		if err == nil {
-			allArmories[name] = armory
-		}
-	}
-
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(allArmories)
-}

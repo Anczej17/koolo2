@@ -15,33 +15,30 @@ import (
 )
 
 func doesExceedQuantity(rule nip.Rule) bool {
-    ctx := context.Get()
-    ctx.SetLastAction("doesExceedQuantity")
+	ctx := context.Get()
+	ctx.SetLastAction("doesExceedQuantity")
 
-    stashItems := ctx.Data.Inventory.ByLocation(
-        item.LocationStash,
-        item.LocationSharedStash,
-        item.LocationRunesTab,
-        item.LocationGemsTab,
-        item.LocationMaterialsTab,
-    )
-    stashItems = FilterDLCGhostItems(stashItems)
+	stashItems := ctx.Data.Inventory.ByLocation(item.LocationStash, item.LocationSharedStash)
 
-    maxQuantity := rule.MaxQuantity()
-    if maxQuantity == 0 {
-        return false
-    }
+	maxQuantity := rule.MaxQuantity()
+	if maxQuantity == 0 {
+		return false
+	}
 
-    matchedItemsInStash := 0
+	if maxQuantity == 0 {
+		return false
+	}
 
-    for _, stashItem := range stashItems {
-        res, _ := rule.Evaluate(stashItem)
-        if res == nip.RuleResultFullMatch {
-            matchedItemsInStash += GetItemQuantity(stashItem)
-        }
-    }
+	matchedItemsInStash := 0
 
-    return matchedItemsInStash >= maxQuantity
+	for _, stashItem := range stashItems {
+		res, _ := rule.Evaluate(stashItem)
+		if res == nip.RuleResultFullMatch {
+			matchedItemsInStash += 1
+		}
+	}
+
+	return matchedItemsInStash >= maxQuantity
 }
 
 func DropMouseItem() {
@@ -372,32 +369,12 @@ func hasInventorySpaceFor(ctx *context.Status, itm data.Item) bool {
 	return false
 }
 
-//This allows certain quest-type items to be usable from the shared stash.
-//This is a temporary fix and should be changed if there is a better approach.
-
 func requiresPersonalStash(itm data.Item) bool {
 	if isQuestItem(itm) {
-		if _, ok := sharedStashQuestItems[itm.Name]; ok {
-			return false
-		}
 		return true
 	}
 
 	return itm.Name == "HoradricCube"
-}
-
-var sharedStashQuestItems = map[item.Name]struct{}{
-	item.Name("TwistedEssenceOfSuffering"):     {},
-	item.Name("ChargedEssenceOfHatred"):        {},
-	item.Name("BurningEssenceOfTerror"):        {},
-	item.Name("FesteringEssenceOfDestruction"): {},
-	item.Name("KeyOfTerror"):                   {},
-	item.Name("KeyOfHate"):                     {},
-	item.Name("KeyOfDestruction"):              {},
-	item.Name("DiablosHorn"):                   {},
-	item.Name("BaalsEye"):                      {},
-	item.Name("MephistosBrain"):                {},
-	item.Name("TokenofAbsolution"):             {},
 }
 
 func isQuestItem(itm data.Item) bool {

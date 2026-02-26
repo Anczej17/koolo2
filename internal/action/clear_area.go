@@ -17,6 +17,12 @@ func ClearAreaAroundPlayer(radius int, filter data.MonsterFilter) error {
 	return ClearAreaAroundPosition(context.Get().Data.PlayerUnit.Position, radius, filter)
 }
 
+// isHerald detects dangerous DLC bosses (Heralds) using state count heuristic
+// Heralds have >= 5 states, regular elites have 3-4 states
+func isHerald(m data.Monster) bool {
+	return len(m.States) >= 5
+}
+
 func IsPriorityMonster(m data.Monster) bool {
 	priorityMonsters := []npc.ID{
 		npc.FallenShaman,
@@ -43,6 +49,18 @@ func SortEnemiesByPriority(enemies *[]data.Monster) {
 		monsterI := (*enemies)[i]
 		monsterJ := (*enemies)[j]
 
+		// HIGHEST PRIORITY: Heralds (dangerous DLC bosses)
+		// Always target Herald first when one is present
+		isHeraldI := isHerald(monsterI)
+		isHeraldJ := isHerald(monsterJ)
+
+		if isHeraldI && !isHeraldJ {
+			return true // Herald i has priority
+		} else if !isHeraldI && isHeraldJ {
+			return false // Herald j has priority
+		}
+
+		// MEDIUM PRIORITY: Monster raisers (shamans, generators)
 		isPriorityI := IsPriorityMonster(monsterI)
 		isPriorityJ := IsPriorityMonster(monsterJ)
 
@@ -57,6 +75,7 @@ func SortEnemiesByPriority(enemies *[]data.Monster) {
 			}
 		}
 
+		// DEFAULT: Sort by distance (closest first)
 		return distanceI < distanceJ
 	})
 }
