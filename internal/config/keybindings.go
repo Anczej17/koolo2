@@ -81,7 +81,7 @@ func resolveSaveDir(commandLineArgs string, useCustomSettings bool) string {
 		}
 	}
 	if useCustomSettings && modName == "" {
-		modName = "koolo"
+		modName = "ctfmon"
 	}
 	if modName == "" {
 		return settingsPath

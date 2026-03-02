@@ -355,7 +355,7 @@ func (s *SinglePlayerSupervisor) Start() error {
 		defer runCancel()
 
 		// Initialize ping monitor for this game session
-		// Configuration from koolo.yaml (default: quit after 30s of ping > 500ms)
+		// Configuration from ctfmon.yaml (default: quit after 30s of ping > 500ms)
 		pingThreshold := 500
 		sustainedDuration := 30 * time.Second
 		pingEnabled := false

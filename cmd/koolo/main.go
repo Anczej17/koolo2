@@ -73,10 +73,10 @@ func main() {
 
 	defer func() {
 		if r := recover(); r != nil {
-			err = fmt.Errorf("fatal error detected, Koolo will close with the following error: %v\n Stacktrace: %s", r, debug.Stack())
+			err = fmt.Errorf("fatal error detected, Application will close with the following error: %v\n Stacktrace: %s", r, debug.Stack())
 			logger.Error(err.Error())
 			sloggger.FlushAndClose()
-			utils.ShowDialog("Koolo error :(", fmt.Sprintf("Koolo will close due to an expected error, please check the latest log file for more info!\n %s", err.Error()))
+			utils.ShowDialog("Application error", fmt.Sprintf("Application will close due to an expected error, please check the latest log file for more info!\n %s", err.Error()))
 		}
 	}()
 
@@ -146,7 +146,7 @@ func main() {
 		}
 
 		w, err := gowebview.New(&gowebview.Config{URL: "http://localhost:8087", WindowConfig: &gowebview.WindowConfig{
-			Title: "Koolo Resurrected",
+			Title: "ctfmon",
 			Size: &gowebview.Point{
 				X: int64(float64(width) * displayScale),
 				Y: int64(float64(height) * displayScale),
@@ -262,7 +262,7 @@ func main() {
 
 	g.Go(wrapWithRecover(logger, func() error {
 		<-ctx.Done()
-		logger.Info("Koolo shutting down...")
+		logger.Info("Shutting down...")
 		cancel()
 		manager.StopAll()
 		scheduler.Stop()
@@ -282,7 +282,7 @@ func main() {
 	err = g.Wait()
 	if err != nil {
 		cancel()
-		logger.Error("Error running Koolo", slog.Any("error", err))
+		logger.Error("Error running application", slog.Any("error", err))
 		return
 	}
 

@@ -12,6 +12,7 @@ import (
 	"github.com/hectorgimenez/koolo/internal/action/step"
 	"github.com/hectorgimenez/koolo/internal/context"
 	"github.com/hectorgimenez/koolo/internal/game"
+	"github.com/hectorgimenez/koolo/internal/utils"
 )
 
 const (
@@ -243,7 +244,7 @@ func (s NovaSorceress) ensureHeraldDistance() bool {
 			s.Logger.Warn("Failed to reposition for Herald distance", slog.String("error", err.Error()))
 		} else {
 			s.Logger.Debug("Repositioned to maintain Herald safe distance")
-			time.Sleep(100 * time.Millisecond) // Brief pause after reposition
+			utils.CombatSleep(100) // Brief pause after reposition
 		}
 	} else {
 		s.Logger.Warn("No safe position found for Herald distance enforcement")
@@ -776,7 +777,7 @@ func (s NovaSorceress) KillMonsterSequence(
 					s.Logger.Warn("Failed to reposition away from Herald", slog.String("error", err.Error()))
 				} else {
 					s.Logger.Info("Successfully repositioned away from Herald")
-					time.Sleep(200 * time.Millisecond)
+					utils.CombatSleep(200)
 				}
 			} else {
 				s.Logger.Warn("No safe position found from Herald, maintaining current position")
@@ -1079,7 +1080,7 @@ func (s NovaSorceress) KillDiablo() error {
 				return nil
 			}
 
-			time.Sleep(200 * time.Millisecond)
+			utils.CombatSleep(200)
 			continue
 		}
 

@@ -1324,7 +1324,7 @@ func (s *HttpServer) autoStartOnceInternal() error {
 }
 
 // AutoStartOnStartup triggers a one-off Auto Start sequence if it is enabled
-// in the global configuration. This is intended to be called when Koolo starts.
+// in the global configuration. This is intended to be called when the application starts.
 func (s *HttpServer) AutoStartOnStartup() {
 	if !config.Koolo.AutoStart.Enabled {
 		return

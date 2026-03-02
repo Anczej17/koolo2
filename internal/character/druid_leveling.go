@@ -171,7 +171,7 @@ func (s DruidLeveling) KillMonsterSequence(
 					if s.Data.PlayerUnit.Mode != mode.CastingSkill {
 						step.SecondaryAttack(secondaryAttackSkill, currentTargetID, 1, step.Distance(levelingminDistance, levelingmaxDistance))
 					} else {
-						time.Sleep(time.Millisecond * 50)
+						utils.CombatSleep(50)
 					}
 				}
 			} else {
@@ -624,7 +624,7 @@ func (s DruidLeveling) KillDiablo() error {
 				return nil
 			}
 			// Keep waiting..
-			time.Sleep(200 * time.Millisecond)
+			utils.CombatSleep(200)
 			continue
 		}
 

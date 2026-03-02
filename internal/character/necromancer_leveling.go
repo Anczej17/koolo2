@@ -656,7 +656,7 @@ func (n *NecromancerLeveling) killMonsterByName(id npc.ID, monsterType data.Mons
 			}
 			return m.UnitID, true
 		}, skipOnImmunities)
-		time.Sleep(time.Millisecond * 250)
+		utils.CombatSleep(250)
 	}
 }
 

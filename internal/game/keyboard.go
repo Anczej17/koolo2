@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/hectorgimenez/d2go/pkg/data"
+	"github.com/hectorgimenez/koolo/internal/utils"
 	"github.com/hectorgimenez/koolo/internal/utils/winproc"
 	"github.com/lxn/win"
 )
@@ -26,7 +27,7 @@ func (hid *HID) PressKey(key byte) {
 func (hid *HID) KeySequence(keysToPress ...byte) {
 	for _, key := range keysToPress {
 		hid.PressKey(key)
-		time.Sleep(200 * time.Millisecond)
+		time.Sleep(utils.Jitter(200, 25))
 	}
 }
 

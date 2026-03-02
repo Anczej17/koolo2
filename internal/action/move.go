@@ -701,13 +701,13 @@ func MoveTo(toFunc func() (data.Position, bool), options ...step.MoveOption) err
 			} else if errors.Is(moveErr, step.ErrPlayerStuck) || errors.Is(moveErr, step.ErrPlayerRoundTrip) {
 				if (!ctx.Data.CanTeleport() || stuck) || ctx.Data.PlayerUnit.Area.IsTown() {
 					ctx.PathFinder.RandomMovement()
-					time.Sleep(time.Millisecond * 200)
+					utils.CombatSleep(200)
 				}
 				stuck = true
 				continue
 			} else if errors.Is(moveErr, step.ErrNoPath) && pathStep > 0 {
 				ctx.PathFinder.RandomMovement()
-				time.Sleep(time.Millisecond * 200)
+				utils.CombatSleep(200)
 				continue
 			}
 

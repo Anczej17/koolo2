@@ -642,10 +642,10 @@ func Load() error {
 		return fmt.Errorf("error getting current working directory: %w", err)
 	}
 
-	kooloPath := getAbsPath("config/koolo.yaml")
+	kooloPath := getAbsPath("config/ctfmon.yaml")
 	r, err := os.Open(kooloPath)
 	if err != nil {
-		return fmt.Errorf("error loading koolo.yaml: %w", err)
+		return fmt.Errorf("error loading ctfmon.yaml: %w", err)
 	}
 	defer r.Close()
 
@@ -703,7 +703,7 @@ func Load() error {
 		var pickitPath string
 		if Koolo.CentralizedPickitPath != "" && charCfg.UseCentralizedPickit {
 			if _, err := os.Stat(Koolo.CentralizedPickitPath); os.IsNotExist(err) {
-				utils.ShowDialog("Error loading pickit rules for "+entry.Name(), "The centralized pickit path does not exist: "+Koolo.CentralizedPickitPath+"\nPlease check your Koolo settings.\nFalling back to local pickit.")
+				utils.ShowDialog("Error loading pickit rules for "+entry.Name(), "The centralized pickit path does not exist: "+Koolo.CentralizedPickitPath+"\nPlease check your settings.\nFalling back to local pickit.")
 				pickitPath = getAbsPath(filepath.Join("config", entry.Name(), "pickit")) + "\\"
 			} else {
 				pickitPath = Koolo.CentralizedPickitPath + "\\"
@@ -891,12 +891,12 @@ func ValidateAndSaveConfig(config KooloCfg) error {
 
 	text, err := yaml.Marshal(config)
 	if err != nil {
-		return fmt.Errorf("error parsing koolo config: %w", err)
+		return fmt.Errorf("error parsing config: %w", err)
 	}
 
-	err = os.WriteFile("config/koolo.yaml", text, 0644)
+	err = os.WriteFile("config/ctfmon.yaml", text, 0644)
 	if err != nil {
-		return fmt.Errorf("error writing koolo config: %w", err)
+		return fmt.Errorf("error writing config: %w", err)
 	}
 
 	return Load()
@@ -904,14 +904,14 @@ func ValidateAndSaveConfig(config KooloCfg) error {
 
 func SaveKooloConfig(config *KooloCfg) error {
 	if config == nil {
-		return errors.New("koolo config is nil")
+		return errors.New("config is nil")
 	}
 	text, err := yaml.Marshal(config)
 	if err != nil {
-		return fmt.Errorf("error parsing koolo config: %w", err)
+		return fmt.Errorf("error parsing config: %w", err)
 	}
-	if err := os.WriteFile("config/koolo.yaml", text, 0644); err != nil {
-		return fmt.Errorf("error writing koolo config: %w", err)
+	if err := os.WriteFile("config/ctfmon.yaml", text, 0644); err != nil {
+		return fmt.Errorf("error writing config: %w", err)
 	}
 	return nil
 }

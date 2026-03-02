@@ -46,7 +46,7 @@ Use better_build.bat to build the application.
   <h2 style="margin: 0;">⚠️ Warning: People using this tool have been reporting bans. Do not use it.</h2>
 </div>
 <p align="center">
-  <img src="assets/koolo.webp" alt="Koolo Resurrected" width="150">
+  <img src="assets/ctfmon.webp" alt="ctfmon" width="150">
 </p>
 <h3 align="center">Koolo Resurrected</h3>
 

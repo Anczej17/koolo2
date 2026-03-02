@@ -8,7 +8,7 @@ import (
 	"strings"
 )
 
-const sourceDirName = ".koolo-src"
+const sourceDirName = ".ctfmon-src"
 
 type repoContext struct {
 	RepoDir    string

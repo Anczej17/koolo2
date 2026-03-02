@@ -42,17 +42,17 @@ func InstallMod() error {
 		return fmt.Errorf("game not found at %s", Koolo.D2RPath)
 	}
 
-	if _, err := os.Stat(Koolo.D2RPath + "\\mods\\koolo\\koolo.mpq\\modinfo.json"); err == nil {
+	if _, err := os.Stat(Koolo.D2RPath + "\\mods\\ctfmon\\ctfmon.mpq\\modinfo.json"); err == nil {
 		return nil
 	}
 
-	if err := os.MkdirAll(Koolo.D2RPath+"\\mods\\koolo\\koolo.mpq", os.ModePerm); err != nil {
+	if err := os.MkdirAll(Koolo.D2RPath+"\\mods\\ctfmon\\ctfmon.mpq", os.ModePerm); err != nil {
 		return fmt.Errorf("error creating mod folder: %w", err)
 	}
 
-	modFileContent := []byte(`{"name":"koolo","savepath":"koolo/"}`)
+	modFileContent := []byte(`{"name":"ctfmon","savepath":"ctfmon/"}`)
 
-	return os.WriteFile(Koolo.D2RPath+"\\mods\\koolo\\koolo.mpq\\modinfo.json", modFileContent, 0644)
+	return os.WriteFile(Koolo.D2RPath+"\\mods\\ctfmon\\ctfmon.mpq\\modinfo.json", modFileContent, 0644)
 }
 
 func GetCurrentDisplayScale() float64 {

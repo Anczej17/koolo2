@@ -310,7 +310,7 @@ func (s WindDruid) KillDiablo() error {
 				return nil
 			}
 			// Keep waiting..
-			time.Sleep(200 * time.Millisecond)
+			utils.CombatSleep(200)
 			continue
 		}
 

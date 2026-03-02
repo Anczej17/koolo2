@@ -16,6 +16,7 @@ import (
 	"github.com/hectorgimenez/koolo/internal/action"
 	"github.com/hectorgimenez/koolo/internal/action/step"
 	"github.com/hectorgimenez/koolo/internal/context"
+t"github.com/hectorgimenez/koolo/internal/utils"
 	"github.com/hectorgimenez/koolo/internal/game"
 )
 
@@ -149,7 +150,7 @@ func (s BarbLeveling) KillMonsterSequence(
 			s.executeAttackBoss(id, monster.Name, hasDualOneHand, &lastHowlCast, &lastBattleCryCast, &lastWarCryCast, &lastBerserkCast, &leapAttackExecuted)
 			completedAttackLoops++
 			previousUnitID = int(id)
-			time.Sleep(time.Millisecond * 100)
+			utils.CombatSleep(100)
 			continue
 		}
 
@@ -176,7 +177,7 @@ func (s BarbLeveling) KillMonsterSequence(
 			s.executeAttackUnderLevel6(id, &lastHowlCast)
 			completedAttackLoops++
 			previousUnitID = int(id)
-			time.Sleep(time.Millisecond * 100)
+			utils.CombatSleep(100)
 			continue
 		}
 
@@ -194,7 +195,7 @@ func (s BarbLeveling) KillMonsterSequence(
 
 		completedAttackLoops++
 		previousUnitID = int(id)
-		time.Sleep(time.Millisecond * 100)
+		utils.CombatSleep(100)
 	}
 }
 
@@ -240,7 +241,7 @@ func (s BarbLeveling) killBoss(bossNPC npc.ID) error {
 
 		s.executeAttackBoss(boss.UnitID, bossNPC, hasDualOneHand, &lastHowlCast, &lastBattleCryCast, &lastWarCryCast, &lastBerserkCast, &leapAttackExecuted)
 
-		time.Sleep(time.Millisecond * 100)
+		utils.CombatSleep(100)
 	}
 }
 

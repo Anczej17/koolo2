@@ -227,7 +227,7 @@ func (b *Bot) handleListRequest(s *discordgo.Session, m *discordgo.MessageCreate
 
 func (b *Bot) handleHelpRequest(s *discordgo.Session, m *discordgo.MessageCreate) {
 	embed := &discordgo.MessageEmbed{
-		Title:       "🤖 Koolo Discord Bot Commands",
+		Title:       "Bot Commands",
 		Description: "Control and monitor your Diablo II bot supervisors",
 		Color:       0x5865F2,
 		Fields: []*discordgo.MessageEmbedField{

@@ -23,7 +23,7 @@ func StashFull() bool {
 
 	for _, tabIndex := range tabsToCheck {
 		SwitchStashTab(tabIndex)
-		time.Sleep(time.Millisecond * 500)
+		utils.TownSleep(500)
 		ctx.RefreshGameData()
 
 		sharedItems := ctx.Data.Inventory.ByLocation(item.LocationSharedStash)
@@ -287,7 +287,7 @@ func InRunReturnTownRoutine() error {
 
 	if ctx.CharacterCfg.Companion.Leader {
 		UsePortalInTown()
-		utils.Sleep(500)
+		utils.TownSleep(500)
 		return OpenTPIfLeader()
 	}
 
