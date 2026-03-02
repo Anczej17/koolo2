@@ -3,7 +3,6 @@ package action
 import (
 	"errors"
 	"fmt"
-	"time"
 
 	"github.com/hectorgimenez/d2go/pkg/data/item"
 	"github.com/hectorgimenez/d2go/pkg/data/skill"
