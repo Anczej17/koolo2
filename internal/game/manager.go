@@ -12,6 +12,7 @@ import (
 	"github.com/billgraziano/dpapi"
 	"github.com/hectorgimenez/d2go/pkg/data/difficulty"
 	"github.com/hectorgimenez/koolo/internal/config"
+	"github.com/hectorgimenez/koolo/internal/ntapi"
 	"github.com/hectorgimenez/koolo/internal/utils"
 	"github.com/hectorgimenez/koolo/internal/utils/winproc"
 	"github.com/lxn/win"
@@ -259,10 +260,10 @@ func closeWindowAndTerminateProcess(hwnd windows.HWND, pid uint32) {
 	time.Sleep(500 * time.Millisecond)
 
 	// Terminate the process
-	handle, err := windows.OpenProcess(windows.PROCESS_TERMINATE, false, pid)
+	handle, err := ntapi.OpenProcess(windows.PROCESS_TERMINATE, pid)
 	if err == nil {
 		windows.TerminateProcess(handle, 1)
-		windows.CloseHandle(handle)
+		ntapi.CloseHandle(handle)
 	}
 }
 

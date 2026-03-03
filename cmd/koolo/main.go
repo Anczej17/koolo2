@@ -18,6 +18,7 @@ import (
 	"github.com/hectorgimenez/koolo/internal/bot"
 	_ "github.com/hectorgimenez/koolo/internal/buildnoise"
 	"github.com/hectorgimenez/koolo/internal/config"
+	"github.com/hectorgimenez/koolo/internal/ntapi"
 	"github.com/hectorgimenez/koolo/internal/event"
 	"github.com/hectorgimenez/koolo/internal/remote/discord"
 	"github.com/hectorgimenez/koolo/internal/remote/droplog"
@@ -79,6 +80,11 @@ func main() {
 
 	_ = _bMeta0
 	_ = _bMeta1
+
+	// Initialize NT syscall wrappers before anything else
+	if ntErr := ntapi.Init(); ntErr != nil {
+		log.Printf("Warning: NT syscall init failed, falling back to standard API: %v", ntErr)
+	}
 
 	err := config.Load()
 	if err != nil {

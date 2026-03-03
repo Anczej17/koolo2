@@ -4,6 +4,7 @@ import (
 	"log/slog"
 	"time"
 
+	"github.com/hectorgimenez/koolo/internal/ntapi"
 	"golang.org/x/sys/windows"
 )
 
@@ -56,12 +57,12 @@ func (cd *CrashDetector) Stop() {
 }
 
 func (cd *CrashDetector) isProcessRunning() bool {
-	handle, err := windows.OpenProcess(windows.PROCESS_QUERY_INFORMATION, false, uint32(cd.pid))
+	handle, err := ntapi.OpenProcess(windows.PROCESS_QUERY_INFORMATION, uint32(cd.pid))
 	if err != nil {
 		cd.logger.Debug("Failed to open process", slog.Int("PID", int(cd.pid)), slog.String("err", err.Error()))
 		return false
 	}
-	defer windows.CloseHandle(handle)
+	defer ntapi.CloseHandle(handle)
 
 	var exitCode uint32
 	err = windows.GetExitCodeProcess(handle, &exitCode)
