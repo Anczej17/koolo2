@@ -226,7 +226,6 @@ func (s *SinglePlayerSupervisor) Start() error {
 			if err := DropRun.Run(nil); err != nil {
 				s.bot.ctx.Logger.Error("Drop run failed", "error", err)
 			}
-			timeSpentNotInGameStart = time.Now()
 			continue
 		}
 
@@ -312,16 +311,6 @@ func (s *SinglePlayerSupervisor) Start() error {
 			s.bot.ctx.Logger.Warn("Failed to dump armory data", slog.Any("error", err))
 		}
 
-		if config.Koolo.Debug.OpenOverlayMapOnGameStart {
-			automapKB := s.bot.ctx.Data.KeyBindings.Automap
-			if automapKB.Key1[0] != 0 || automapKB.Key2[0] != 0 {
-				s.bot.ctx.HID.PressKeyBinding(automapKB)
-				utils.PingSleep(utils.Light, 50)
-			} else {
-				s.bot.ctx.Logger.Debug("Open overlay map on game start is enabled, but no automap key binding is set")
-			}
-		}
-
 		if s.bot.ctx.Data.IsLevelingCharacter && s.bot.ctx.Data.ActiveWeaponSlot != 0 {
 			for attempt := 0; attempt < 3 && s.bot.ctx.Data.ActiveWeaponSlot != 0; attempt++ {
 				s.bot.ctx.HID.PressKeyBinding(s.bot.ctx.Data.KeyBindings.SwapWeapons)
@@ -354,8 +343,6 @@ func (s *SinglePlayerSupervisor) Start() error {
 				}
 			}
 		}
-
-		action.EnsureRunMode()
 
 		// Context with a timeout for the game itself
 		runCtx := ctx
@@ -430,8 +417,6 @@ func (s *SinglePlayerSupervisor) Start() error {
 
 					currentPos := s.bot.ctx.Data.PlayerUnit.Position
 					lastAction := s.bot.ctx.ContextDebug[s.bot.ctx.ExecutionPriority].LastAction
-
-					// Check for stat/skill allocation activities
 					isAllocating := lastAction == "AutoRespecIfNeeded" ||
 						lastAction == "EnsureStatPoints" ||
 						lastAction == "EnsureSkillPoints" ||
@@ -439,35 +424,6 @@ func (s *SinglePlayerSupervisor) Start() error {
 						lastAction == "AllocateStatPointPacket" ||
 						lastAction == "LearnSkillPacket"
 					if isAllocating && (s.bot.ctx.Data.OpenMenus.Character || s.bot.ctx.Data.OpenMenus.SkillTree || s.bot.ctx.Data.OpenMenus.Inventory) {
-						stuckSince = time.Time{}
-						droppedMouseItem = false
-						lastPosition = currentPos
-						continue
-					}
-
-					// Check for cube transmutation activities (player is stationary but actively working)
-					// Cube activities involve opening cube, stash, moving items between them
-					isCubing := lastAction == "CubeRecipes" || lastAction == "CubeAddItems" ||
-						lastAction == "SocketAddItems" || strings.Contains(lastAction, "Cube")
-					cubeMenuOpen := s.bot.ctx.Data.OpenMenus.Cube || s.bot.ctx.Data.OpenMenus.Stash
-					if isCubing && cubeMenuOpen {
-						stuckSince = time.Time{}
-						droppedMouseItem = false
-						lastPosition = currentPos
-						continue
-					}
-
-					// Also reset stuck timer if cube or stash is open (player might be actively managing items)
-					if s.bot.ctx.Data.OpenMenus.Cube {
-						stuckSince = time.Time{}
-						droppedMouseItem = false
-						lastPosition = currentPos
-						continue
-					}
-
-					// Check for gambling activities (player is stationary at vendor)
-					isGambling := lastAction == "Gamble" || lastAction == "GambleSingleItem" || lastAction == "gambleItems"
-					if isGambling && s.bot.ctx.Data.OpenMenus.NPCShop {
 						stuckSince = time.Time{}
 						droppedMouseItem = false
 						lastPosition = currentPos
@@ -527,7 +483,6 @@ func (s *SinglePlayerSupervisor) Start() error {
 				s.bot.ctx.Logger.Info("Drop interrupt received. Exiting game and restarting loop.")
 				s.bot.ctx.Manager.ExitGame()
 				utils.Sleep(2000)
-				timeSpentNotInGameStart = time.Now()
 				continue
 			}
 			if errors.Is(err, context.DeadlineExceeded) {

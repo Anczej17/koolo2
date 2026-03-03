@@ -296,18 +296,7 @@ func (d Drop) dropStashItems(ctx *context.Status) (int, error) {
 		maxItemRetries = 2
 		maxTotalTime   = 3 * time.Minute
 	)
-	// Build stash tabs array dynamically based on SharedStashPages
-	// Non-DLC: personal (1) + 3 shared (2-4) = [1,2,3,4]
-	// DLC: personal (1) + 5 shared (2-6) = [1,2,3,4,5,6]
-	sharedPages := ctx.Data.Inventory.SharedStashPages
-	if sharedPages == 0 {
-		sharedPages = 3 // Fallback
-	}
-	stashTabs := make([]int, 1+sharedPages)
-	stashTabs[0] = 1 // Personal tab
-	for i := 0; i < sharedPages; i++ {
-		stashTabs[i+1] = i + 2 // Shared tabs start at 2
-	}
+	stashTabs := []int{1, 2, 3, 4}
 
 	startTime := time.Now()
 	for pass := 0; pass < maxPasses; pass++ {

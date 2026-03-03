@@ -157,6 +157,19 @@ func (a Andariel) Run(parameters *RunParameters) error {
 		}
 	}
 
+	// Always start the run with antidote potions when configured or leveling.
+	if useAntidotes {
+		if !a.ctx.Data.PlayerUnit.Area.IsTown() {
+			if err := action.ReturnTown(); err != nil {
+				return err
+			}
+		}
+		mercAlive := a.ctx.Data.MercHPPercent() > 0
+		if err := a.buyAndDrinkAntidotePotions(mercAlive); err != nil {
+			return err
+		}
+	}
+
 	a.ctx.Logger.Info("Moving to Catacombs 4")
 	err := action.WayPoint(area.CatacombsLevel2)
 	if err != nil {
@@ -167,20 +180,6 @@ func (a Andariel) Run(parameters *RunParameters) error {
 	action.MoveToArea(area.CatacombsLevel4)
 	if err != nil {
 		return err
-	}
-
-	// Buy and consume antidotes right after entering Catacombs 4.
-	if useAntidotes {
-		if err := action.ReturnTown(); err != nil {
-			return err
-		}
-		mercAlive := a.ctx.Data.MercHPPercent() > 0
-		if err := a.buyAndDrinkAntidotePotions(mercAlive); err != nil {
-			return err
-		}
-		if err := action.UsePortalInTown(); err != nil {
-			return err
-		}
 	}
 
 	// Regular characters use the simpler clear pathing, leveling uses the robust variant.

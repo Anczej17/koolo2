@@ -66,6 +66,8 @@ func BuildRun(run string) Run {
 		return NewAndariel()
 	case string(config.SummonerRun):
 		return NewSummoner()
+	case string(config.ArcaneSanctuaryRun):
+		return NewArcaneSanctuary()
 	case string(config.DurielRun):
 		return NewDuriel()
 	case string(config.MuleRun):
@@ -138,6 +140,17 @@ func BuildRun(run string) Run {
 		return NewRakanishu()
 	case string(config.ShoppingRun):
 		return NewShopping()
+	// Act Full Clear Runs
+	case string(config.Act1Run):
+		return NewAct1()
+	case string(config.Act2Run):
+		return NewAct2()
+	case string(config.Act3Run):
+		return NewAct3()
+	case string(config.Act4Run):
+		return NewAct4()
+	case string(config.Act5Run):
+		return NewAct5()
 	//Quests Runs
 	case string(config.DenRun):
 		return NewDen()
