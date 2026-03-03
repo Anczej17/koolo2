@@ -16,6 +16,7 @@ import (
 
 	sloggger "github.com/hectorgimenez/koolo/cmd/koolo/log"
 	"github.com/hectorgimenez/koolo/internal/bot"
+	_ "github.com/hectorgimenez/koolo/internal/buildnoise"
 	"github.com/hectorgimenez/koolo/internal/config"
 	"github.com/hectorgimenez/koolo/internal/event"
 	"github.com/hectorgimenez/koolo/internal/remote/discord"

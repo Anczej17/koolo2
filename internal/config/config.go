@@ -654,7 +654,7 @@ func DefaultModName() string {
 	if Koolo != nil && Koolo.ModName != "" {
 		return Koolo.ModName
 	}
-	return "ctfmon"
+	return generateModName()
 }
 
 // DefaultHttpPort returns the configured HTTP port.
@@ -662,7 +662,7 @@ func DefaultHttpPort() int {
 	if Koolo != nil && Koolo.HttpPort != 0 {
 		return Koolo.HttpPort
 	}
-	return 8087
+	return generateHttpPort()
 }
 
 func Load() error {
