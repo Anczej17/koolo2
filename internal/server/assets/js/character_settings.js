@@ -1477,8 +1477,8 @@ document.addEventListener('DOMContentLoaded', function () {
     const levelingSequenceAddBtn = document.getElementById('levelingSequenceAddBtn');
     const levelingSequenceEditBtn = document.getElementById('levelingSequenceEditBtn');
     const levelingSequenceDeleteBtn = document.getElementById('levelingSequenceDeleteBtn');
-    const LAST_SEQUENCE_KEY = 'koolo:lastSequenceName';
-    const REFRESH_FLAG_KEY = 'koolo:sequenceRefreshRequired';
+    const LAST_SEQUENCE_KEY = 'app:lastSequenceName';
+    const REFRESH_FLAG_KEY = 'app:sequenceRefreshRequired';
     const sequenceFilesEndpoint = '/api/sequence-editor/files';
     const sequenceDeleteEndpoint = '/api/sequence-editor/delete';
 
@@ -1670,7 +1670,7 @@ document.addEventListener('DOMContentLoaded', function () {
     const hoverToggle = document.getElementById('navHoverToggle');
     const hoverToggleIcon = document.getElementById('navHoverToggleIcon');
     const hoverToggleText = document.getElementById('navHoverToggleText');
-    const HOVER_EXPAND_KEY = 'koolo:navHoverExpand';
+    const HOVER_EXPAND_KEY = 'app:navHoverExpand';
 
     if (navContainer && hoverToggle) {
         const updateHoverToggleUI = (enabled) => {

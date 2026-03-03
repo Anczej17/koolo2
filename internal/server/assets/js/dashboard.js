@@ -517,10 +517,10 @@ function maybeShowAutoStartPrompt(data) {
   // even if navigation/back-forward causes the dashboard to be
   // reloaded.
   try {
-    if (sessionStorage.getItem("kooloAutoStartPromptShown") === "true") {
+    if (sessionStorage.getItem("autoStartPromptShown") === "true") {
       return;
     }
-    sessionStorage.setItem("kooloAutoStartPromptShown", "true");
+    sessionStorage.setItem("autoStartPromptShown", "true");
   } catch (e) {
     // If sessionStorage is not available for any reason, we just
     // fall back to showing the prompt based solely on the backend

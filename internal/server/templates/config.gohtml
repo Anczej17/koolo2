@@ -6,7 +6,7 @@
     <meta name="color-scheme" content="light dark"/>
     <link rel="stylesheet" href="../assets/css/pico.min.css">
     <link rel="stylesheet" href="../assets/css/custom.css">
-    <title>Koolo Resurrected Settings</title>
+    <title>Settings</title>
     <style>
         :root {
             /* Primary Colors */
@@ -663,9 +663,9 @@
                     <div style="font-weight: 700; color: var(--text-primary); margin-bottom: 4px;">Auto Update</div>
                     <ul style="margin: 6px 0 12px 18px; color: #c9ced8;">
                         <li>Updates run only when all supervisors are inactive.</li>
-                        <li>Compares your local repository with kwader2k/koolo:main and merges when updates are available.</li>
-                        <li>If conflicts occur, local changes are discarded and kwader2k/koolo:main is applied.</li>
-                        <li>If no local repository is found, the updater clones kwader2k/koolo for use.</li>
+                        <li>Compares your local repository with upstream:main and merges when updates are available.</li>
+                        <li>If conflicts occur, local changes are discarded and upstream:main is applied.</li>
+                        <li>If no local repository is found, the updater clones upstream for use.</li>
                     </ul>
                     <div style="font-weight: 700; color: var(--text-primary); margin-bottom: 4px;">PR Application</div>
                     <ul style="margin: 6px 0 12px 18px; color: #c9ced8;">
@@ -699,7 +699,7 @@
                                 {{ if .CurrentVersion }}
                                 {{ .CurrentVersion.CommitMsg }}
                                 {{ else }}
-                                Click "Check Updates" to create a .koolo-src Git clone based on the latest commits from kwader2k/koolo.
+                                Click "Check Updates" to create a .app-src Git clone based on the latest commits from upstream.
                                 {{ end }}
                             </div>
                         </div>
@@ -1065,7 +1065,7 @@ document.addEventListener("DOMContentLoaded", function () {
                 updateCurrentVersionUI(data.currentVersion);
             }
 
-            const statusSuffix = ` of and ${behind} commit(s) behind kwader2k/koolo:main.`;
+            const statusSuffix = ` of and ${behind} commit(s) behind upstream:main.`;
             if (ahead > 0) {
                 statusDiv.innerHTML = `Current version is <button type="button" id="ahead-commits-toggle" aria-expanded="false" style="background: var(--bg-primary); border: 1px solid var(--border-color); color: var(--text-primary); padding: 2px 8px; border-radius: var(--radius-sm); cursor: pointer; font-weight: 600;">${ahead} commit(s) ahead</button>${statusSuffix}`;
             } else {
@@ -1151,7 +1151,7 @@ document.addEventListener("DOMContentLoaded", function () {
         const mode = opts.mode || 'update';
         const source = opts.source || '';
         const actionLabel = mode === 'build' ? 'Build' : 'Update';
-        const confirmMessage = opts.confirmMessage || 'This will update Koolo to the latest version. Continue?';
+        const confirmMessage = opts.confirmMessage || 'This will update to the latest version. Continue?';
         const skipConfirm = opts.skipConfirm === true;
         const manageButton = opts.manageButton !== false;
         const isUpdateMode = mode === 'update';
@@ -1416,7 +1416,7 @@ document.addEventListener("DOMContentLoaded", function () {
     let selectedPRs = new Set();
     window.loadUpstreamPRs = async function() {
         const prList = document.getElementById('pr-list');
-        const prInfo = '<div id="pr-info" style="color: var(--accent-blue); font-weight: 700; margin-bottom: var(--spacing-sm);">Select PR to apply to your Koolo. Conflicting PRs will be skipped automatically.</div>';
+        const prInfo = '<div id="pr-info" style="color: var(--accent-blue); font-weight: 700; margin-bottom: var(--spacing-sm);">Select PR to apply to your instance. Conflicting PRs will be skipped automatically.</div>';
         const prActions = document.getElementById('pr-actions');
 
         prList.innerHTML = '<div style="color: var(--text-secondary); text-align: center; padding: var(--spacing-lg);">Loading pull requests...</div>';
@@ -1448,7 +1448,7 @@ document.addEventListener("DOMContentLoaded", function () {
                     const createdDate = new Date(pr.created_at).toLocaleDateString();
 
                     const appliedBadge = pr.applied ? `<span style="font-size: 0.72em; font-weight: 700; color: var(--accent-green); border: 1px solid var(--accent-green); padding: 2px 6px; border-radius: 999px; letter-spacing: 0.2px;">Applied</span>` : '';
-                    const openButton = `<a href="https://github.com/kwader2k/koolo/pull/${pr.number}" target="_blank" rel="noopener noreferrer" style="background: var(--bg-hover); border: 1px solid var(--border-color); color: var(--text-primary); padding: 6px 12px; border-radius: var(--radius-sm); text-decoration: none; font-weight: 600; white-space: nowrap;">Open</a>`;
+                    const openButton = `<a href="https://github.com/upstream/pull/${pr.number}" target="_blank" rel="noopener noreferrer" style="background: var(--bg-hover); border: 1px solid var(--border-color); color: var(--text-primary); padding: 6px 12px; border-radius: var(--radius-sm); text-decoration: none; font-weight: 600; white-space: nowrap;">Open</a>`;
                     const revertButton = pr.canRevert ? `<button type="button" onclick="revertPR(${pr.number})" style="background: var(--bg-tertiary); border: 1px solid var(--accent-pink); color: var(--accent-pink); padding: 6px 12px; border-radius: var(--radius-sm); cursor: pointer; font-weight: 600; white-space: nowrap; margin-bottom: 0px;">Revert</button>` : '';
                     const prActionsMarkup = `
                         <div style="display: flex; gap: 8px; align-items: center; justify-content: flex-end; flex-wrap: wrap;">
@@ -1580,8 +1580,8 @@ document.addEventListener("DOMContentLoaded", function () {
                 performUpdate({
                     mode: 'build',
                     confirmMessage: restartAfter
-                        ? 'This will build and restart Koolo after revert. Continue?'
-                        : 'This will build Koolo after revert. Continue?',
+                        ? 'This will build and restart after revert. Continue?'
+                        : 'This will build after revert. Continue?',
                     skipConfirm: true,
                     manageButton: false,
                     autoRestart: restartAfter,
@@ -1710,8 +1710,8 @@ document.addEventListener("DOMContentLoaded", function () {
                     performUpdate({
                         mode: 'build',
                         confirmMessage: restartAfter
-                            ? 'This will build and restart Koolo with the applied PRs. Continue?'
-                            : 'This will build Koolo with the applied PRs. Continue?',
+                            ? 'This will build and restart with the applied PRs. Continue?'
+                            : 'This will build with the applied PRs. Continue?',
                         skipConfirm: true,
                         manageButton: false,
                         autoRestart: restartAfter,

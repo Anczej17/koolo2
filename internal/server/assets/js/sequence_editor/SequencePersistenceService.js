@@ -181,8 +181,8 @@ export class SequencePersistenceService {
       if (!window.localStorage) {
         return;
       }
-      window.localStorage.setItem("koolo:lastSequenceName", name);
-      window.localStorage.setItem("koolo:sequenceRefreshRequired", "1");
+      window.localStorage.setItem("app:lastSequenceName", name);
+      window.localStorage.setItem("app:sequenceRefreshRequired", "1");
     } catch (error) {
       console.warn("Unable to store sequence refresh state", error);
     }

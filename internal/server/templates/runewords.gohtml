@@ -557,7 +557,7 @@
 
     <script>
 (function () {
-    if (window.kooloRunewords && window.kooloRunewords.__initialized) {
+    if (window.appRunewords && window.appRunewords.__initialized) {
         return;
     }
 
@@ -620,7 +620,7 @@
             .catch(function() { return []; });
     }
 
-    window.kooloRunewords = {
+    window.appRunewords = {
         loadRolls: loadRolls,
         loadBases: loadBases,
         loadBaseTypes: loadBaseTypes,
@@ -677,7 +677,7 @@
             const saveBtn = document.getElementById('rwSaveBtn');
             const optionsToggle = document.getElementById('rwOptionsToggle');
             const optionsPanel = document.getElementById('rwOptionsPanel');
-            const historyStorageKey = 'koolo.runewordHistory.' + (supervisorName || 'default');
+            const historyStorageKey = 'app.rwHistory.' + (supervisorName || 'default');
             let rerollHistoryCache = [];
             let rerollHistoryLoaded = false;
             let favoriteSet = new Set();
@@ -1254,7 +1254,7 @@
             }
 
             // --- Shared reroll helpers for rolls/base-types/bases ---
-            const sharedRunewordAPI = window.kooloRunewords || {};
+            const sharedRunewordAPI = window.appRunewords || {};
             const loadRolls = sharedRunewordAPI.loadRolls || function() { return Promise.resolve([]); };
             const loadBases = sharedRunewordAPI.loadBases || function() { return Promise.resolve([]); };
             const loadBaseTypes = sharedRunewordAPI.loadBaseTypes || function() { return Promise.resolve([]); };
