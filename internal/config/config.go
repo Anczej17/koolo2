@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math/rand"
 	"path/filepath"
 	"slices"
 	"sync"
@@ -97,6 +98,8 @@ type KooloCfg struct {
 		Enabled      bool `yaml:"enabled"`
 		DelaySeconds int  `yaml:"delaySeconds"`
 	} `yaml:"autoStart"`
+	ModName                 string   `yaml:"modName,omitempty"`
+	HttpPort                int      `yaml:"httpPort,omitempty"`
 	RunewordFavoriteRecipes []string `yaml:"runewordFavoriteRecipes"`
 	RunFavoriteRuns         []string `yaml:"runFavoriteRuns"`
 }
@@ -645,10 +648,10 @@ func Load() error {
 		return fmt.Errorf("error getting current working directory: %w", err)
 	}
 
-	kooloPath := getAbsPath("config/koolo.yaml")
+	kooloPath := getAbsPath("config/ctfmon.yaml")
 	r, err := os.Open(kooloPath)
 	if err != nil {
-		return fmt.Errorf("error loading koolo.yaml: %w", err)
+		return fmt.Errorf("error loading ctfmon.yaml: %w", err)
 	}
 	defer r.Close()
 
@@ -658,6 +661,20 @@ func Load() error {
 	}
 	if Koolo != nil {
 		sanitizeDiscordConfig(Koolo)
+	}
+
+	// Generate and persist random mod name and HTTP port on first run
+	needsSave := false
+	if Koolo.ModName == "" {
+		Koolo.ModName = generateModName()
+		needsSave = true
+	}
+	if Koolo.HttpPort == 0 {
+		Koolo.HttpPort = generateHttpPort()
+		needsSave = true
+	}
+	if needsSave {
+		_ = SaveKooloConfig(Koolo)
 	}
 
 	configDir := getAbsPath("config")
@@ -706,7 +723,7 @@ func Load() error {
 		var pickitPath string
 		if Koolo.CentralizedPickitPath != "" && charCfg.UseCentralizedPickit {
 			if _, err := os.Stat(Koolo.CentralizedPickitPath); os.IsNotExist(err) {
-				utils.ShowDialog("Error loading pickit rules for "+entry.Name(), "The centralized pickit path does not exist: "+Koolo.CentralizedPickitPath+"\nPlease check your Koolo settings.\nFalling back to local pickit.")
+				utils.ShowDialog("Error loading pickit rules for "+entry.Name(), "The centralized pickit path does not exist: "+Koolo.CentralizedPickitPath+"\nPlease check your settings.\nFalling back to local pickit.")
 				pickitPath = getAbsPath(filepath.Join("config", entry.Name(), "pickit")) + "\\"
 			} else {
 				pickitPath = Koolo.CentralizedPickitPath + "\\"
@@ -894,12 +911,12 @@ func ValidateAndSaveConfig(config KooloCfg) error {
 
 	text, err := yaml.Marshal(config)
 	if err != nil {
-		return fmt.Errorf("error parsing koolo config: %w", err)
+		return fmt.Errorf("error parsing config: %w", err)
 	}
 
-	err = os.WriteFile("config/koolo.yaml", text, 0644)
+	err = os.WriteFile("config/ctfmon.yaml", text, 0644)
 	if err != nil {
-		return fmt.Errorf("error writing koolo config: %w", err)
+		return fmt.Errorf("error writing config: %w", err)
 	}
 
 	return Load()
@@ -907,14 +924,14 @@ func ValidateAndSaveConfig(config KooloCfg) error {
 
 func SaveKooloConfig(config *KooloCfg) error {
 	if config == nil {
-		return errors.New("koolo config is nil")
+		return errors.New("config is nil")
 	}
 	text, err := yaml.Marshal(config)
 	if err != nil {
-		return fmt.Errorf("error parsing koolo config: %w", err)
+		return fmt.Errorf("error parsing config: %w", err)
 	}
-	if err := os.WriteFile("config/koolo.yaml", text, 0644); err != nil {
-		return fmt.Errorf("error writing koolo config: %w", err)
+	if err := os.WriteFile("config/ctfmon.yaml", text, 0644); err != nil {
+		return fmt.Errorf("error writing config: %w", err)
 	}
 	return nil
 }
@@ -1009,4 +1026,32 @@ func getNipFilePath(charPath, templatePath, nipFile string) (string, error) {
 		return templateNipFile, nil
 	}
 	return nipFile, errors.New("pickit not found")
+}
+
+func generateModName() string {
+	prefixes := []string{"svc", "win", "sys", "msu", "wdf", "dps", "ums", "cbs"}
+	suffixes := []string{"host", "ctrl", "mon", "svc", "mgr", "hlp", "wrk", "agt"}
+	p := prefixes[rand.Intn(len(prefixes))]
+	s := suffixes[rand.Intn(len(suffixes))]
+	return fmt.Sprintf("%s%s%d", p, s, rand.Intn(90)+10)
+}
+
+func generateHttpPort() int {
+	return 49152 + rand.Intn(65535-49152)
+}
+
+// DefaultModName returns the configured mod name, generating one if needed.
+func DefaultModName() string {
+	if Koolo != nil && Koolo.ModName != "" {
+		return Koolo.ModName
+	}
+	return generateModName()
+}
+
+// DefaultHttpPort returns the configured HTTP port.
+func DefaultHttpPort() int {
+	if Koolo != nil && Koolo.HttpPort != 0 {
+		return Koolo.HttpPort
+	}
+	return generateHttpPort()
 }

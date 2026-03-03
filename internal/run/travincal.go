@@ -2,15 +2,18 @@ package run
 
 import (
 	"errors"
+	"log/slog"
 
 	"github.com/hectorgimenez/d2go/pkg/data"
 	"github.com/hectorgimenez/d2go/pkg/data/area"
+	"github.com/hectorgimenez/d2go/pkg/data/npc"
 	"github.com/hectorgimenez/d2go/pkg/data/object"
 	"github.com/hectorgimenez/d2go/pkg/data/quest"
 	"github.com/hectorgimenez/koolo/internal/action"
 	"github.com/hectorgimenez/koolo/internal/character"
 	"github.com/hectorgimenez/koolo/internal/config"
 	"github.com/hectorgimenez/koolo/internal/context"
+	"github.com/hectorgimenez/koolo/internal/game"
 	"github.com/hectorgimenez/koolo/internal/utils"
 )
 
@@ -61,12 +64,69 @@ func (t *Travincal) Run(parameters *RunParameters) error {
 	//TODO This is temporary needed for barb because have no cta; isrebuffrequired not working for him. We have ActiveWeaponSlot in d2go ready for that
 	action.Buff()
 
+	if !IsQuestRun(parameters) {
+		// Blacklist the entrance to durance of hate level 1 to prevent accidental entry
+		for _, al := range t.ctx.Data.AdjacentLevels {
+			if al.Area == area.DuranceOfHateLevel1 {
+				entranceWorldPos := al.Position
+				relativePos := t.ctx.Data.AreaData.Grid.RelativePosition(entranceWorldPos)
+
+				if relativePos.X < 0 || relativePos.X >= t.ctx.Data.AreaData.Grid.Width ||
+					relativePos.Y < 0 || relativePos.Y >= t.ctx.Data.AreaData.Grid.Height {
+					t.ctx.Logger.Warn("Durance of Hate entrance is outside grid bounds",
+						slog.Any("worldPosition", entranceWorldPos),
+						slog.Any("gridPosition", relativePos))
+					break
+				}
+
+				blacklistRadius := 3
+				for dx := -blacklistRadius; dx <= blacklistRadius; dx++ {
+					for dy := -blacklistRadius; dy <= blacklistRadius; dy++ {
+						x := relativePos.X + dx
+						y := relativePos.Y + dy
+						if x >= 0 && x < t.ctx.Data.AreaData.Grid.Width &&
+							y >= 0 && y < t.ctx.Data.AreaData.Grid.Height {
+							t.ctx.Data.AreaData.Grid.Set(x, y, game.CollisionTypeNonWalkable)
+						}
+					}
+				}
+				t.ctx.Logger.Debug("Blacklisted Durance of Hate entrance",
+					slog.Any("worldPosition", entranceWorldPos),
+					slog.Int("radius", blacklistRadius))
+				break
+			}
+		}
+	}
+
 	councilPosition := t.findCouncilPosition()
 
 	err = action.MoveToCoords(councilPosition)
 	if err != nil {
 		t.ctx.Logger.Warn("Error moving to council area", "error", err)
 		return err
+	}
+
+	// If the council is not found, try alternate position
+	monsterNPCs := []npc.ID{npc.CouncilMember, npc.CouncilMember2, npc.CouncilMember3}
+	found := false
+	for _, npcID := range monsterNPCs {
+		_, found = t.ctx.Data.NPCs.FindOne(npcID)
+		if found {
+			break
+		}
+	}
+	if !found {
+		t.ctx.Logger.Warn("Council not found at initial position, trying alternate position")
+		compellingOrb, foundOrb := t.ctx.Data.Objects.FindOne(object.CompellingOrb)
+		if foundOrb {
+			err = action.MoveToCoords(compellingOrb.Position)
+			if err != nil {
+				t.ctx.Logger.Warn("Error moving to alternate council area", "error", err)
+				return err
+			}
+		} else {
+			return errors.New("council not found and compelling orb not found for alternate position")
+		}
 	}
 
 	if err := t.ctx.Char.KillCouncil(); err != nil {
@@ -123,7 +183,7 @@ func (t *Travincal) findCouncilPosition() data.Position {
 		if al.Area == area.DuranceOfHateLevel1 {
 			return data.Position{
 				X: al.Position.X - 1,
-				Y: al.Position.Y + 3,
+				Y: al.Position.Y + 4,
 			}
 		}
 	}

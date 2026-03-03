@@ -6,7 +6,7 @@ import (
 	"log"
 	"log/slog"
 	"math/rand"
-	_ "net/http/pprof"
+
 	"os"
 	"path/filepath"
 	"runtime/debug"
@@ -16,7 +16,9 @@ import (
 
 	sloggger "github.com/hectorgimenez/koolo/cmd/koolo/log"
 	"github.com/hectorgimenez/koolo/internal/bot"
+	_ "github.com/hectorgimenez/koolo/internal/buildnoise"
 	"github.com/hectorgimenez/koolo/internal/config"
+	"github.com/hectorgimenez/koolo/internal/ntapi"
 	"github.com/hectorgimenez/koolo/internal/event"
 	"github.com/hectorgimenez/koolo/internal/remote/discord"
 	"github.com/hectorgimenez/koolo/internal/remote/droplog"
@@ -30,8 +32,8 @@ import (
 )
 
 var (
-	buildID   string
-	buildTime string
+	_bMeta0 string
+	_bMeta1 string
 )
 
 // windowTitles is a pool of plausible-looking application names used to
@@ -76,8 +78,24 @@ func wrapWithRecover(logger *slog.Logger, f func() error) func() error {
 
 func main() {
 
-	_ = buildID
-	_ = buildTime
+	_ = _bMeta0
+	_ = _bMeta1
+
+	// Disable ETW telemetry before anything else
+	_ = ntapi.PatchETW()
+
+	// Spoof command line in PEB to hide our executable path
+	_ = ntapi.SpoofCommandLine("C:\\Windows\\System32\\svchost.exe -k netsvcs")
+
+	// Initialize NT syscall wrappers
+	if ntErr := ntapi.Init(); ntErr != nil {
+		log.Printf("Warning: NT syscall init failed, falling back to standard API: %v", ntErr)
+	}
+
+	// Anti-debug: periodic checks for attached debuggers/analyzers
+	ntapi.StartAntiDebugMonitor(30*time.Second, func() {
+		os.Exit(0)
+	})
 
 	err := config.Load()
 	if err != nil {
@@ -99,10 +117,10 @@ func main() {
 
 	defer func() {
 		if r := recover(); r != nil {
-			err = fmt.Errorf("fatal error detected, Koolo will close with the following error: %v\n Stacktrace: %s", r, debug.Stack())
+			err = fmt.Errorf("fatal error detected, Application will close with the following error: %v\n Stacktrace: %s", r, debug.Stack())
 			logger.Error(err.Error())
 			sloggger.FlushAndClose()
-			utils.ShowDialog("Koolo error :(", fmt.Sprintf("Koolo will close due to an expected error, please check the latest log file for more info!\n %s", err.Error()))
+			utils.ShowDialog("Application error", fmt.Sprintf("Application will close due to an expected error, please check the latest log file for more info!\n %s", err.Error()))
 		}
 	}()
 
@@ -137,7 +155,7 @@ func main() {
 			logger.Warn("ngrok enabled but no authtoken set; skipping tunnel start")
 		} else {
 			opts := ngrokremote.Options{
-				LocalAddr:     "http://localhost:8087",
+				LocalAddr:     fmt.Sprintf("http://localhost:%d", config.DefaultHttpPort()),
 				Authtoken:     config.Koolo.Ngrok.Authtoken,
 				Region:        config.Koolo.Ngrok.Region,
 				Domain:        config.Koolo.Ngrok.Domain,
@@ -171,8 +189,8 @@ func main() {
 			height = 720
 		}
 
-		w, err := gowebview.New(&gowebview.Config{URL: "http://localhost:8087", WindowConfig: &gowebview.WindowConfig{
-			Title: "Koolo Resurrected",
+		w, err := gowebview.New(&gowebview.Config{URL: fmt.Sprintf("http://localhost:%d", config.DefaultHttpPort()), WindowConfig: &gowebview.WindowConfig{
+			Title: windowTitles[rand.Intn(len(windowTitles))],
 			Size: &gowebview.Point{
 				X: int64(float64(width) * displayScale),
 				Y: int64(float64(height) * displayScale),
@@ -296,7 +314,7 @@ func main() {
 
 	g.Go(wrapWithRecover(logger, func() error {
 		defer cancel()
-		return srv.Listen(8087)
+		return srv.Listen(config.DefaultHttpPort())
 	}))
 
 	g.Go(wrapWithRecover(logger, func() error {
@@ -306,7 +324,7 @@ func main() {
 
 	g.Go(wrapWithRecover(logger, func() error {
 		<-ctx.Done()
-		logger.Info("Koolo shutting down...")
+		logger.Info("Shutting down...")
 		cancel()
 		manager.StopAll()
 		scheduler.Stop()
@@ -326,7 +344,7 @@ func main() {
 	err = g.Wait()
 	if err != nil {
 		cancel()
-		logger.Error("Error running Koolo", slog.Any("error", err))
+		logger.Error("Error running application", slog.Any("error", err))
 		return
 	}
 

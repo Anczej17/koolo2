@@ -290,7 +290,32 @@ func MoveTo(dest data.Position, options ...MoveOption) error {
 
 		if currentPosition == previousPosition && !ctx.Data.PlayerUnit.States.HasState(state.Stunned) {
 			stuckTime := time.Since(stuckCheckStartTime)
-			if stuckTime > stuckThreshold {
+			// Check if player is adjacent to a wall - use more aggressive stuck detection
+			isAdjacentToWall := false
+			if ctx.Data.AreaData.Grid != nil {
+				for dx := -1; dx <= 1; dx++ {
+					for dy := -1; dy <= 1; dy++ {
+						if dx == 0 && dy == 0 {
+							continue
+						}
+						checkPos := data.Position{X: currentPosition.X + dx, Y: currentPosition.Y + dy}
+						if !ctx.Data.AreaData.IsWalkable(checkPos) {
+							isAdjacentToWall = true
+							break
+						}
+					}
+					if isAdjacentToWall {
+						break
+					}
+				}
+			}
+
+			effectiveStuckThreshold := stuckThreshold
+			if isAdjacentToWall {
+				effectiveStuckThreshold = stuckThreshold / 2
+			}
+
+			if stuckTime > effectiveStuckThreshold {
 				//if stuck for too long, abort movement
 				return ErrPlayerStuck
 			} else if stuckTime > blockThreshold {
@@ -313,7 +338,7 @@ func MoveTo(dest data.Position, options ...MoveOption) error {
 				ctx.HID.Click(game.LeftButton, x, y)
 
 				// Adaptive delay for obstacle interaction based on ping
-				time.Sleep(time.Millisecond * time.Duration(utils.PingMultiplier(utils.Light, 100)))
+				utils.HumanSleep(utils.PingMultiplier(utils.Light, 100))
 			} else if door, found := ctx.PathFinder.GetClosestDoor(ctx.Data.PlayerUnit.Position); found {
 				//There's a door really close, try to open it
 				doorToOpen := *door
@@ -321,6 +346,10 @@ func MoveTo(dest data.Position, options ...MoveOption) error {
 					door, found := ctx.Data.Objects.FindByID(door.ID)
 					return found && !door.Selectable
 				})
+			} else {
+				// No destructible/door found, try to escape wall-stuck
+				ctx.PathFinder.RandomMovement()
+				utils.HumanSleep(200)
 			}
 		}
 

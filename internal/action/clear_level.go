@@ -117,7 +117,7 @@ func clearRoom(room data.Room, filter data.MonsterFilter) error {
 	ctx.SetLastAction("clearRoom")
 
 	const (
-		maxRoomCenterAttempts  = 2              // Max attempts to reach room center (reduced from 3)
+		maxRoomCenterAttempts  = 3              // Max attempts to reach room center
 		maxClearIterations     = 50             // Safety limit: max monster kill iterations per room
 		stuckPositionThreshold = 5              // If in same position for this many iterations, we're stuck
 		stuckTimeoutSeconds    = 60             // If position doesn't change for 60s, skip room
