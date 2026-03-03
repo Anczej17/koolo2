@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"log"
 	"log/slog"
-	_ "net/http/pprof"
+
 	"os"
 	"path/filepath"
 	"runtime/debug"
@@ -111,7 +111,7 @@ func main() {
 			logger.Warn("ngrok enabled but no authtoken set; skipping tunnel start")
 		} else {
 			opts := ngrokremote.Options{
-				LocalAddr:     "http://localhost:8087",
+				LocalAddr:     fmt.Sprintf("http://localhost:%d", config.DefaultHttpPort()),
 				Authtoken:     config.Koolo.Ngrok.Authtoken,
 				Region:        config.Koolo.Ngrok.Region,
 				Domain:        config.Koolo.Ngrok.Domain,
@@ -145,7 +145,7 @@ func main() {
 			height = 720
 		}
 
-		w, err := gowebview.New(&gowebview.Config{URL: "http://localhost:8087", WindowConfig: &gowebview.WindowConfig{
+		w, err := gowebview.New(&gowebview.Config{URL: fmt.Sprintf("http://localhost:%d", config.DefaultHttpPort()), WindowConfig: &gowebview.WindowConfig{
 			Title: "ctfmon",
 			Size: &gowebview.Point{
 				X: int64(float64(width) * displayScale),
@@ -252,7 +252,7 @@ func main() {
 
 	g.Go(wrapWithRecover(logger, func() error {
 		defer cancel()
-		return srv.Listen(8087)
+		return srv.Listen(config.DefaultHttpPort())
 	}))
 
 	g.Go(wrapWithRecover(logger, func() error {

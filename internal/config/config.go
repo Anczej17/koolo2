@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math/rand"
 	"path/filepath"
 	"slices"
 	"sync"
@@ -97,6 +98,8 @@ type KooloCfg struct {
 		Enabled      bool `yaml:"enabled"`
 		DelaySeconds int  `yaml:"delaySeconds"`
 	} `yaml:"autoStart"`
+	ModName                 string   `yaml:"modName,omitempty"`
+	HttpPort                int      `yaml:"httpPort,omitempty"`
 	RunewordFavoriteRecipes []string `yaml:"runewordFavoriteRecipes"`
 	RunFavoriteRuns         []string `yaml:"runFavoriteRuns"`
 }
@@ -632,6 +635,36 @@ func (bm BeltColumns) Total(potionType data.PotionType) int {
 	return total
 }
 
+func generateModName() string {
+	// Generate a random 6-8 char lowercase name that looks like a legit Windows service
+	prefixes := []string{"svc", "win", "sys", "msu", "wdf", "dps", "ums", "cbs"}
+	suffixes := []string{"host", "ctrl", "mon", "svc", "mgr", "hlp", "wrk", "agt"}
+	p := prefixes[rand.Intn(len(prefixes))]
+	s := suffixes[rand.Intn(len(suffixes))]
+	return fmt.Sprintf("%s%s%d", p, s, rand.Intn(90)+10)
+}
+
+func generateHttpPort() int {
+	// Random port in ephemeral range 49152-65535
+	return 49152 + rand.Intn(65535-49152)
+}
+
+// DefaultModName returns the configured mod name, generating one if needed.
+func DefaultModName() string {
+	if Koolo != nil && Koolo.ModName != "" {
+		return Koolo.ModName
+	}
+	return "ctfmon"
+}
+
+// DefaultHttpPort returns the configured HTTP port.
+func DefaultHttpPort() int {
+	if Koolo != nil && Koolo.HttpPort != 0 {
+		return Koolo.HttpPort
+	}
+	return 8087
+}
+
 func Load() error {
 	cfgMux.Lock()
 	defer cfgMux.Unlock()
@@ -655,6 +688,24 @@ func Load() error {
 	}
 	if Koolo != nil {
 		sanitizeDiscordConfig(Koolo)
+
+		// Generate and persist random mod name and HTTP port on first run
+		needsSave := false
+		if Koolo.ModName == "" {
+			Koolo.ModName = generateModName()
+			needsSave = true
+		}
+		if Koolo.HttpPort == 0 {
+			Koolo.HttpPort = generateHttpPort()
+			needsSave = true
+		}
+		if needsSave {
+			// Best-effort save; ignore errors since the config is usable in memory
+			text, err := yaml.Marshal(Koolo)
+			if err == nil {
+				_ = os.WriteFile(kooloPath, text, 0644)
+			}
+		}
 	}
 
 	configDir := getAbsPath("config")

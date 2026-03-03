@@ -53,9 +53,6 @@ func (ps *PacketSender) InteractWithEntrance(entrance data.Entrance) error {
 func (ps *PacketSender) Teleport(position data.Position) error {
 	payload := packet.NewTeleport(position).GetPayload()
 
-	// Debug: log the packet being sent
-	fmt.Printf("Sending teleport packet: X=%d Y=%d Hex=%02X\n", position.X, position.Y, payload)
-
 	if err := ps.SendPacket(payload); err != nil {
 		return fmt.Errorf("failed to send teleport packet: %w", err)
 	}

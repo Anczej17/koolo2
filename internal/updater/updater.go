@@ -640,7 +640,7 @@ if exist "%s" (
 :START_NEW
 set /a PORT_WAIT=0
 :WAIT_PORT
-netstat -ano | findstr /R /C:":8087 .*LISTENING" >nul
+netstat -ano | findstr /R /C:":%d .*LISTENING" >nul
 if %%ERRORLEVEL%%==0 (
     set /a PORT_WAIT+=1
     if !PORT_WAIT! GEQ 60 goto WAIT_PID
@@ -656,7 +656,7 @@ if %%ERRORLEVEL%%==0 (
 timeout /t 3 /nobreak >nul
 start "" /D "%s" "%s"
 del "%%~f0"
-`, installDir, oldDir, oldDir, currentExe, currentExe, currentExe, backupDest, currentExe, pid, pid, newestExeDir, newestExe)
+`, installDir, oldDir, oldDir, currentExe, currentExe, currentExe, backupDest, currentExe, config.DefaultHttpPort(), pid, pid, newestExeDir, newestExe)
 
 	restartScript, err := writeRestartScript(installDir, "restart_svc_*.bat", script)
 	if err != nil {

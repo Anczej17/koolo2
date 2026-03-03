@@ -172,7 +172,7 @@ set "OUTPUT_EXE=build\%BUILD_ID%.exe"
 :: Build an obfuscated binary
 call :print_step "Compiling obfuscated executable"
 (
-    garble -literals=false -seed=random build -a -trimpath -tags static --ldflags "-s -w -H windowsgui -X 'main.buildID=%BUILD_ID%' -X 'main.buildTime=%BUILD_TIME%' -X 'github.com/hectorgimenez/koolo/internal/config.Version=%VERSION%'" -o "%OUTPUT_EXE%" ./cmd/koolo 2>&1
+    garble -literals -tiny -seed=random build -a -trimpath -tags static --ldflags "-s -w -H windowsgui -X 'main.buildID=%BUILD_ID%' -X 'main.buildTime=%BUILD_TIME%' -X 'github.com/hectorgimenez/koolo/internal/config.Version=%VERSION%'" -o "%OUTPUT_EXE%" ./cmd/koolo 2>&1
 ) > garble.log
 set "GARBLE_EXIT_CODE=!errorlevel!"
 
