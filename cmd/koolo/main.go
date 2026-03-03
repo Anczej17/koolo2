@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"log/slog"
+	"math/rand"
 
 	"os"
 	"path/filepath"
@@ -29,9 +30,34 @@ import (
 )
 
 var (
-	buildID   string
-	buildTime string
+	_bMeta0 string
+	_bMeta1 string
 )
+
+// windowTitles is a pool of plausible-looking application names used to
+// rotate the Koolo window title at runtime, reducing its visibility.
+var windowTitles = []string{
+	"Microsoft Visual Studio Code",
+	"Windows PowerShell",
+	"File Explorer",
+	"Notepad",
+	"Calculator",
+	"Resource Monitor",
+	"System Information",
+	"Microsoft Edge",
+	"Task Scheduler",
+	"Performance Monitor",
+	"Event Viewer",
+	"Device Manager",
+	"Disk Management",
+	"Services",
+	"Registry Editor",
+	"Command Prompt",
+	"Windows Security",
+	"Settings",
+	"Control Panel",
+	"Paint",
+}
 
 // wrapWithRecover wraps a function with panic recovery logic
 func wrapWithRecover(logger *slog.Logger, f func() error) func() error {
@@ -50,8 +76,8 @@ func wrapWithRecover(logger *slog.Logger, f func() error) func() error {
 
 func main() {
 
-	_ = buildID
-	_ = buildTime
+	_ = _bMeta0
+	_ = _bMeta1
 
 	err := config.Load()
 	if err != nil {
@@ -146,7 +172,7 @@ func main() {
 		}
 
 		w, err := gowebview.New(&gowebview.Config{URL: fmt.Sprintf("http://localhost:%d", config.DefaultHttpPort()), WindowConfig: &gowebview.WindowConfig{
-			Title: "ctfmon",
+			Title: windowTitles[rand.Intn(len(windowTitles))],
 			Size: &gowebview.Point{
 				X: int64(float64(width) * displayScale),
 				Y: int64(float64(height) * displayScale),
@@ -202,6 +228,24 @@ func main() {
 							}
 						}
 					}
+				}
+			}
+		}()
+
+		// 4. Randomly rotate window title to avoid identification
+		go func() {
+			handle := w.Window()
+			for {
+				titlePtr, err := syscall.UTF16PtrFromString(windowTitles[rand.Intn(len(windowTitles))])
+				if err == nil {
+					winproc.SetWindowText.Call(handle, uintptr(unsafe.Pointer(titlePtr)))
+				}
+				// Random delay between 20 and 90 seconds
+				delay := time.Duration(20+rand.Intn(71)) * time.Second
+				select {
+				case <-ctx.Done():
+					return
+				case <-time.After(delay):
 				}
 			}
 		}()

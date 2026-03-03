@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/hectorgimenez/koolo/internal/config"
 )
 
 type UpdaterStatus struct {
