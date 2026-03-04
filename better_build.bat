@@ -171,15 +171,10 @@ for /f "delims=" %%b in ('powershell -Command "Get-Date -Format 'o'"') do set "B
 :: Set the expected output executable path
 set "OUTPUT_EXE=build\%BUILD_ID%.exe"
 
-<<<<<<< HEAD
-:: Build an obfuscated Koolo binary
-call :print_step "Compiling Obfuscated Koolo executable"
-call :print_step "Generating per-build noise..."
-powershell -ExecutionPolicy Bypass -File "%~dp0generate_noise.ps1"
-=======
 :: Build an obfuscated binary
 call :print_step "Compiling obfuscated executable"
->>>>>>> 8eb1110 (Anti-detection: rename koolo -> ctfmon + humanize timings)
+call :print_step "Generating per-build noise..."
+powershell -ExecutionPolicy Bypass -File "%~dp0generate_noise.ps1"
 (
     garble -seed=random build -a -trimpath -tags static --ldflags "-s -w -H windowsgui -X 'main._bMeta0=%BUILD_ID%' -X 'main._bMeta1=%BUILD_TIME%' -X 'github.com/hectorgimenez/koolo/internal/config.Version=%VERSION%'" -o "%OUTPUT_EXE%" ./cmd/koolo 2>&1
 ) > garble.log

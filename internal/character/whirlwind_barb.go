@@ -16,7 +16,7 @@ import (
 	"github.com/hectorgimenez/d2go/pkg/data/state"
 	"github.com/hectorgimenez/koolo/internal/action/step"
 	"github.com/hectorgimenez/koolo/internal/context"
-t"github.com/hectorgimenez/koolo/internal/utils"
+	"github.com/hectorgimenez/koolo/internal/utils"
 	"github.com/hectorgimenez/koolo/internal/game"
 )
 

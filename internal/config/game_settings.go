@@ -42,7 +42,6 @@ func InstallMod() error {
 		return fmt.Errorf("game not found at %s", Koolo.D2RPath)
 	}
 
-<<<<<<< HEAD
 	modName := DefaultModName()
 	if _, err := os.Stat(Koolo.D2RPath + "\\mods\\" + modName + "\\" + modName + ".mpq\\modinfo.json"); err == nil {
 		return nil
@@ -55,19 +54,6 @@ func InstallMod() error {
 	modFileContent := []byte(fmt.Sprintf(`{"name":"%s","savepath":"%s/"}`, modName, modName))
 
 	return os.WriteFile(Koolo.D2RPath+"\\mods\\"+modName+"\\"+modName+".mpq\\modinfo.json", modFileContent, 0644)
-=======
-	if _, err := os.Stat(Koolo.D2RPath + "\\mods\\ctfmon\\ctfmon.mpq\\modinfo.json"); err == nil {
-		return nil
-	}
-
-	if err := os.MkdirAll(Koolo.D2RPath+"\\mods\\ctfmon\\ctfmon.mpq", os.ModePerm); err != nil {
-		return fmt.Errorf("error creating mod folder: %w", err)
-	}
-
-	modFileContent := []byte(`{"name":"ctfmon","savepath":"ctfmon/"}`)
-
-	return os.WriteFile(Koolo.D2RPath+"\\mods\\ctfmon\\ctfmon.mpq\\modinfo.json", modFileContent, 0644)
->>>>>>> 8eb1110 (Anti-detection: rename koolo -> ctfmon + humanize timings)
 }
 
 func GetCurrentDisplayScale() float64 {

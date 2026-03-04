@@ -81,11 +81,7 @@ func resolveSaveDir(commandLineArgs string, useCustomSettings bool) string {
 		}
 	}
 	if useCustomSettings && modName == "" {
-<<<<<<< HEAD
 		modName = DefaultModName()
-=======
-		modName = "ctfmon"
->>>>>>> 8eb1110 (Anti-detection: rename koolo -> ctfmon + humanize timings)
 	}
 	if modName == "" {
 		return settingsPath

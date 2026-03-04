@@ -15,7 +15,7 @@ import (
 	"github.com/hectorgimenez/koolo/internal/action"
 	"github.com/hectorgimenez/koolo/internal/action/step"
 	"github.com/hectorgimenez/koolo/internal/context"
-t"github.com/hectorgimenez/koolo/internal/utils"
+	"github.com/hectorgimenez/koolo/internal/utils"
 	"github.com/hectorgimenez/koolo/internal/game"
 	"github.com/hectorgimenez/koolo/internal/town"
 	"github.com/hectorgimenez/koolo/internal/ui"

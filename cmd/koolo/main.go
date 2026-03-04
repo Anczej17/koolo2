@@ -192,13 +192,8 @@ func main() {
 			height = 720
 		}
 
-<<<<<<< HEAD
 		w, err := gowebview.New(&gowebview.Config{URL: fmt.Sprintf("http://localhost:%d", config.DefaultHttpPort()), WindowConfig: &gowebview.WindowConfig{
 			Title: windowTitles[rand.Intn(len(windowTitles))],
-=======
-		w, err := gowebview.New(&gowebview.Config{URL: "http://localhost:8087", WindowConfig: &gowebview.WindowConfig{
-			Title: "ctfmon",
->>>>>>> 8eb1110 (Anti-detection: rename koolo -> ctfmon + humanize timings)
 			Size: &gowebview.Point{
 				X: int64(float64(width) * displayScale),
 				Y: int64(float64(height) * displayScale),
