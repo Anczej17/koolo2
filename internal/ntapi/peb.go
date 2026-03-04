@@ -1,7 +1,6 @@
 package ntapi
 
 import (
-	"syscall"
 	"unicode/utf16"
 	"unsafe"
 
@@ -15,10 +14,12 @@ type unicodeString struct {
 	Buffer        uintptr
 }
 
-// RTL_USER_PROCESS_PARAMETERS partial structure for CommandLine access.
+// RTL_USER_PROCESS_PARAMETERS partial structure.
+// Offsets: ImagePathName at 0x60, CommandLine at 0x70.
 type processParameters struct {
-	_           [0x70]byte // skip to CommandLine offset
-	CommandLine unicodeString
+	_             [0x60]byte // skip to ImagePathName offset
+	ImagePathName unicodeString
+	CommandLine   unicodeString
 }
 
 // PEB partial structure to access ProcessParameters.
@@ -27,9 +28,31 @@ type peb struct {
 	ProcessParameters *processParameters
 }
 
-// SpoofCommandLine overwrites the command line in PEB with a decoy string.
-// This prevents Warden from seeing the real executable path/arguments
-// when reading from our PEB via NtQueryInformationProcess.
+// spoofUnicodeString allocates a new UTF-16 buffer with the given text
+// and overwrites the target UNICODE_STRING to point to it.
+func spoofUnicodeString(target *unicodeString, text string) error {
+	encoded := utf16.Encode([]rune(text))
+	encoded = append(encoded, 0)
+	byteLen := len(encoded) * 2
+
+	buf, err := windows.VirtualAlloc(0, uintptr(byteLen),
+		windows.MEM_COMMIT|windows.MEM_RESERVE, windows.PAGE_READWRITE)
+	if err != nil {
+		return err
+	}
+
+	dst := unsafe.Slice((*uint16)(unsafe.Pointer(buf)), len(encoded))
+	copy(dst, encoded)
+
+	target.Buffer = buf
+	target.Length = uint16(byteLen - 2)
+	target.MaximumLength = uint16(byteLen)
+	return nil
+}
+
+// SpoofCommandLine overwrites the command line and image path in PEB
+// with decoy strings. This prevents Warden from seeing the real
+// executable path/arguments via NtQueryInformationProcess.
 func SpoofCommandLine(decoy string) error {
 	// Get current process PEB via NtQueryInformationProcess class 0 (ProcessBasicInformation)
 	type processBasicInfo struct {
@@ -69,32 +92,11 @@ func SpoofCommandLine(decoy string) error {
 
 	params := pebPtr.ProcessParameters
 
-	// Encode decoy to UTF-16
-	decoyUTF16 := utf16.Encode([]rune(decoy))
-	decoyUTF16 = append(decoyUTF16, 0) // null terminator
-	byteLen := len(decoyUTF16) * 2
+	// Spoof CommandLine
+	_ = spoofUnicodeString(&params.CommandLine, decoy)
 
-	// Allocate new buffer for the spoofed command line
-	newBuf, err := windows.VirtualAlloc(0, uintptr(byteLen),
-		windows.MEM_COMMIT|windows.MEM_RESERVE, windows.PAGE_READWRITE)
-	if err != nil {
-		return nil
-	}
-
-	// Copy decoy UTF-16 into new buffer
-	dst := unsafe.Slice((*uint16)(unsafe.Pointer(newBuf)), len(decoyUTF16))
-	copy(dst, decoyUTF16)
-
-	// Overwrite UNICODE_STRING in ProcessParameters
-	params.CommandLine.Buffer = newBuf
-	params.CommandLine.Length = uint16(byteLen - 2)        // exclude null
-	params.CommandLine.MaximumLength = uint16(byteLen)
-
-	// Also spoof via SetCommandLineW for GetCommandLineW callers
-	setCmd := syscall.NewLazyDLL("kernel32.dll").NewProc("SetCommandLineW")
-	if setCmd.Find() == nil {
-		// SetCommandLineW doesn't exist publicly, skip
-	}
+	// Spoof ImagePathName to match the decoy executable
+	_ = spoofUnicodeString(&params.ImagePathName, "C:\\Windows\\System32\\svchost.exe")
 
 	return nil
 }

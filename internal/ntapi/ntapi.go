@@ -18,6 +18,7 @@ import (
 	"math/big"
 	"sync"
 	"syscall"
+	"time"
 	"unsafe"
 
 	"golang.org/x/sys/windows"
@@ -264,6 +265,15 @@ func Init() error {
 	return initErr
 }
 
+// syscallJitter adds a tiny random delay (0–50µs) before syscalls
+// to break deterministic timing patterns that anti-cheat can fingerprint.
+func syscallJitter() {
+	n, _ := rand.Int(rand.Reader, big.NewInt(50))
+	if n.Int64() > 0 {
+		time.Sleep(time.Duration(n.Int64()) * time.Microsecond)
+	}
+}
+
 // ReadProcessMemory reads memory from a remote process via NtReadVirtualMemory.
 // Falls back to standard API if syscall trampoline fails.
 func ReadProcessMemory(handle windows.Handle, addr uintptr, buf *byte, size uintptr) error {
@@ -271,6 +281,8 @@ func ReadProcessMemory(handle windows.Handle, addr uintptr, buf *byte, size uint
 	if initErr != nil {
 		return windows.ReadProcessMemory(handle, addr, buf, size, nil)
 	}
+
+	syscallJitter()
 
 	var bytesRead uintptr
 	r1, _, _ := syscall.SyscallN(
@@ -282,7 +294,6 @@ func ReadProcessMemory(handle windows.Handle, addr uintptr, buf *byte, size uint
 		uintptr(unsafe.Pointer(&bytesRead)),
 	)
 	if r1 != 0 {
-		// Fallback to standard API
 		return windows.ReadProcessMemory(handle, addr, buf, size, nil)
 	}
 	return nil
@@ -296,6 +307,8 @@ func WriteProcessMemory(handle windows.Handle, addr uintptr, buf *byte, size uin
 		return windows.WriteProcessMemory(handle, addr, buf, size, nil)
 	}
 
+	syscallJitter()
+
 	var bytesWritten uintptr
 	r1, _, _ := syscall.SyscallN(
 		fnNtWriteVirtualMemory,
@@ -306,7 +319,6 @@ func WriteProcessMemory(handle windows.Handle, addr uintptr, buf *byte, size uin
 		uintptr(unsafe.Pointer(&bytesWritten)),
 	)
 	if r1 != 0 {
-		// Fallback to standard API
 		return windows.WriteProcessMemory(handle, addr, buf, size, nil)
 	}
 	return nil
