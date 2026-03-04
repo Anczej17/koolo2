@@ -64,6 +64,13 @@
     </fieldset>
 {{ end }}
 
+{{ define "arcane_sanctuary" }}
+    <fieldset>
+        <label><input type="checkbox" name="gameArcaneSanctuaryOpenChests" {{ if .Config.Game.ArcaneSanctuary.OpenChests }}checked{{ end }}> Open chests</label>
+        <label><input type="checkbox" name="gameArcaneSanctuaryFocusOnElitePacks" {{ if .Config.Game.ArcaneSanctuary.FocusOnElitePacks }}checked{{ end }}> Focus on elite packs</label>
+    </fieldset>
+{{ end }}
+
 {{ define "ancient_tunnels" }}
     <fieldset>
         <label><input type="checkbox" name="gameAncientTunnelsOpenChests" {{ if .Config.Game.AncientTunnels.OpenChests }}checked{{ end }}> Open chests</label>
@@ -414,6 +421,56 @@
         updateTZSort();
     });
     </script>
+{{ end }}
+
+{{ define "act1" }}
+    <fieldset>
+        <p><strong>Act 1 Full Clear:</strong> Blood Moor → Tristram → Catacombs → Andariel (60+ areas)</p>
+        <label><input type="checkbox" name="gameActRunsAct1FocusOnElitePacks" {{ if .Config.Game.ActRuns.Act1.FocusOnElitePacks }}checked{{ end }}> Focus on elite packs (faster)</label>
+        <label><input type="checkbox" name="gameActRunsAct1OpenChests" {{ if .Config.Game.ActRuns.Act1.OpenChests }}checked{{ end }}> Open chests</label>
+        <label><input type="checkbox" name="gameActRunsAct1UseWorldStoneShard" {{ if .Config.Game.ActRuns.Act1.UseWorldStoneShard }}checked{{ end }}> Use World Stone Shard before run</label>
+        <label><input type="checkbox" name="gameActRunsAct1PauseAfterRun" {{ if .Config.Game.ActRuns.Act1.PauseAfterRun }}checked{{ end }}> Pause supervisor after run</label>
+    </fieldset>
+{{ end }}
+
+{{ define "act2" }}
+    <fieldset>
+        <p><strong>Act 2 Full Clear:</strong> Sewers → Tombs → Duriel → Arcane (30+ areas)</p>
+        <label><input type="checkbox" name="gameActRunsAct2FocusOnElitePacks" {{ if .Config.Game.ActRuns.Act2.FocusOnElitePacks }}checked{{ end }}> Focus on elite packs (faster)</label>
+        <label><input type="checkbox" name="gameActRunsAct2OpenChests" {{ if .Config.Game.ActRuns.Act2.OpenChests }}checked{{ end }}> Open chests</label>
+        <label><input type="checkbox" name="gameActRunsAct2UseWorldStoneShard" {{ if .Config.Game.ActRuns.Act2.UseWorldStoneShard }}checked{{ end }}> Use World Stone Shard before run</label>
+        <label><input type="checkbox" name="gameActRunsAct2PauseAfterRun" {{ if .Config.Game.ActRuns.Act2.PauseAfterRun }}checked{{ end }}> Pause supervisor after run</label>
+    </fieldset>
+{{ end }}
+
+{{ define "act3" }}
+    <fieldset>
+        <p><strong>Act 3 Full Clear:</strong> Spider Forest → Kurast → Durance → Mephisto (25+ areas)</p>
+        <label><input type="checkbox" name="gameActRunsAct3FocusOnElitePacks" {{ if .Config.Game.ActRuns.Act3.FocusOnElitePacks }}checked{{ end }}> Focus on elite packs (faster)</label>
+        <label><input type="checkbox" name="gameActRunsAct3OpenChests" {{ if .Config.Game.ActRuns.Act3.OpenChests }}checked{{ end }}> Open chests</label>
+        <label><input type="checkbox" name="gameActRunsAct3UseWorldStoneShard" {{ if .Config.Game.ActRuns.Act3.UseWorldStoneShard }}checked{{ end }}> Use World Stone Shard before run</label>
+        <label><input type="checkbox" name="gameActRunsAct3PauseAfterRun" {{ if .Config.Game.ActRuns.Act3.PauseAfterRun }}checked{{ end }}> Pause supervisor after run</label>
+    </fieldset>
+{{ end }}
+
+{{ define "act4" }}
+    <fieldset>
+        <p><strong>Act 4 Full Clear:</strong> Outer Steppes → River of Flame → Chaos → Diablo (5 areas)</p>
+        <label><input type="checkbox" name="gameActRunsAct4FocusOnElitePacks" {{ if .Config.Game.ActRuns.Act4.FocusOnElitePacks }}checked{{ end }}> Focus on elite packs (faster)</label>
+        <label><input type="checkbox" name="gameActRunsAct4OpenChests" {{ if .Config.Game.ActRuns.Act4.OpenChests }}checked{{ end }}> Open chests</label>
+        <label><input type="checkbox" name="gameActRunsAct4UseWorldStoneShard" {{ if .Config.Game.ActRuns.Act4.UseWorldStoneShard }}checked{{ end }}> Use World Stone Shard before run</label>
+        <label><input type="checkbox" name="gameActRunsAct4PauseAfterRun" {{ if .Config.Game.ActRuns.Act4.PauseAfterRun }}checked{{ end }}> Pause supervisor after run</label>
+    </fieldset>
+{{ end }}
+
+{{ define "act5" }}
+    <fieldset>
+        <p><strong>Act 5 Full Clear:</strong> Bloody Foothills → Nihlathak → Worldstone → Baal (30+ areas)</p>
+        <label><input type="checkbox" name="gameActRunsAct5FocusOnElitePacks" {{ if .Config.Game.ActRuns.Act5.FocusOnElitePacks }}checked{{ end }}> Focus on elite packs (faster)</label>
+        <label><input type="checkbox" name="gameActRunsAct5OpenChests" {{ if .Config.Game.ActRuns.Act5.OpenChests }}checked{{ end }}> Open chests</label>
+        <label><input type="checkbox" name="gameActRunsAct5UseWorldStoneShard" {{ if .Config.Game.ActRuns.Act5.UseWorldStoneShard }}checked{{ end }}> Use World Stone Shard before run</label>
+        <label><input type="checkbox" name="gameActRunsAct5PauseAfterRun" {{ if .Config.Game.ActRuns.Act5.PauseAfterRun }}checked{{ end }}> Pause supervisor after run</label>
+    </fieldset>
 {{ end }}
 
 {{ define "utility" }}

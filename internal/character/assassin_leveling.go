@@ -14,6 +14,7 @@ import (
 	"github.com/hectorgimenez/koolo/internal/action"
 	"github.com/hectorgimenez/koolo/internal/action/step"
 	"github.com/hectorgimenez/koolo/internal/context"
+t"github.com/hectorgimenez/koolo/internal/utils"
 	"github.com/hectorgimenez/koolo/internal/game"
 )
 
@@ -409,7 +410,7 @@ func (s AssassinLeveling) killMonsterByName(id npc.ID, monsterType data.MonsterT
 			s.Logger.Warn(fmt.Sprintf("Error during KillMonsterSequence for %s: %v", id, err))
 		}
 
-		time.Sleep(time.Millisecond * 250)
+		utils.CombatSleep(250)
 	}
 }
 

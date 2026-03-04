@@ -56,6 +56,8 @@ type Context struct {
 	HealthManager             *health.Manager
 	Char                      Character
 	LastBuffAt                time.Time
+	WasInTown                 bool      // Track if we were in town (to detect leaving town)
+	BuffInProgress            bool      // Prevent concurrent buff execution for this character
 	LastCastAt                time.Time
 	ContextDebug              map[Priority]*Debug
 	CurrentGame               *CurrentGameHelper
@@ -71,6 +73,7 @@ type Context struct {
 	IsBossEquipmentActive     bool          // flag for barb leveling
 	Drop                      *drop.Manager // Drop: Per-supervisor Drop manager
 	IsAllocatingStatsOrSkills atomic.Bool   // Prevents stuck detection during stat/skill allocation
+	PathStuckDetector         interface{}   // Path stuck detection (stored as interface{} to avoid import cycle)
 }
 
 type Debug struct {

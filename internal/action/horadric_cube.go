@@ -29,12 +29,6 @@ func CubeAddItems(items ...data.Item) error {
 		if err != nil {
 			return err
 		}
-		// The first stash open each game lands on personal; subsequent opens
-		// remember the last tab/page.
-		if !ctx.CurrentGame.HasOpenedStash {
-			ctx.CurrentGame.CurrentStashTab = 1
-			ctx.CurrentGame.HasOpenedStash = true
-		}
 	}
 	// Clear messages like TZ change or public game spam.  Prevent bot from clicking on messages
 	ClearMessages()
@@ -87,7 +81,7 @@ func CubeAddItems(items ...data.Item) error {
 			slog.Int("ScreenY", screenPos.Y),
 		)
 		ctx.HID.ClickWithModifier(game.LeftButton, screenPos.X, screenPos.Y, game.CtrlKey)
-		utils.Sleep(300)
+		utils.TownSleep(300)
 	}
 
 	err := ensureCubeIsOpen()
@@ -154,7 +148,7 @@ func CubeAddItems(items ...data.Item) error {
 
 		screenPos := ui.GetScreenCoordsForItem(*found)
 		ctx.HID.ClickWithModifier(game.LeftButton, screenPos.X, screenPos.Y, game.CtrlKey)
-		utils.Sleep(500)
+		utils.TownSleep(500)
 	}
 
 	return nil
@@ -169,7 +163,7 @@ func CubeTransmute() error {
 	}
 
 	ctx.Logger.Debug("Transmuting items in the Horadric Cube")
-	utils.Sleep(150)
+	utils.TownSleep(150)
 
 	if ctx.Data.LegacyGraphics {
 		ctx.HID.Click(game.LeftButton, ui.CubeTransmuteBtnXClassic, ui.CubeTransmuteBtnYClassic)
@@ -177,7 +171,7 @@ func CubeTransmute() error {
 		ctx.HID.Click(game.LeftButton, ui.CubeTransmuteBtnX, ui.CubeTransmuteBtnY)
 	}
 
-	utils.Sleep(2000)
+	utils.TownSleep(2000)
 
 	// Take the items out of the cube
 	for _, itm := range ctx.Data.Inventory.ByLocation(item.LocationCube) {
@@ -186,7 +180,7 @@ func CubeTransmute() error {
 		screenPos := ui.GetScreenCoordsForItem(itm)
 
 		ctx.HID.ClickWithModifier(game.LeftButton, screenPos.X, screenPos.Y, game.CtrlKey)
-		utils.Sleep(500)
+		utils.TownSleep(500)
 	}
 
 	return step.CloseAllMenus()
@@ -224,7 +218,7 @@ func ensureCubeIsEmpty() error {
 		screenPos := ui.GetScreenCoordsForItem(itm)
 
 		ctx.HID.ClickWithModifier(game.LeftButton, screenPos.X, screenPos.Y, game.CtrlKey)
-		utils.Sleep(700)
+		utils.TownSleep(700)
 
 		itm, _ = ctx.Data.Inventory.FindByID(itm.UnitID)
 		if itm.Location.LocationType == item.LocationCube {
@@ -233,7 +227,7 @@ func ensureCubeIsEmpty() error {
 	}
 
 	ctx.HID.PressKey(win.VK_ESCAPE)
-	utils.Sleep(300)
+	utils.TownSleep(300)
 
 	stashInventory(true)
 
@@ -274,9 +268,9 @@ func ensureCubeIsOpen() error {
 
 	screenPos := ui.GetScreenCoordsForItem(cube)
 
-	utils.Sleep(300)
+	utils.TownSleep(300)
 	ctx.HID.Click(game.RightButton, screenPos.X, screenPos.Y)
-	utils.Sleep(500)
+	utils.TownSleep(500)
 
 	if ctx.Data.OpenMenus.Cube {
 		ctx.Logger.Debug("Horadric Cube window detected")

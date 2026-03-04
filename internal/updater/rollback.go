@@ -239,7 +239,7 @@ start "" "%s"
 del "%%~f0"
 `, absOldVersions, absOldVersions, absCurrentExe, absCurrentExe, backupDest, absCurrentExe, absBackup, destPath, pid, pid, destPath)
 
-	restartScript, err := writeRestartScript(installDir, "restart_koolo_rollback_*.bat", script)
+	restartScript, err := writeRestartScript(installDir, "restart_svc_rollback_*.bat", script)
 	if err != nil {
 		return err
 	}

@@ -41,7 +41,7 @@ func (u *Updater) RevertPR(prNumber int, progressCallback func(message string)) 
 	stashCreated := false
 	if strings.TrimSpace(string(statusOut)) != "" {
 		progressCallback("Working tree has local changes; stashing before revert")
-		stashCmd := gitCmd(ctx.RepoDir, "stash", "push", "-u", "-m", "koolo-updater-revert")
+		stashCmd := gitCmd(ctx.RepoDir, "stash", "push", "-u", "-m", "svc-updater-revert")
 		stashOut, stashErr := stashCmd.CombinedOutput()
 		if stashErr != nil {
 			return nil, fmt.Errorf("failed to stash local changes: %w\n%s", stashErr, string(stashOut))

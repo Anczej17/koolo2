@@ -31,7 +31,7 @@ const menuActionTimeout = 30 * time.Second
 // Define constants for the in-game activity monitor
 const (
 	activityCheckInterval = 15 * time.Second
-	maxStuckDuration      = 3 * time.Minute
+	maxStuckDuration      = 90 * time.Second
 )
 
 type SinglePlayerSupervisor struct {
@@ -226,7 +226,6 @@ func (s *SinglePlayerSupervisor) Start() error {
 			if err := DropRun.Run(nil); err != nil {
 				s.bot.ctx.Logger.Error("Drop run failed", "error", err)
 			}
-			timeSpentNotInGameStart = time.Now()
 			continue
 		}
 
@@ -312,16 +311,6 @@ func (s *SinglePlayerSupervisor) Start() error {
 			s.bot.ctx.Logger.Warn("Failed to dump armory data", slog.Any("error", err))
 		}
 
-		if config.Koolo.Debug.OpenOverlayMapOnGameStart {
-			automapKB := s.bot.ctx.Data.KeyBindings.Automap
-			if automapKB.Key1[0] != 0 || automapKB.Key2[0] != 0 {
-				s.bot.ctx.HID.PressKeyBinding(automapKB)
-				utils.PingSleep(utils.Light, 50)
-			} else {
-				s.bot.ctx.Logger.Debug("Open overlay map on game start is enabled, but no automap key binding is set")
-			}
-		}
-
 		if s.bot.ctx.Data.IsLevelingCharacter && s.bot.ctx.Data.ActiveWeaponSlot != 0 {
 			for attempt := 0; attempt < 3 && s.bot.ctx.Data.ActiveWeaponSlot != 0; attempt++ {
 				s.bot.ctx.HID.PressKeyBinding(s.bot.ctx.Data.KeyBindings.SwapWeapons)
@@ -355,8 +344,6 @@ func (s *SinglePlayerSupervisor) Start() error {
 			}
 		}
 
-		action.EnsureRunMode()
-
 		// Context with a timeout for the game itself
 		runCtx := ctx
 		var runCancel context.CancelFunc
@@ -368,7 +355,7 @@ func (s *SinglePlayerSupervisor) Start() error {
 		defer runCancel()
 
 		// Initialize ping monitor for this game session
-		// Configuration from koolo.yaml (default: quit after 30s of ping > 500ms)
+		// Configuration from ctfmon.yaml (default: quit after 30s of ping > 500ms)
 		pingThreshold := 500
 		sustainedDuration := 30 * time.Second
 		pingEnabled := false
@@ -430,8 +417,6 @@ func (s *SinglePlayerSupervisor) Start() error {
 
 					currentPos := s.bot.ctx.Data.PlayerUnit.Position
 					lastAction := s.bot.ctx.ContextDebug[s.bot.ctx.ExecutionPriority].LastAction
-
-					// Check for stat/skill allocation activities
 					isAllocating := lastAction == "AutoRespecIfNeeded" ||
 						lastAction == "EnsureStatPoints" ||
 						lastAction == "EnsureSkillPoints" ||
@@ -439,35 +424,6 @@ func (s *SinglePlayerSupervisor) Start() error {
 						lastAction == "AllocateStatPointPacket" ||
 						lastAction == "LearnSkillPacket"
 					if isAllocating && (s.bot.ctx.Data.OpenMenus.Character || s.bot.ctx.Data.OpenMenus.SkillTree || s.bot.ctx.Data.OpenMenus.Inventory) {
-						stuckSince = time.Time{}
-						droppedMouseItem = false
-						lastPosition = currentPos
-						continue
-					}
-
-					// Check for cube transmutation activities (player is stationary but actively working)
-					// Cube activities involve opening cube, stash, moving items between them
-					isCubing := lastAction == "CubeRecipes" || lastAction == "CubeAddItems" ||
-						lastAction == "SocketAddItems" || strings.Contains(lastAction, "Cube")
-					cubeMenuOpen := s.bot.ctx.Data.OpenMenus.Cube || s.bot.ctx.Data.OpenMenus.Stash
-					if isCubing && cubeMenuOpen {
-						stuckSince = time.Time{}
-						droppedMouseItem = false
-						lastPosition = currentPos
-						continue
-					}
-
-					// Also reset stuck timer if cube or stash is open (player might be actively managing items)
-					if s.bot.ctx.Data.OpenMenus.Cube {
-						stuckSince = time.Time{}
-						droppedMouseItem = false
-						lastPosition = currentPos
-						continue
-					}
-
-					// Check for gambling activities (player is stationary at vendor)
-					isGambling := lastAction == "Gamble" || lastAction == "GambleSingleItem" || lastAction == "gambleItems"
-					if isGambling && s.bot.ctx.Data.OpenMenus.NPCShop {
 						stuckSince = time.Time{}
 						droppedMouseItem = false
 						lastPosition = currentPos
@@ -482,14 +438,14 @@ func (s *SinglePlayerSupervisor) Start() error {
 						stuckDuration := time.Since(stuckSince)
 
 						// After 90 seconds stuck, try dropping mouse item
-						if stuckDuration > 90*time.Second {
+						if stuckDuration > 40*time.Second {
 							if len(s.bot.ctx.Data.Inventory.ByLocation(item.LocationCursor)) > 0 && !droppedMouseItem {
-								s.bot.ctx.Logger.Warn("Player stuck for 90 seconds - Clicking to drop mouse item - Continuing to monitor for movement...")
+								s.bot.ctx.Logger.Warn("Player stuck for 40 seconds - Clicking to drop mouse item - Continuing to monitor for movement...")
 								s.bot.ctx.HID.Click(game.LeftButton, 500, 500)
 								droppedMouseItem = true
 							} else if s.bot.ctx.IsAllocatingStatsOrSkills.Load() {
 								// We don't want a false positive on being stuck when the character is respeccing
-								s.bot.ctx.Logger.Debug("Player stuck for 90 seconds - Currently respeccing - letting it continue.")
+								s.bot.ctx.Logger.Debug("Player stuck for 40 seconds - Currently respeccing - letting it continue.")
 								stuckSince = time.Now()
 							} else if droppedMouseItem {
 								s.bot.ctx.Logger.Warn("Player still stuck after dropping the item - Forcing client restart.")
@@ -527,7 +483,6 @@ func (s *SinglePlayerSupervisor) Start() error {
 				s.bot.ctx.Logger.Info("Drop interrupt received. Exiting game and restarting loop.")
 				s.bot.ctx.Manager.ExitGame()
 				utils.Sleep(2000)
-				timeSpentNotInGameStart = time.Now()
 				continue
 			}
 			if errors.Is(err, context.DeadlineExceeded) {

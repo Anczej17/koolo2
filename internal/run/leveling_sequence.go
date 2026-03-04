@@ -41,15 +41,14 @@ type DifficultyLevelingSettings struct {
 }
 
 type SequenceSettings struct {
-	Run                          string `json:"run"`
-	MinLevel                     *int   `json:"minLevel,omitempty"`
-	MaxLevel                     *int   `json:"maxLevel,omitempty"`
-	LowGoldRun                   bool   `json:"lowGoldRun,omitempty"`
-	SkipTownChores               bool   `json:"skipTownChores,omitempty"`
-	ExitGame                     bool   `json:"exitGame,omitempty"`
-	StopIfCheckFails             bool   `json:"stopIfCheckFails,omitempty"`
-	SkipCountessWhenStealthReady bool   `json:"skipCountessWhenStealthReady,omitempty"`
-	Parameters                   string `json:"parameters,omitempty"`
+	Run              string `json:"run"`
+	MinLevel         *int   `json:"minLevel,omitempty"`
+	MaxLevel         *int   `json:"maxLevel,omitempty"`
+	LowGoldRun       bool   `json:"lowGoldRun,omitempty"`
+	SkipTownChores   bool   `json:"skipTownChores,omitempty"`
+	ExitGame         bool   `json:"exitGame,omitempty"`
+	StopIfCheckFails bool   `json:"stopIfCheckFails,omitempty"`
+	Parameters       string `json:"parameters,omitempty"`
 }
 
 type DifficultyConditionsSettings struct {

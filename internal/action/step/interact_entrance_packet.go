@@ -170,7 +170,7 @@ func InteractEntrancePacket(targetArea area.ID) error {
 		if !found {
 			lastErr = fmt.Errorf("entrance disappeared before packet send")
 			ctx.Logger.Warn("Entrance not found before packet send", "attempt", attempt)
-			time.Sleep(100 * time.Millisecond)
+			utils.HumanSleep(100)
 			continue
 		}
 
@@ -180,7 +180,7 @@ func InteractEntrancePacket(targetArea area.ID) error {
 				"attempt", attempt,
 				"error", err)
 			lastErr = err
-			time.Sleep(100 * time.Millisecond)
+			utils.HumanSleep(100)
 			continue
 		}
 
@@ -198,7 +198,7 @@ func InteractEntrancePacket(targetArea area.ID) error {
 		lastErr = fmt.Errorf("area transition timeout")
 
 		// Refresh game data and retry
-		time.Sleep(300 * time.Millisecond)
+		utils.HumanSleep(300)
 		ctx.RefreshGameData()
 
 		// Re-check if we're somehow already in the target area
@@ -215,7 +215,7 @@ func InteractEntrancePacket(targetArea area.ID) error {
 // Returns true if transition succeeded within timeout, false otherwise
 func waitForAreaTransition(ctx *context.Status, targetArea area.ID, timeout time.Duration) bool {
 	// Wait 300ms before checking to allow server to process the transition
-	time.Sleep(300 * time.Millisecond)
+	utils.HumanSleep(300)
 
 	deadline := time.Now().Add(timeout)
 	ticker := time.NewTicker(100 * time.Millisecond)

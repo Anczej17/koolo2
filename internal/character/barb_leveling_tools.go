@@ -15,6 +15,7 @@ import (
 	"github.com/hectorgimenez/koolo/internal/action"
 	"github.com/hectorgimenez/koolo/internal/action/step"
 	"github.com/hectorgimenez/koolo/internal/context"
+t"github.com/hectorgimenez/koolo/internal/utils"
 	"github.com/hectorgimenez/koolo/internal/game"
 	"github.com/hectorgimenez/koolo/internal/town"
 	"github.com/hectorgimenez/koolo/internal/ui"
@@ -218,7 +219,7 @@ func (s BarbLeveling) equipBossEquipment(bossNPC npc.ID) {
 	if err := action.IdentifyAll(false); err != nil {
 		s.Logger.Warn(fmt.Sprintf("Error identifying items: %v", err))
 	}
-	time.Sleep(150 * time.Millisecond)
+	utils.CombatSleep(150)
 
 	if err := action.Stash(false); err != nil {
 		s.Logger.Warn(fmt.Sprintf("Error stashing items: %v", err))
@@ -236,7 +237,7 @@ func (s BarbLeveling) equipBossEquipment(bossNPC npc.ID) {
 	}
 
 	refreshItems := func() []data.Item {
-		time.Sleep(150 * time.Millisecond)
+		utils.CombatSleep(150)
 		locations := []item.LocationType{
 			item.LocationStash,
 			item.LocationInventory,
@@ -302,7 +303,7 @@ func (s BarbLeveling) restoreEquipment() {
 	if err := action.IdentifyAll(false); err != nil {
 		s.Logger.Warn(fmt.Sprintf("Error identifying items: %v", err))
 	}
-	time.Sleep(150 * time.Millisecond)
+	utils.CombatSleep(150)
 
 	if err := action.Stash(false); err != nil {
 		s.Logger.Warn(fmt.Sprintf("Error stashing items: %v", err))
@@ -646,7 +647,7 @@ func (s BarbLeveling) stashItem(itm data.Item) {
 	foundItem, ok := findInventoryItem()
 	if !ok {
 		s.Logger.Debug(fmt.Sprintf("Item %s not yet in inventory, waiting briefly", itm.IdentifiedName))
-		time.Sleep(300 * time.Millisecond)
+		utils.CombatSleep(300)
 		ctx.RefreshGameData()
 		foundItem, ok = findInventoryItem()
 		if !ok {
@@ -662,7 +663,7 @@ func (s BarbLeveling) stashItem(itm data.Item) {
 
 	if !ctx.Data.OpenMenus.Inventory {
 		ctx.HID.PressKeyBinding(ctx.Data.KeyBindings.Inventory)
-		time.Sleep(500 * time.Millisecond)
+		utils.CombatSleep(500)
 	}
 
 	ctx.RefreshGameData()
@@ -681,11 +682,11 @@ func (s BarbLeveling) stashItem(itm data.Item) {
 	stashed := false
 	for tab := startTab; tab <= 4; tab++ {
 		action.SwitchStashTab(tab)
-		time.Sleep(300 * time.Millisecond)
+		utils.CombatSleep(300)
 
 		coords := ui.GetScreenCoordsForItem(foundItem)
 		ctx.HID.ClickWithModifier(game.LeftButton, coords.X, coords.Y, game.CtrlKey)
-		time.Sleep(500 * time.Millisecond)
+		utils.CombatSleep(500)
 
 		ctx.RefreshGameData()
 		stashed = true
@@ -844,7 +845,7 @@ func (s BarbLeveling) PerformHowl(targetID data.UnitID, lastHowlCast *time.Time)
 
 	*lastHowlCast = time.Now()
 
-	time.Sleep(100 * time.Millisecond)
+	utils.CombatSleep(100)
 
 	err := step.SecondaryAttack(skill.Howl, targetID, 1, step.Distance(1, 10))
 	if err != nil {
@@ -901,7 +902,7 @@ func (s BarbLeveling) PerformBattleCry(monsterID data.UnitID, lastBattleCryCast 
 	if _, found := ctx.Data.KeyBindings.KeyBindingForSkill(skill.BattleCry); found {
 		*lastBattleCryCast = time.Now()
 
-		time.Sleep(100 * time.Millisecond)
+		utils.CombatSleep(100)
 
 		err := step.SecondaryAttack(skill.BattleCry, monsterID, 1, step.Distance(1, 5))
 		if err != nil {
@@ -938,7 +939,7 @@ func (s BarbLeveling) PerformBattleCryBoss(monsterID data.UnitID, lastBattleCryC
 	if _, found := ctx.Data.KeyBindings.KeyBindingForSkill(skill.BattleCry); found {
 		*lastBattleCryCast = time.Now()
 
-		time.Sleep(100 * time.Millisecond)
+		utils.CombatSleep(100)
 
 		err := step.SecondaryAttack(skill.BattleCry, monsterID, 1, step.Distance(1, 5))
 		if err != nil {
@@ -1037,7 +1038,7 @@ func (s BarbLeveling) executeAttackPreWarcry(
 			if _, found := s.Data.KeyBindings.KeyBindingForSkill(skill.DoubleSwing); found {
 				step.SecondaryAttack(skill.DoubleSwing, id, 1, step.Distance(1, 3))
 				*lastDoubleSwingCast = time.Now()
-				time.Sleep(400 * time.Millisecond)
+				utils.CombatSleep(400)
 				return true
 			}
 		}
@@ -1160,7 +1161,7 @@ func (s BarbLeveling) executeAttackBoss(
 					step.SecondaryAttack(skill.Berserk, id, 1, step.Distance(1, 3))
 					step.SecondaryAttack(skill.Berserk, id, 1, step.Distance(1, 3))
 					*lastBerserkCast = time.Now()
-					time.Sleep(200 * time.Millisecond)
+					utils.CombatSleep(200)
 					return true
 				}
 			} else {
@@ -1178,7 +1179,7 @@ func (s BarbLeveling) executeAttackBoss(
 			step.SecondaryAttack(skill.DoubleSwing, id, 1, step.Distance(1, 3))
 			step.SecondaryAttack(skill.DoubleSwing, id, 1, step.Distance(1, 3))
 			if hasFreeze {
-				time.Sleep(600 * time.Millisecond)
+				utils.CombatSleep(600)
 			}
 			return true
 		}

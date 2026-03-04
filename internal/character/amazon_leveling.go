@@ -358,7 +358,7 @@ func (s AmazonLeveling) KillDiablo() error {
 			}
 
 			// Keep waiting...
-			time.Sleep(200 * time.Millisecond)
+			utils.CombatSleep(200)
 			continue
 		}
 

@@ -294,7 +294,11 @@ func StartGame(username string, password string, authmethod string, authToken st
 
 	// Let's use the mod directory for storing the settings, so we stop overwriting the default config
 	if useCustomSettings {
-		modName := "koolo"
+<<<<<<< HEAD
+		modName := config.DefaultModName()
+=======
+		modName := "ctfmon"
+>>>>>>> 8eb1110 (Anti-detection: rename koolo -> ctfmon + humanize timings)
 		found := false
 		for i, arg := range additionalArguments {
 			if arg == "-mod" {
@@ -307,8 +311,13 @@ func StartGame(username string, password string, authmethod string, authToken st
 			additionalArguments = append(additionalArguments, "-mod", modName)
 		}
 
-		// If there is no real mod, let's create a fake mod called "koolo" so we can store our own config
-		if modName == "koolo" {
+<<<<<<< HEAD
+		// If there is no real mod, create one so we can store our own config
+		if modName == config.DefaultModName() {
+=======
+		// If there is no real mod, let's create a fake mod called "ctfmon" so we can store our own config
+		if modName == "ctfmon" {
+>>>>>>> 8eb1110 (Anti-detection: rename koolo -> ctfmon + humanize timings)
 			err = config.InstallMod()
 			if err != nil {
 				return 0, 0, err

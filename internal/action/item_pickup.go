@@ -402,8 +402,7 @@ func GetItemsToPickup(maxDistance int) []data.Item {
 		// Skip itempickup on party leveling Maggot Lair, is too narrow and causes characters to get stuck
 		if isLevelingChar && itm.Name != "StaffOfKings" && (ctx.Data.PlayerUnit.Area == area.MaggotLairLevel1 ||
 			ctx.Data.PlayerUnit.Area == area.MaggotLairLevel2 ||
-			ctx.Data.PlayerUnit.Area == area.MaggotLairLevel3 ||
-			ctx.Data.PlayerUnit.Area == area.ArcaneSanctuary) {
+			ctx.Data.PlayerUnit.Area == area.MaggotLairLevel3) {
 			continue
 		}
 
@@ -461,43 +460,6 @@ func GetItemsToPickup(maxDistance int) []data.Item {
 	}
 
 	return filteredItems
-}
-
-func hasVisibleSkillBonuses(i data.Item) bool {
-	if i.Quality > item.QualitySuperior {
-		return false
-	}
-	for _, statData := range i.Stats {
-		if statData.Value <= 0 {
-			continue
-		}
-		switch statData.ID {
-		case stat.SingleSkill, stat.AddClassSkills, stat.AddSkillTab, stat.AllSkills:
-			return true
-		}
-	}
-	return false
-}
-
-func isAmmoOrJavelin(i data.Item) bool {
-	if i.Desc().Name == "Bolts" || i.Desc().Name == "Arrows" {
-		return true
-	}
-	return i.Name == "Javelin"
-}
-
-func shouldAlwaysPickupForLeveling(i data.Item) bool {
-	if i.Quality == item.QualityRare || i.Quality == item.QualitySet || i.Quality == item.QualityUnique {
-		return true
-	}
-	if i.Quality != item.QualityMagic {
-		return false
-	}
-	itmType := i.Type()
-	return itmType.IsType(item.TypeRing) ||
-		itmType.IsType(item.TypeAmulet) ||
-		itmType.IsType(item.TypeJewel) ||
-		itmType.IsType(item.TypeSmallCharm)
 }
 
 func shouldBePickedUp(i data.Item) bool {
@@ -590,7 +552,7 @@ func shouldBePickedUp(i data.Item) bool {
 		}
 	}
 	// Specific ID checks (e.g. Book of Skill and Scroll of Inifuss).
-	if i.ID == 567 || i.ID == 539 {
+	if i.ID == 552 || i.ID == 524 {
 		return true
 	}
 
@@ -601,27 +563,17 @@ func shouldBePickedUp(i data.Item) bool {
 		return false
 	}
 
-	// In leveling runs, pick up any non-gold item if very low on gold.
+	// In leveling runs, pick up any non‑gold item if very low on gold.
 	_, isLevelingChar := ctx.Char.(context.LevelingCharacter)
-	if isLevelingChar && ctx.Data.PlayerUnit.TotalPlayerGold() >= 1000 && isAmmoOrJavelin(i) {
-		return false
-	}
 	if isLevelingChar && IsLowGold() && i.Name != "Gold" {
 		return true
 	}
+
 	// Pick up stamina potions only when needed in leveling runs.
 	if isLevelingChar && i.Name == "StaminaPotion" {
 		if ctx.HealthManager.ShouldPickStaminaPot() {
 			return true
 		}
-	}
-
-	if isLevelingChar && hasVisibleSkillBonuses(i) {
-		return true
-	}
-
-	if isLevelingChar && shouldAlwaysPickupForLeveling(i) {
-		return true
 	}
 
 	// If total gold is below the minimum threshold, pick up magic and better items for selling.

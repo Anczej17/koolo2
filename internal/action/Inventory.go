@@ -274,7 +274,7 @@ func OptimizeInventory(location item.LocationType) error {
 		iterations++
 		ctx.PauseIfNotPriority()
 		ctx.RefreshGameData()
-		utils.Sleep(200)
+		utils.TownSleep(200)
 		items = ctx.Data.Inventory.ByLocation(location)
 
 		//Find best item to reorganise

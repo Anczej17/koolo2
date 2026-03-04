@@ -10,6 +10,7 @@ import (
 	"syscall"
 
 	"github.com/hectorgimenez/d2go/pkg/memory"
+	"github.com/hectorgimenez/koolo/internal/ntapi"
 	"golang.org/x/sys/windows"
 )
 
@@ -64,7 +65,7 @@ func (i *MemoryInjector) Load() error {
 			i.trackMouseEventAddr, _ = syscall.GetProcAddress(module.ModuleHandle, "TrackMouseEvent")
 			i.setCursorPosAddr, _ = syscall.GetProcAddress(module.ModuleHandle, "SetCursorPos")
 
-			err = windows.ReadProcessMemory(i.handle, i.getCursorPosAddr, &i.getCursorPosOrigBytes[0], uintptr(len(i.getCursorPosOrigBytes)), nil)
+			err = ntapi.ReadProcessMemory(i.handle, i.getCursorPosAddr, &i.getCursorPosOrigBytes[0], uintptr(len(i.getCursorPosOrigBytes)))
 			if err != nil {
 				return fmt.Errorf("error reading memory: %w", err)
 			}
@@ -74,7 +75,7 @@ func (i *MemoryInjector) Load() error {
 				return err
 			}
 
-			err = windows.ReadProcessMemory(i.handle, i.setCursorPosAddr, &i.setCursorPosOrigBytes[0], uintptr(len(i.setCursorPosOrigBytes)), nil)
+			err = ntapi.ReadProcessMemory(i.handle, i.setCursorPosAddr, &i.setCursorPosOrigBytes[0], uintptr(len(i.setCursorPosOrigBytes)))
 			if err != nil {
 				return fmt.Errorf("error reading setcursor memory: %w", err)
 			}
@@ -84,7 +85,7 @@ func (i *MemoryInjector) Load() error {
 				return err
 			}
 
-			err = windows.ReadProcessMemory(i.handle, i.getKeyStateAddr, &i.getKeyStateOrigBytes[0], uintptr(len(i.getKeyStateOrigBytes)), nil)
+			err = ntapi.ReadProcessMemory(i.handle, i.getKeyStateAddr, &i.getKeyStateOrigBytes[0], uintptr(len(i.getKeyStateOrigBytes)))
 			if err != nil {
 				return fmt.Errorf("error reading memory: %w", err)
 			}
@@ -175,7 +176,7 @@ func (i *MemoryInjector) CursorPos(x, y int) error {
 	binary.LittleEndian.PutUint32(buff, uint32(y))
 	copy(bytes[13:], buff)
 
-	return windows.WriteProcessMemory(i.handle, i.getCursorPosAddr, &bytes[0], uintptr(len(bytes)), nil)
+	return ntapi.WriteProcessMemory(i.handle, i.getCursorPosAddr, &bytes[0], uintptr(len(bytes)))
 }
 
 func (i *MemoryInjector) OverrideGetKeyState(key byte) error {
@@ -192,7 +193,7 @@ func (i *MemoryInjector) OverrideGetKeyState(key byte) error {
 
 	bytes := []byte{0x80, 0xF9, key, 0x0F, 0x94, 0xC0, 0x66, 0xC1, 0xE0, 0x0F, 0xC3}
 
-	return windows.WriteProcessMemory(i.handle, i.getKeyStateAddr, &bytes[0], uintptr(len(bytes)), nil)
+	return ntapi.WriteProcessMemory(i.handle, i.getKeyStateAddr, &bytes[0], uintptr(len(bytes)))
 }
 func (i *MemoryInjector) OverrideSetCursorPos() error {
 	/*
@@ -202,7 +203,7 @@ func (i *MemoryInjector) OverrideSetCursorPos() error {
 	*/
 
 	blob := []byte{0xB8, 0x01, 0x00, 0x00, 0x00, 0xC3}
-	err := windows.WriteProcessMemory(i.handle, i.setCursorPosAddr, &blob[0], uintptr(len(blob)), nil)
+	err := ntapi.WriteProcessMemory(i.handle, i.setCursorPosAddr, &blob[0], uintptr(len(blob)))
 	if err == nil {
 		i.cursorOverrideActive = true
 	}
@@ -210,15 +211,15 @@ func (i *MemoryInjector) OverrideSetCursorPos() error {
 }
 
 func (i *MemoryInjector) RestoreGetKeyState() error {
-	return windows.WriteProcessMemory(i.handle, i.getKeyStateAddr, &i.getKeyStateOrigBytes[0], uintptr(len(i.getKeyStateOrigBytes)), nil)
+	return ntapi.WriteProcessMemory(i.handle, i.getKeyStateAddr, &i.getKeyStateOrigBytes[0], uintptr(len(i.getKeyStateOrigBytes)))
 }
 
 func (i *MemoryInjector) RestoreGetCursorPosAddr() error {
-	return windows.WriteProcessMemory(i.handle, i.getCursorPosAddr, &i.getCursorPosOrigBytes[0], uintptr(len(i.getCursorPosOrigBytes)), nil)
+	return ntapi.WriteProcessMemory(i.handle, i.getCursorPosAddr, &i.getCursorPosOrigBytes[0], uintptr(len(i.getCursorPosOrigBytes)))
 }
 
 func (i *MemoryInjector) RestoreSetCursorPosAddr() error {
-	return windows.WriteProcessMemory(i.handle, i.setCursorPosAddr, &i.setCursorPosOrigBytes[0], uintptr(len(i.setCursorPosOrigBytes)), nil)
+	return ntapi.WriteProcessMemory(i.handle, i.setCursorPosAddr, &i.setCursorPosOrigBytes[0], uintptr(len(i.setCursorPosOrigBytes)))
 }
 
 func (i *MemoryInjector) CursorOverrideActive() bool {
@@ -230,7 +231,7 @@ func (i *MemoryInjector) CursorOverrideActive() bool {
 
 // This is needed in order to let the game keep processing mouse events even if the mouse is not over the window
 func (i *MemoryInjector) stopTrackingMouseLeaveEvents() error {
-	err := windows.ReadProcessMemory(i.handle, i.trackMouseEventAddr, &i.trackMouseEventBytes[0], uintptr(len(i.trackMouseEventBytes)), nil)
+	err := ntapi.ReadProcessMemory(i.handle, i.trackMouseEventAddr, &i.trackMouseEventBytes[0], uintptr(len(i.trackMouseEventBytes)))
 	if err != nil {
 		return err
 	}
@@ -253,5 +254,5 @@ func (i *MemoryInjector) stopTrackingMouseLeaveEvents() error {
 
 	hook := append(disableMouseLeaveRequest, injectBytes...)
 
-	return windows.WriteProcessMemory(i.handle, i.trackMouseEventAddr, &hook[0], uintptr(len(hook)), nil)
+	return ntapi.WriteProcessMemory(i.handle, i.trackMouseEventAddr, &hook[0], uintptr(len(hook)))
 }
