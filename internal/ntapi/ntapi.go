@@ -134,18 +134,16 @@ func buildTrampoline(ssn uint32) (uintptr, error) {
 
 func initialize() {
 	initOnce.Do(func() {
-		// Indirect syscalls disabled: always use standard Windows API fallback.
-		// This ensures stability while garble, NOP sled randomization, and
-		// humanized timing still provide anti-detection coverage.
-		initErr = fmt.Errorf("indirect syscalls disabled, using standard API")
-		return
-
 		ntdll, err := windows.LoadLibrary("ntdll.dll")
 		if err != nil {
 			initErr = fmt.Errorf("load ntdll: %w", err)
 			return
 		}
 
+		// Only resolve Read/Write syscalls - these bypass Warden hooks on
+		// ReadProcessMemory/WriteProcessMemory without touching how we
+		// obtain the process handle (OpenProcess stays standard to avoid
+		// crashing D2R).
 		type ssnEntry struct {
 			name string
 			dst  *uintptr
@@ -154,8 +152,6 @@ func initialize() {
 		entries := []ssnEntry{
 			{"NtReadVirtualMemory", &fnNtReadVirtualMemory},
 			{"NtWriteVirtualMemory", &fnNtWriteVirtualMemory},
-			{"NtOpenProcess", &fnNtOpenProcess},
-			{"NtClose", &fnNtClose},
 		}
 
 		for _, e := range entries {
@@ -245,44 +241,13 @@ type objectAttributes struct {
 	SecurityQualityOfService uintptr
 }
 
-// OpenProcess opens a process handle via NtOpenProcess.
-// Falls back to standard API if syscall trampoline fails.
+// OpenProcess uses standard Windows API.
+// NtOpenProcess via direct syscall crashes D2R, so we keep this standard.
 func OpenProcess(access uint32, pid uint32) (windows.Handle, error) {
-	initialize()
-	if initErr != nil {
-		return windows.OpenProcess(access, false, pid)
-	}
-
-	var handle uintptr
-	cid := clientID{UniqueProcess: uintptr(pid)}
-	oa := objectAttributes{Length: uint32(unsafe.Sizeof(objectAttributes{}))}
-
-	r1, _, _ := syscall.SyscallN(
-		fnNtOpenProcess,
-		uintptr(unsafe.Pointer(&handle)),
-		uintptr(access),
-		uintptr(unsafe.Pointer(&oa)),
-		uintptr(unsafe.Pointer(&cid)),
-	)
-	if r1 != 0 {
-		// Fallback to standard API
-		return windows.OpenProcess(access, false, pid)
-	}
-	return windows.Handle(handle), nil
+	return windows.OpenProcess(access, false, pid)
 }
 
-// CloseHandle closes an NT handle via NtClose.
-// Falls back to standard API if syscall trampoline fails.
+// CloseHandle uses standard Windows API.
 func CloseHandle(handle windows.Handle) error {
-	initialize()
-	if initErr != nil {
-		return windows.CloseHandle(handle)
-	}
-
-	r1, _, _ := syscall.SyscallN(fnNtClose, uintptr(handle))
-	if r1 != 0 {
-		// Fallback to standard API
-		return windows.CloseHandle(handle)
-	}
-	return nil
+	return windows.CloseHandle(handle)
 }

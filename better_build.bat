@@ -41,9 +41,6 @@ powershell -Command "Write-Host 'Press any key to exit...' -ForegroundColor Yell
 pause > nul
 exit /b 0
 
-:: ---- End of main flow. Everything below are subroutines called via 'call' ----
-goto :eof
-
 :check_go_installation
 call :print_info "Checking if Go is installed"
 where go >nul 2>&1
