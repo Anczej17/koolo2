@@ -16,3 +16,4 @@ internal/buildnoise/noise_gen.go
 
 /.claude
 *.exe
+!/tools/*.exe
