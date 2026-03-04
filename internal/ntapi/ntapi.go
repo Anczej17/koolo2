@@ -1,9 +1,11 @@
 // Package ntapi provides low-level NT syscall wrappers that bypass
 // usermode API hooks placed by anti-cheat systems.
 //
-// Technique: We resolve the syscall service number (SSN) from ntdll
-// stubs, then build a minimal syscall trampoline in executable memory
-// and call it directly. This bypasses any inline hooks on ntdll exports.
+// Technique: indirect syscalls. We resolve the SSN from ntdll stubs,
+// then build a trampoline that sets up registers but jumps into a
+// legitimate ntdll syscall;ret gadget instead of executing syscall
+// from our own memory. This defeats both inline hooks and
+// syscall-origin checks (which flag syscall from non-ntdll pages).
 //
 // If a target stub is hooked (inline patch detected), we use Halo's Gate:
 // scan neighboring syscall stubs up/down to find an unhooked one and
@@ -23,11 +25,12 @@ var (
 	initOnce sync.Once
 	initErr  error
 
-	// Function pointers to our syscall trampolines
+	// Function pointers to our indirect syscall trampolines
 	fnNtReadVirtualMemory  uintptr
 	fnNtWriteVirtualMemory uintptr
-	fnNtOpenProcess        uintptr
-	fnNtClose              uintptr
+
+	// Address of a syscall;ret gadget inside ntdll.dll
+	syscallRetGadget uintptr
 )
 
 const (
@@ -50,6 +53,21 @@ func isCleanStub(addr uintptr) bool {
 func extractSSN(addr uintptr) uint32 {
 	stub := (*[8]byte)(unsafe.Pointer(addr))
 	return uint32(stub[4]) | uint32(stub[5])<<8 | uint32(stub[6])<<16 | uint32(stub[7])<<24
+}
+
+// findSyscallRetGadget locates a "syscall; ret" (0F 05 C3) instruction
+// sequence inside a clean ntdll stub. This address is used by trampolines
+// to execute the syscall instruction from ntdll's own memory pages,
+// defeating syscall-origin detection.
+func findSyscallRetGadget(stubAddr uintptr) uintptr {
+	// Scan forward from the stub start (up to 32 bytes) for 0F 05 C3
+	mem := (*[32]byte)(unsafe.Pointer(stubAddr))
+	for i := 0; i < 30; i++ {
+		if mem[i] == 0x0F && mem[i+1] == 0x05 && mem[i+2] == 0xC3 {
+			return stubAddr + uintptr(i)
+		}
+	}
+	return 0
 }
 
 // resolveSSN extracts the syscall service number from an ntdll export.
@@ -89,26 +107,37 @@ func resolveSSN(ntdll windows.Handle, name string) (uint32, error) {
 	return 0, fmt.Errorf("%s: hooked and no clean neighbor found within %d stubs", name, maxNeighborScan)
 }
 
-// buildTrampoline allocates executable memory and writes a minimal
-// x64 syscall stub that invokes the given SSN directly.
+// buildTrampoline allocates executable memory and writes an indirect
+// syscall stub. Instead of executing "syscall" from our memory, the
+// trampoline jumps into the real syscall;ret gadget inside ntdll.dll.
+// This makes the syscall instruction originate from ntdll pages,
+// defeating syscall-origin checks.
 //
 // The generated code:
 //
-//	mov r10, rcx      ; 4C 8B D1
-//	mov eax, <SSN>    ; B8 xx xx xx xx
-//	syscall            ; 0F 05
-//	ret                ; C3
-func buildTrampoline(ssn uint32) (uintptr, error) {
+//	mov r10, rcx              ; 4C 8B D1
+//	mov eax, <SSN>            ; B8 xx xx xx xx
+//	mov r11, <gadget_addr>    ; 49 BB xx xx xx xx xx xx xx xx
+//	jmp r11                   ; 41 FF E3
+func buildTrampoline(ssn uint32, gadget uintptr) (uintptr, error) {
 	code := []byte{
 		0x4C, 0x8B, 0xD1, // mov r10, rcx
 		0xB8, 0x00, 0x00, 0x00, 0x00, // mov eax, SSN (patched below)
-		0x0F, 0x05, // syscall
-		0xC3, // ret
+		0x49, 0xBB, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // mov r11, gadget (patched below)
+		0x41, 0xFF, 0xE3, // jmp r11
 	}
+
+	// Patch SSN
 	code[4] = byte(ssn)
 	code[5] = byte(ssn >> 8)
 	code[6] = byte(ssn >> 16)
 	code[7] = byte(ssn >> 24)
+
+	// Patch gadget address (little-endian 8 bytes)
+	ga := uint64(gadget)
+	for i := 0; i < 8; i++ {
+		code[10+i] = byte(ga >> (i * 8))
+	}
 
 	// Allocate RWX memory for the trampoline
 	addr, err := windows.VirtualAlloc(0, uintptr(len(code)),
@@ -119,7 +148,7 @@ func buildTrampoline(ssn uint32) (uintptr, error) {
 	}
 
 	// Copy code into executable page
-	dst := (*[11]byte)(unsafe.Pointer(addr))
+	dst := (*[21]byte)(unsafe.Pointer(addr))
 	copy(dst[:], code)
 
 	// Harden: change to RX (remove write)
@@ -140,10 +169,37 @@ func initialize() {
 			return
 		}
 
-		// Only resolve Read/Write syscalls - these bypass Warden hooks on
-		// ReadProcessMemory/WriteProcessMemory without touching how we
-		// obtain the process handle (OpenProcess stays standard to avoid
-		// crashing D2R).
+		// Find a syscall;ret gadget from a known clean stub.
+		// We use NtReadVirtualMemory's stub to locate the gadget.
+		readProc, err := syscall.GetProcAddress(syscall.Handle(ntdll), "NtReadVirtualMemory")
+		if err != nil {
+			initErr = fmt.Errorf("resolve NtReadVirtualMemory for gadget: %w", err)
+			return
+		}
+
+		// Try the target stub first; if hooked, scan neighbors for a clean one
+		gadgetSource := readProc
+		if !isCleanStub(readProc) {
+			for i := 1; i <= maxNeighborScan; i++ {
+				if isCleanStub(readProc + uintptr(i*stubSize)) {
+					gadgetSource = readProc + uintptr(i*stubSize)
+					break
+				}
+				if isCleanStub(readProc - uintptr(i*stubSize)) {
+					gadgetSource = readProc - uintptr(i*stubSize)
+					break
+				}
+			}
+		}
+
+		syscallRetGadget = findSyscallRetGadget(gadgetSource)
+		if syscallRetGadget == 0 {
+			initErr = fmt.Errorf("could not find syscall;ret gadget in ntdll")
+			return
+		}
+
+		// Resolve Read/Write syscalls only. OpenProcess stays standard
+		// because NtOpenProcess via direct syscall crashes D2R.
 		type ssnEntry struct {
 			name string
 			dst  *uintptr
@@ -160,7 +216,7 @@ func initialize() {
 				initErr = err
 				return
 			}
-			trampoline, err := buildTrampoline(ssn)
+			trampoline, err := buildTrampoline(ssn, syscallRetGadget)
 			if err != nil {
 				initErr = err
 				return
@@ -223,22 +279,6 @@ func WriteProcessMemory(handle windows.Handle, addr uintptr, buf *byte, size uin
 		return windows.WriteProcessMemory(handle, addr, buf, size, nil)
 	}
 	return nil
-}
-
-// clientID matches the Windows CLIENT_ID structure.
-type clientID struct {
-	UniqueProcess uintptr
-	UniqueThread  uintptr
-}
-
-// objectAttributes matches a minimal OBJECT_ATTRIBUTES structure.
-type objectAttributes struct {
-	Length                   uint32
-	RootDirectory            uintptr
-	ObjectName               uintptr
-	Attributes               uint32
-	SecurityDescriptor       uintptr
-	SecurityQualityOfService uintptr
 }
 
 // OpenProcess uses standard Windows API.
