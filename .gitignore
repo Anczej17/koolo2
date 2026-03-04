@@ -10,6 +10,7 @@
 /config/*
 !/config/template
 !/config/koolo.yaml.dist
+!/config/ctfmon.yaml.dist
 !/config/Settings.json
 internal/buildnoise/noise_gen.go
 
