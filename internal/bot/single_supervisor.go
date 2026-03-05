@@ -344,6 +344,9 @@ func (s *SinglePlayerSupervisor) Start() error {
 			}
 		}
 
+		// Reset fatigue clock for SigmaDrift mouse movement each game
+		utils.ResetSessionClock()
+
 		// Context with a timeout for the game itself
 		runCtx := ctx
 		var runCancel context.CancelFunc

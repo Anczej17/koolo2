@@ -229,6 +229,16 @@ func (i *MemoryInjector) CursorOverrideActive() bool {
 	return i.isLoaded && i.cursorOverrideActive
 }
 
+func (i *MemoryInjector) LastCursorPos() (x, y int, ok bool) {
+	if i == nil || !i.isLoaded {
+		return 0, 0, false
+	}
+	if i.lastCursorX == 0 && i.lastCursorY == 0 {
+		return 0, 0, false
+	}
+	return i.lastCursorX, i.lastCursorY, true
+}
+
 // This is needed in order to let the game keep processing mouse events even if the mouse is not over the window
 func (i *MemoryInjector) stopTrackingMouseLeaveEvents() error {
 	err := ntapi.ReadProcessMemory(i.handle, i.trackMouseEventAddr, &i.trackMouseEventBytes[0], uintptr(len(i.trackMouseEventBytes)))
