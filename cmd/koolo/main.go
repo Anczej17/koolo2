@@ -253,23 +253,9 @@ func main() {
 			}
 		}()
 
-		// 4. Randomly rotate window title to avoid identification
-		go func() {
-			handle := w.Window()
-			for {
-				titlePtr, err := syscall.UTF16PtrFromString(windowTitles[rand.Intn(len(windowTitles))])
-				if err == nil {
-					winproc.SetWindowText.Call(handle, uintptr(unsafe.Pointer(titlePtr)))
-				}
-				// Random delay between 20 and 90 seconds
-				delay := time.Duration(20+rand.Intn(71)) * time.Second
-				select {
-				case <-ctx.Done():
-					return
-				case <-time.After(delay):
-				}
-			}
-		}()
+		// Window title is set once at creation (line 196) from the random pool.
+		// Do NOT rotate it at runtime — SetWindowText on a WebView2 HWND
+		// causes the renderer to detach, turning the window permanently white.
 
 		defer w.Destroy()
 		w.Run()
