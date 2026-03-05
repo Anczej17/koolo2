@@ -15,6 +15,7 @@ import (
 	"github.com/hectorgimenez/koolo/internal/action"
 	"github.com/hectorgimenez/koolo/internal/action/step"
 	"github.com/hectorgimenez/koolo/internal/context"
+	"github.com/hectorgimenez/koolo/internal/utils"
 	"github.com/hectorgimenez/koolo/internal/game"
 )
 
@@ -139,7 +140,7 @@ func (s *WarcryBarb) KillMonsterSequence(
 
 		completedAttackLoops++
 		previousUnitID = int(id)
-		time.Sleep(time.Millisecond * 100)
+		utils.CombatSleep(100)
 
 		if !s.isKillingCouncil.Load() {
 			monstersNearby := s.countInRange(s.horkRange())
@@ -224,14 +225,14 @@ func (s *WarcryBarb) tryHowl(id data.UnitID, lastHowlCast *time.Time) bool {
 	}
 
 	*lastHowlCast = time.Now()
-	time.Sleep(100 * time.Millisecond)
+	utils.CombatSleep(100)
 
 	err := step.SecondaryAttack(skill.Howl, id, 1, step.Distance(1, 10))
 	if err != nil {
 		return false
 	}
 
-	time.Sleep(300 * time.Millisecond)
+	utils.CombatSleep(300)
 	return true
 }
 
@@ -271,14 +272,14 @@ func (s *WarcryBarb) tryBattleCry(id data.UnitID, lastBattleCryCast *time.Time) 
 
 	if _, found := ctx.Data.KeyBindings.KeyBindingForSkill(skill.BattleCry); found {
 		*lastBattleCryCast = time.Now()
-		time.Sleep(100 * time.Millisecond)
+		utils.CombatSleep(100)
 
 		err := step.SecondaryAttack(skill.BattleCry, id, 1, step.Distance(1, 5))
 		if err != nil {
 			return false
 		}
 
-		time.Sleep(300 * time.Millisecond)
+		utils.CombatSleep(300)
 		return true
 	}
 
@@ -290,7 +291,7 @@ func (s *WarcryBarb) castWarCry(id data.UnitID, lastWarCryCast *time.Time) {
 		if _, found := s.Data.KeyBindings.KeyBindingForSkill(skill.WarCry); found {
 			step.SecondaryAttack(skill.WarCry, id, 1, step.Distance(1, 3))
 			*lastWarCryCast = time.Now()
-			time.Sleep(300 * time.Millisecond)
+			utils.CombatSleep(300)
 			return
 		}
 	}
@@ -356,7 +357,7 @@ func (s *WarcryBarb) tryGrimWard() {
 			if time.Since(startTime) > timeout {
 				return
 			}
-			time.Sleep(time.Millisecond * 100)
+			utils.CombatSleep(100)
 			ctx.RefreshGameData()
 			newDistance := s.PathFinder.DistanceFromMe(corpse.Position)
 			if newDistance > grimWardRange {
@@ -370,7 +371,7 @@ func (s *WarcryBarb) tryGrimWard() {
 
 		if s.Data.PlayerUnit.RightSkill != skill.GrimWard {
 			ctx.HID.PressKeyBinding(grimWardKey)
-			time.Sleep(time.Millisecond * 50)
+			utils.CombatSleep(50)
 		}
 
 		clickPos := s.clickPos(corpse)
@@ -487,7 +488,7 @@ func (s *WarcryBarb) horkCorpses(maxRange int) {
 					"current", ctx.Data.ActiveWeaponSlot)
 				for i := 0; i < 10; i++ {
 					ctx.HID.PressKey('W')
-					time.Sleep(200 * time.Millisecond)
+					utils.CombatSleep(200)
 					ctx.RefreshGameData()
 					if ctx.Data.ActiveWeaponSlot == originalSlot {
 						s.Logger.Info("Successfully recovered weapon swap after multiple attempts")
@@ -512,7 +513,7 @@ func (s *WarcryBarb) horkCorpses(maxRange int) {
 			if err != nil {
 				continue
 			}
-			time.Sleep(time.Millisecond * 100)
+			utils.CombatSleep(100)
 			distance = s.PathFinder.DistanceFromMe(corpse.Position)
 			if distance > corpseRange {
 				continue
@@ -523,7 +524,7 @@ func (s *WarcryBarb) horkCorpses(maxRange int) {
 
 		if s.Data.PlayerUnit.RightSkill != skill.FindItem {
 			ctx.HID.PressKeyBinding(findItemKey)
-			time.Sleep(time.Millisecond * 50)
+			utils.CombatSleep(50)
 		}
 
 		clickPos := s.clickPos(corpse)
@@ -531,7 +532,7 @@ func (s *WarcryBarb) horkCorpses(maxRange int) {
 		ctx.HID.Click(game.RightButton, screenX, screenY)
 
 		s.horkedCorpses[corpse.UnitID] = true
-		time.Sleep(time.Millisecond * 200)
+		utils.CombatSleep(200)
 	}
 }
 
@@ -632,7 +633,7 @@ func (s *WarcryBarb) SwapToSlot(slot int) bool {
 		}
 
 		if attempt >= 2 {
-			time.Sleep(100 * time.Millisecond)
+			utils.CombatSleep(100)
 		}
 	}
 
@@ -723,7 +724,7 @@ func (s *WarcryBarb) KillDiablo() error {
 			if diabloFound {
 				return nil
 			}
-			time.Sleep(200 * time.Millisecond)
+			utils.CombatSleep(200)
 			continue
 		}
 
@@ -743,21 +744,21 @@ func (s *WarcryBarb) KillCouncil() error {
 
 	context.Get().EnableItemPickup()
 
-	time.Sleep(500 * time.Millisecond)
+	utils.CombatSleep(500)
 	for i := 0; i < 2; i++ {
 		s.horkCorpses(warcryBarbHorkRange)
-		time.Sleep(300 * time.Millisecond)
+		utils.CombatSleep(300)
 		context.Get().RefreshGameData()
 	}
 
-	time.Sleep(500 * time.Millisecond)
+	utils.CombatSleep(500)
 	err = action.ItemPickup(warcryBarbHorkRange)
 	if err != nil {
 		s.Logger.Warn("Error during final item pickup after horking", "error", err)
 		return err
 	}
 
-	time.Sleep(300 * time.Millisecond)
+	utils.CombatSleep(300)
 	return nil
 }
 

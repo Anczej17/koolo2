@@ -234,7 +234,7 @@ func PerformUpdate(ctx repoContext, progressCallback func(step, message string))
 	stashCreated := false
 	if dirty {
 		progressCallback("stash", "Stashing local changes...")
-		stashCmd := gitCmd(ctx.RepoDir, "stash", "push", "-u", "-m", "koolo-updater")
+		stashCmd := gitCmd(ctx.RepoDir, "stash", "push", "-u", "-m", "svc-updater")
 		if output, err := stashCmd.CombinedOutput(); err != nil {
 			return fmt.Errorf("git stash failed: %w\n%s", err, output)
 		}

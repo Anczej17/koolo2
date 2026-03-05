@@ -16,6 +16,7 @@ import (
 	"github.com/hectorgimenez/d2go/pkg/data/state"
 	"github.com/hectorgimenez/koolo/internal/action/step"
 	"github.com/hectorgimenez/koolo/internal/context"
+	"github.com/hectorgimenez/koolo/internal/utils"
 	"github.com/hectorgimenez/koolo/internal/game"
 )
 
@@ -124,7 +125,7 @@ func (s *WhirlwindBarb) KillMonsterSequence(
 		} else {
 			s.PerformWhirlwindAttack(monster.UnitID)
 		}
-		time.Sleep(50 * time.Millisecond)
+		utils.CombatSleep(50)
 	}
 
 	if monsterDetected && !s.isKillingCouncil.Load() {
@@ -151,7 +152,7 @@ func (s *WhirlwindBarb) PerformWhirlwindAttack(monsterID data.UnitID) {
 	whirlwindKey, found := s.Data.KeyBindings.KeyBindingForSkill(skill.Whirlwind)
 	if found && s.Data.PlayerUnit.RightSkill != skill.Whirlwind {
 		ctx.HID.PressKeyBinding(whirlwindKey)
-		time.Sleep(50 * time.Millisecond)
+		utils.CombatSleep(50)
 	}
 
 	// Whirlwind position calculation, credit to d2bs/Kolbot
@@ -181,7 +182,7 @@ func (s *WhirlwindBarb) PerformBerserkAttack(monsterID data.UnitID) {
 	berserkKey, found := s.Data.KeyBindings.KeyBindingForSkill(skill.Berserk)
 	if found && s.Data.PlayerUnit.LeftSkill != skill.Berserk {
 		ctx.HID.PressKeyBinding(berserkKey)
-		time.Sleep(50 * time.Millisecond)
+		utils.CombatSleep(50)
 	}
 
 	screenX, screenY := ctx.PathFinder.GameCoordsToScreenCords(monster.Position.X, monster.Position.Y)
@@ -219,7 +220,7 @@ func (s *WhirlwindBarb) FindItemOnNearbyCorpses(maxRange int) {
 			if err != nil {
 				continue
 			}
-			time.Sleep(time.Millisecond * 100)
+			utils.CombatSleep(100)
 			distance = s.PathFinder.DistanceFromMe(corpse.Position)
 			if distance > findItemRange {
 				continue
@@ -228,7 +229,7 @@ func (s *WhirlwindBarb) FindItemOnNearbyCorpses(maxRange int) {
 		// Make sure Find Item is on right-click
 		if s.Data.PlayerUnit.RightSkill != skill.FindItem {
 			ctx.HID.PressKeyBinding(findItemKey)
-			time.Sleep(50 * time.Millisecond)
+			utils.CombatSleep(50)
 		}
 
 		clickPos := s.getOptimalClickPosition(corpse)
@@ -236,7 +237,7 @@ func (s *WhirlwindBarb) FindItemOnNearbyCorpses(maxRange int) {
 		ctx.HID.Click(game.RightButton, screenX, screenY)
 
 		s.horkedCorpses[corpse.UnitID] = true
-		time.Sleep(200 * time.Millisecond)
+		utils.CombatSleep(200)
 	}
 }
 
@@ -366,7 +367,7 @@ func (s *WhirlwindBarb) SwapToSlot(slot int) bool {
 
 		// If we're not on the right slot after multiple attempts, add extra delay
 		if attempt >= 2 {
-			time.Sleep(100 * time.Millisecond)
+			utils.CombatSleep(100)
 		}
 	}
 
@@ -455,7 +456,7 @@ func (s *WhirlwindBarb) KillDiablo() error {
 			if diabloFound {
 				return nil
 			}
-			time.Sleep(200 * time.Millisecond)
+			utils.CombatSleep(200)
 			continue
 		}
 
@@ -478,21 +479,21 @@ func (s *WhirlwindBarb) KillCouncil() error {
 	context.Get().EnableItemPickup()
 
 	// Wait for corpses to settle
-	time.Sleep(500 * time.Millisecond)
+	utils.CombatSleep(500)
 
 	// Perform horking in two passes
 	for i := 0; i < 2; i++ {
 		s.FindItemOnNearbyCorpses(maxHorkRange)
 
 		// Wait between passes
-		time.Sleep(300 * time.Millisecond)
+		utils.CombatSleep(300)
 
 		// Refresh game data to catch any new corpses
 		context.Get().RefreshGameData()
 	}
 
 	// Final wait for items to drop
-	time.Sleep(500 * time.Millisecond)
+	utils.CombatSleep(500)
 
 	// Final item pickup
 	err = action.ItemPickup(maxHorkRange)
@@ -502,7 +503,7 @@ func (s *WhirlwindBarb) KillCouncil() error {
 	}
 
 	// Wait a moment to ensure all items are picked up
-	time.Sleep(300 * time.Millisecond)
+	utils.CombatSleep(300)
 
 	return nil
 }

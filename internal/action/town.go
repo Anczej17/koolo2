@@ -3,7 +3,6 @@ package action
 import (
 	"errors"
 	"fmt"
-	"time"
 
 	"github.com/hectorgimenez/d2go/pkg/data/item"
 	"github.com/hectorgimenez/d2go/pkg/data/skill"
@@ -17,25 +16,13 @@ func StashFull() bool {
 	ctx := context.Get()
 	totalUsedSpace := 0
 
-	// Stash tabs are 1-indexed:
-	// Tab 1 = Personal stash
-	// Tabs 2-N = Shared stash pages (N = 2 + SharedStashPages - 1)
-	// Non-DLC: 3 shared pages (tabs 2-4)
-	// DLC: 5 shared pages (tabs 2-6)
-	sharedPages := ctx.Data.Inventory.SharedStashPages
-	if sharedPages == 0 {
-		// Fallback: assume 3 pages if not detected
-		sharedPages = 3
-	}
-
-	tabsToCheck := make([]int, sharedPages)
-	for i := 0; i < sharedPages; i++ {
-		tabsToCheck[i] = i + 2 // Tabs start at 2 (first shared page)
-	}
+	// Stash tabs are 1-indexed, so we check tabs 2, 3, and 4.
+	// These correspond to the first three shared stash tabs.
+	tabsToCheck := []int{2, 3, 4}
 
 	for _, tabIndex := range tabsToCheck {
 		SwitchStashTab(tabIndex)
-		time.Sleep(time.Millisecond * 500)
+		utils.TownSleep(500)
 		ctx.RefreshGameData()
 
 		sharedItems := ctx.Data.Inventory.ByLocation(item.LocationSharedStash)
@@ -44,12 +31,8 @@ func StashFull() bool {
 		}
 	}
 
-	// Each page has 100 spaces. 80% threshold for muling.
-	// Non-DLC: 3 pages × 100 = 300 spaces, 80% = 240
-	// DLC: 5 pages × 100 = 500 spaces, 80% = 400
-	maxSpace := sharedPages * 100
-	threshold := int(float64(maxSpace) * 0.8)
-	return totalUsedSpace > threshold
+	// 3 tabs, 100 spaces each = 300 total spaces. 80% of 300 is 240.
+	return totalUsedSpace > 240
 }
 
 func PreRun(firstRun bool) error {
@@ -162,10 +145,6 @@ func PreRun(firstRun bool) error {
 	// so we don't carry them out to the next area unnecessarily.
 	Stash(false)
 
-	if ctx.CharacterCfg.Game.Leveling.AutoEquip && isLevelingChar {
-		AutoEquip()
-	}
-
 	if isLevelingChar {
 		OptimizeInventory(item.LocationInventory)
 	}
@@ -269,11 +248,6 @@ func InRunReturnTownRoutine() error {
 	Stash(false)
 	ctx.PauseIfNotPriority() // Check after post-reroll Stash
 
-	if ctx.CharacterCfg.Game.Leveling.AutoEquip && isLevelingChar {
-		AutoEquip()
-		ctx.PauseIfNotPriority() // Check after AutoEquip
-	}
-
 	if ctx.CharacterCfg.Game.Leveling.EnsurePointsAllocation && isLevelingChar {
 		EnsureStatPoints()
 		ctx.PauseIfNotPriority() // Check after EnsureStatPoints
@@ -312,7 +286,7 @@ func InRunReturnTownRoutine() error {
 
 	if ctx.CharacterCfg.Companion.Leader {
 		UsePortalInTown()
-		utils.Sleep(500)
+		utils.TownSleep(500)
 		return OpenTPIfLeader()
 	}
 

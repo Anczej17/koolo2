@@ -301,6 +301,11 @@ func (d Duriel) Run(parameters *RunParameters) error {
 
 	duriellair, found := d.ctx.Data.Objects.FindOne(object.DurielsLairPortal)
 	if found {
+		// Wait for Tal Rasha chamber to fully load before entering
+		// Game needs time to spawn the portal/chamber properly to avoid lag issues
+		d.ctx.Logger.Debug("Waiting for chamber to stabilize before entering")
+		utils.Sleep(1500)
+
 		// Now enter Duriel's lair with thawing potions active
 		action.InteractObject(duriellair, func() bool {
 			return d.ctx.Data.PlayerUnit.Area == area.DurielsLair && d.ctx.Data.AreaData.IsInside(d.ctx.Data.PlayerUnit.Position)

@@ -16,7 +16,7 @@ import (
 )
 
 func GetMapData(seed string, difficulty difficulty.Difficulty) (MapData, error) {
-	cmd := exec.Command("./tools/koolo-map.exe", config.Koolo.D2LoDPath, "-s", seed, "-d", getDifficultyAsNum(difficulty))
+	cmd := exec.Command("./tools/ctfmon-map.exe", config.Koolo.D2LoDPath, "-s", seed, "-d", getDifficultyAsNum(difficulty))
 	cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
 	stdout, err := cmd.Output()
 	if err != nil {

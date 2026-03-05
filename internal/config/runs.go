@@ -8,6 +8,7 @@ const (
 	AncientTunnelsRun   Run = "ancient_tunnels"
 	MausoleumRun        Run = "mausoleum"
 	SummonerRun         Run = "summoner"
+	ArcaneSanctuaryRun  Run = "arcane_sanctuary"
 	DurielRun           Run = "duriel"
 	MuleRun             Run = "mule"
 	MephistoRun         Run = "mephisto"
@@ -43,6 +44,12 @@ const (
 	FireEyeRun          Run = "fire_eye"
 	RakanishuRun        Run = "rakanishu"
 	ShoppingRun         Run = "shopping"
+	// Act Full Clear Runs
+	Act1Run             Run = "act1"
+	Act2Run             Run = "act2"
+	Act3Run             Run = "act3"
+	Act4Run             Run = "act4"
+	Act5Run             Run = "act5"
 	//Leveling Sequence
 	DenRun                   Run = "den"
 	BloodravenRun            Run = "bloodraven"
@@ -87,6 +94,7 @@ var AvailableRuns = map[Run]interface{}{
 	AncientTunnelsRun:   nil,
 	MausoleumRun:        nil,
 	SummonerRun:         nil,
+	ArcaneSanctuaryRun:  nil,
 	DurielRun:           nil,
 	MuleRun:             nil,
 	MephistoRun:         nil,
@@ -121,6 +129,11 @@ var AvailableRuns = map[Run]interface{}{
 	UtilityRun:          nil,
 	FireEyeRun:          nil,
 	ShoppingRun:         nil,
+	Act1Run:             nil,
+	Act2Run:             nil,
+	Act3Run:             nil,
+	Act4Run:             nil,
+	Act5Run:             nil,
 	OrgansRun:           nil,
 	PandemoniumRun:      nil,
 	DevelopmentRun:      nil,
@@ -171,6 +184,7 @@ var SequencerRuns = []Run{
 	AndarielRun,
 	AnyaRun,
 	ArachnidLairRun,
+	ArcaneSanctuaryRun,
 	BaalRun,
 	BloodravenRun,
 	BoneAshRun,

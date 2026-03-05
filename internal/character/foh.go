@@ -16,6 +16,7 @@ import (
 	"github.com/hectorgimenez/koolo/internal/action/step"
 	"github.com/hectorgimenez/koolo/internal/context"
 	"github.com/hectorgimenez/koolo/internal/game"
+	"github.com/hectorgimenez/koolo/internal/utils"
 )
 
 const (
@@ -314,7 +315,7 @@ func (f Foh) KillCouncil() error {
 	}
 
 	// Wait a moment for items to settle
-	time.Sleep(300 * time.Millisecond)
+	utils.CombatSleep(300)
 
 	// Re-enable item pickup and do a final pickup pass
 	err = action.ItemPickup(40)
@@ -379,7 +380,7 @@ func (f Foh) KillDiablo() error {
 			if diabloFound {
 				return nil
 			}
-			time.Sleep(200 * time.Millisecond)
+			utils.CombatSleep(200)
 			continue
 		}
 

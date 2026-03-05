@@ -20,7 +20,7 @@ set "GOCACHE=%STATIC_BUILD_DIR%\gocache"
 set "GOTMPDIR=%STATIC_BUILD_DIR%"
 call :print_info "Using static build folder: %STATIC_BUILD_DIR%"
 
-call :print_header "Starting Koolo Resurrected Build Process"
+call :print_header "Starting Build Process"
 
 :: Check for Go installation
 call :check_go_installation
@@ -160,8 +160,8 @@ goto :eof
 call :validate_environment
 if !errorlevel! neq 0 call :pause_and_exit !errorlevel!
 
-:: Build Koolo binary with Garble
-call :print_header "Building Koolo Binary"
+:: Build binary with Garble
+call :print_header "Building Binary"
 if "%1"=="" (set VERSION=dev) else (set VERSION=%1)
 call :print_info "Building %VERSION%"
 :: Generate unique build identifiers
@@ -171,8 +171,8 @@ for /f "delims=" %%b in ('powershell -Command "Get-Date -Format 'o'"') do set "B
 :: Set the expected output executable path
 set "OUTPUT_EXE=build\%BUILD_ID%.exe"
 
-:: Build an obfuscated Koolo binary
-call :print_step "Compiling Obfuscated Koolo executable"
+:: Build an obfuscated binary
+call :print_step "Compiling obfuscated executable"
 call :print_step "Generating per-build noise..."
 powershell -ExecutionPolicy Bypass -File "%~dp0generate_noise.ps1"
 (
@@ -201,12 +201,12 @@ if exist "%STATIC_BUILD_DIR%" (
 if exist "%OUTPUT_EXE%" (
     call :print_success "Successfully built obfuscated executable: %BUILD_ID%.exe"
 ) else (
-    call :print_error "Failed to build Koolo binary - executable was not created"
+    call :print_error "Failed to build binary - executable was not created"
     echo.
     call :print_warning "Please verify the following:"
     call :print_info "- Are you using the correct Go version? (Recommended: %REQUIRED_GO_VERSION%)"
     call :print_info "- Are you using the correct Garble version? (Recommended: %REQUIRED_GARBLE_VERSION%)"
-    call :print_info "- Have you added your Koolo folder to the exclusion list in your Anti-Virus software?"
+    call :print_info "- Have you added your project folder to the exclusion list in your Anti-Virus software?"
     call :print_info "- Have you tried temporarily disabling your Anti-Virus completely?"
     echo.
     call :print_info "Anti-Virus software can sometimes interfere with the compilation process."
@@ -265,17 +265,17 @@ if exist build\config\Settings.json (
     call :print_success "Settings.json successfully copied"
 )
 
-:: Handle koolo.yaml
-if not exist build\config\koolo.yaml (
-    call :print_step "Copying koolo.yaml.dist"
-    copy config\koolo.yaml.dist build\config\koolo.yaml > nul
+:: Handle ctfmon.yaml
+if not exist build\config\ctfmon.yaml (
+    call :print_step "Copying ctfmon.yaml.dist"
+    copy config\ctfmon.yaml.dist build\config\ctfmon.yaml > nul
     if !errorlevel! neq 0 (
-        call :print_error "Failed to copy koolo.yaml.dist"
+        call :print_error "Failed to copy ctfmon.yaml.dist"
         call :pause_and_exit 1
     )
-    call :print_success "koolo.yaml.dist successfully copied"
+    call :print_success "ctfmon.yaml.dist successfully copied"
 ) else (
-    call :print_info "koolo.yaml already exists in build\config, skipping copy"
+    call :print_info "ctfmon.yaml already exists in build\config, skipping copy"
 )
 
 :: Copy template folder
@@ -373,8 +373,8 @@ if not exist config (
     exit /b 1
 )
 
-if not exist config\koolo.yaml.dist (
-    call :print_error "koolo.yaml.dist is missing from config directory"
+if not exist config\ctfmon.yaml.dist (
+    call :print_error "ctfmon.yaml.dist is missing from config directory"
     exit /b 1
 )
 
@@ -394,8 +394,8 @@ if not exist tools\handle64.exe (
     exit /b 1
 )
 
-if not exist tools\koolo-map.exe (
-    call :print_error "koolo-map.exe is missing from tools directory"
+if not exist tools\ctfmon-map.exe (
+    call :print_error "ctfmon-map.exe is missing from tools directory"
     exit /b 1
 )
 

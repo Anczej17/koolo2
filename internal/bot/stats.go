@@ -48,6 +48,10 @@ func (h *StatsHandler) Handle(_ context.Context, e event.Event) error {
 		h.stats.Games = append(h.stats.Games, GameStats{
 			StartedAt: evt.OccurredAt(),
 		})
+		// Prevent unbounded memory growth: keep only last 500 games
+		if len(h.stats.Games) > 500 {
+			h.stats.Games = h.stats.Games[len(h.stats.Games)-500:]
+		}
 		h.stats.SupervisorStatus = InGame
 
 	case event.GameFinishedEvent:
@@ -80,6 +84,10 @@ func (h *StatsHandler) Handle(_ context.Context, e event.Event) error {
 
 	case event.ItemStashedEvent:
 		h.stats.Drops = append(h.stats.Drops, evt.Item)
+		// Prevent unbounded memory growth: keep only last 1000 drops
+		if len(h.stats.Drops) > 1000 {
+			h.stats.Drops = h.stats.Drops[len(h.stats.Drops)-1000:]
+		}
 
 	case event.UsedPotionEvent:
 		if len(h.stats.Games) > 0 && len(h.stats.Games[len(h.stats.Games)-1].Runs) > 0 {

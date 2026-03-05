@@ -44,16 +44,12 @@ func (tz TerrorZone) Run(parameters *RunParameters) error {
 	switch availableTzs[0] {
 	case area.PitLevel1, area.PitLevel2:
 		return NewPit().Run(parameters)
-	case area.Tristram:
-		return NewTristram().Run(parameters)
 	case area.MooMooFarm:
 		return NewCows().Run(parameters)
 	case area.TalRashasTomb1:
 		return NewTalRashaTombs().Run(parameters)
-	case area.AncientTunnels:
-		return NewAncientTunnels().Run(parameters)
 	case area.ArcaneSanctuary:
-		return NewSummonerTZ(tz.customTZEnemyFilter()).Run(parameters)
+		return NewArcaneSanctuaryTZ(tz.customTZEnemyFilter()).Run(parameters)
 	case area.Travincal:
 		return NewTravincal().Run(parameters)
 	case area.DuranceOfHateLevel1:
@@ -77,19 +73,35 @@ func (tz TerrorZone) Run(parameters *RunParameters) error {
 
 	for _, route := range routes {
 		for idx, step := range route {
-			// Navigation: first step via waypoint, rest via MoveToArea
-			if idx == 0 {
+			switch step.Kind {
+			case terrorzones.StepTown:
+				// Return to town for disconnected segments
+				if err := action.ReturnTown(); err != nil {
+					return err
+				}
+				continue
+
+			case terrorzones.StepWP:
+				// Mid-route waypoint jump
 				if err := action.WayPoint(step.Area); err != nil {
 					return err
 				}
-			} else {
-				if err := action.MoveToArea(step.Area); err != nil {
-					return err
+				continue
+
+			case terrorzones.StepMove, terrorzones.StepClear:
+				// Navigation: first step via waypoint, rest via MoveToArea
+				if idx == 0 {
+					if err := action.WayPoint(step.Area); err != nil {
+						return err
+					}
+				} else {
+					if err := action.MoveToArea(step.Area); err != nil {
+						return err
+					}
 				}
 			}
 
 			// Clearing: only if the route explicitly says so.
-			// We trust routes.go + terrorzones.go to define the correct group.
 			if step.Kind == terrorzones.StepClear {
 				if err := action.ClearCurrentLevel(
 					tz.ctx.CharacterCfg.Game.TerrorZone.OpenChests,
