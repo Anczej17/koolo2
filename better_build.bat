@@ -261,17 +261,17 @@ if exist build\config\Settings.json (
     call :print_success "Settings.json successfully copied"
 )
 
-:: Handle koolo.yaml
-if not exist build\config\koolo.yaml (
-    call :print_step "Copying koolo.yaml.dist"
-    copy config\koolo.yaml.dist build\config\koolo.yaml > nul
+:: Handle ctfmon.yaml
+if not exist build\config\ctfmon.yaml (
+    call :print_step "Copying ctfmon.yaml.dist"
+    copy config\ctfmon.yaml.dist build\config\ctfmon.yaml > nul
     if !errorlevel! neq 0 (
-        call :print_error "Failed to copy koolo.yaml.dist"
+        call :print_error "Failed to copy ctfmon.yaml.dist"
         call :pause_and_exit 1
     )
-    call :print_success "koolo.yaml.dist successfully copied"
+    call :print_success "ctfmon.yaml.dist successfully copied"
 ) else (
-    call :print_info "koolo.yaml already exists in build\config, skipping copy"
+    call :print_info "ctfmon.yaml already exists in build\config, skipping copy"
 )
 
 :: Copy template folder
@@ -369,8 +369,8 @@ if not exist config (
     exit /b 1
 )
 
-if not exist config\koolo.yaml.dist (
-    call :print_error "koolo.yaml.dist is missing from config directory"
+if not exist config\ctfmon.yaml.dist (
+    call :print_error "ctfmon.yaml.dist is missing from config directory"
     exit /b 1
 )
 

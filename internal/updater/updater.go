@@ -519,12 +519,12 @@ func (u *Updater) copyConfigFiles(ctx repoContext, destDir string) error {
 		}
 	}
 
-	// Copy koolo.yaml.dist if koolo.yaml doesn't exist
-	yamlDest := filepath.Join(destDir, "config", "koolo.yaml")
+	// Copy ctfmon.yaml.dist if ctfmon.yaml doesn't exist
+	yamlDest := filepath.Join(destDir, "config", "ctfmon.yaml")
 	if _, err := os.Stat(yamlDest); os.IsNotExist(err) {
-		u.log("Copying koolo.yaml.dist...")
-		if err := copyFile(filepath.Join(ctx.RepoDir, "config", "koolo.yaml.dist"), yamlDest); err != nil {
-			return fmt.Errorf("failed to copy koolo.yaml: %w", err)
+		u.log("Copying ctfmon.yaml.dist...")
+		if err := copyFile(filepath.Join(ctx.RepoDir, "config", "ctfmon.yaml.dist"), yamlDest); err != nil {
+			return fmt.Errorf("failed to copy ctfmon.yaml: %w", err)
 		}
 	}
 

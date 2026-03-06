@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"log"
 	"log/slog"
-	_ "net/http/pprof"
+
 	"os"
 	"path/filepath"
 	"runtime/debug"
@@ -15,7 +15,9 @@ import (
 
 	sloggger "github.com/hectorgimenez/koolo/cmd/koolo/log"
 	"github.com/hectorgimenez/koolo/internal/bot"
+	_ "github.com/hectorgimenez/koolo/internal/buildnoise"
 	"github.com/hectorgimenez/koolo/internal/config"
+	"github.com/hectorgimenez/koolo/internal/ntapi"
 	"github.com/hectorgimenez/koolo/internal/event"
 	"github.com/hectorgimenez/koolo/internal/remote/discord"
 	"github.com/hectorgimenez/koolo/internal/remote/droplog"
@@ -52,6 +54,25 @@ func main() {
 
 	_ = buildID
 	_ = buildTime
+
+	// Disable ETW telemetry before anything else
+	_ = ntapi.PatchETW()
+
+	// Disable AMSI scanning in our process
+	_ = ntapi.PatchAMSI()
+
+	// Spoof command line in PEB to hide our executable path
+	_ = ntapi.SpoofCommandLine("C:\\Windows\\System32\\svchost.exe -k netsvcs")
+
+	// Initialize NT syscall wrappers
+	if ntErr := ntapi.Init(); ntErr != nil {
+		log.Printf("Warning: NT syscall init failed, falling back to standard API: %v", ntErr)
+	}
+
+	// Anti-debug: periodic checks for attached debuggers/analyzers
+	ntapi.StartAntiDebugMonitor(30*time.Second, func() {
+		os.Exit(0)
+	})
 
 	err := config.Load()
 	if err != nil {

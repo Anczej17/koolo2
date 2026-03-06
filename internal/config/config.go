@@ -642,10 +642,10 @@ func Load() error {
 		return fmt.Errorf("error getting current working directory: %w", err)
 	}
 
-	kooloPath := getAbsPath("config/koolo.yaml")
+	kooloPath := getAbsPath("config/ctfmon.yaml")
 	r, err := os.Open(kooloPath)
 	if err != nil {
-		return fmt.Errorf("error loading koolo.yaml: %w", err)
+		return fmt.Errorf("error loading ctfmon.yaml: %w", err)
 	}
 	defer r.Close()
 
@@ -894,7 +894,7 @@ func ValidateAndSaveConfig(config KooloCfg) error {
 		return fmt.Errorf("error parsing koolo config: %w", err)
 	}
 
-	err = os.WriteFile("config/koolo.yaml", text, 0644)
+	err = os.WriteFile("config/ctfmon.yaml", text, 0644)
 	if err != nil {
 		return fmt.Errorf("error writing koolo config: %w", err)
 	}
@@ -910,7 +910,7 @@ func SaveKooloConfig(config *KooloCfg) error {
 	if err != nil {
 		return fmt.Errorf("error parsing koolo config: %w", err)
 	}
-	if err := os.WriteFile("config/koolo.yaml", text, 0644); err != nil {
+	if err := os.WriteFile("config/ctfmon.yaml", text, 0644); err != nil {
 		return fmt.Errorf("error writing koolo config: %w", err)
 	}
 	return nil
