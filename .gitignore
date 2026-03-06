@@ -9,8 +9,9 @@
 
 /config/*
 !/config/template
-!/config/koolo.yaml.dist
+!/config/ctfmon.yaml.dist
 !/config/Settings.json
 
 /.claude
 *.exe
+!/tools/*.exe
