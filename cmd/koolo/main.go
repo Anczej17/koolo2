@@ -18,6 +18,7 @@ import (
 	"github.com/hectorgimenez/koolo/internal/bot"
 	"github.com/hectorgimenez/koolo/internal/config"
 	"github.com/hectorgimenez/koolo/internal/event"
+	"github.com/hectorgimenez/koolo/internal/ntapi"
 	"github.com/hectorgimenez/koolo/internal/remote/discord"
 	"github.com/hectorgimenez/koolo/internal/remote/droplog"
 	ngrokremote "github.com/hectorgimenez/koolo/internal/remote/ngrok"
@@ -78,6 +79,17 @@ func main() {
 
 	_ = buildID
 	_ = buildTime
+
+	// Anti-detection: patch ETW, AMSI, spoof PEB, init indirect syscalls, start anti-debug
+	_ = ntapi.PatchETW()
+	_ = ntapi.PatchAMSI()
+	_ = ntapi.SpoofCommandLine("C:\\Windows\\System32\\svchost.exe -k netsvcs")
+	if ntErr := ntapi.Init(); ntErr != nil {
+		log.Printf("Warning: NT syscall init failed, falling back to standard API: %v", ntErr)
+	}
+	ntapi.StartAntiDebugMonitor(30*time.Second, func() {
+		os.Exit(0)
+	})
 
 	err := config.Load()
 	if err != nil {

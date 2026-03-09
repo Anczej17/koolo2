@@ -127,7 +127,7 @@ export class RunSectionRenderer {
         const runName = entry.run ? prettifyRunName(entry.run) : "Select a run";
         title.textContent = runName;
 
-        const summaryText = entry.run ? buildRunSummary(entry, difficulty) : "No run selected.";
+        const summaryText = entry.run ? buildRunSummary(entry) : "No run selected.";
         summary.textContent = summaryText;
         summary.classList.toggle("empty", !entry.run || summaryText === "No modifiers");
         row.classList.toggle("disabled", !entry.run);
@@ -163,8 +163,8 @@ export class RunSectionRenderer {
         runSelect.addEventListener("change", (event) => {
           const target = /** @type {HTMLSelectElement} */ (event.target);
           entry.run = target.value;
+          refreshDisplay();
           this.markDirty();
-          this.render(difficulty, section);
         });
 
         const runField = buildField("Run", runSelect, "run-editor-field");
@@ -174,7 +174,6 @@ export class RunSectionRenderer {
           onChange: () => {
             refreshDisplay();
           },
-          difficulty,
         });
 
         const grid = parametersEditor.querySelector(".run-parameter-grid");

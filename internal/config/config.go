@@ -207,6 +207,14 @@ type AutoRespecConfig struct {
 	Applied     bool `yaml:"applied,omitempty"`
 }
 
+// ActRunSettings holds configuration for full act clearing runs
+type ActRunSettings struct {
+	FocusOnElitePacks  bool `yaml:"focusOnElitePacks"`  // Only kill elite packs (faster)
+	OpenChests         bool `yaml:"openChests"`         // Open chests during clearing
+	PauseAfterRun      bool `yaml:"pauseAfterRun"`      // Stop supervisor after completing the run
+	UseWorldStoneShard bool `yaml:"useWorldStoneShard"` // Use World Stone Shard before starting the run
+}
+
 type CharacterCfg struct {
 	MaxGameLength        int    `yaml:"maxGameLength"`
 	Username             string `yaml:"username"`
@@ -376,9 +384,6 @@ type CharacterCfg struct {
 			HorkMonsterCheckRange       int  `yaml:"hork_monster_check_range"`
 			UsePacketLearning           bool `yaml:"use_packet_learning"`
 		} `yaml:"warcry_barb"`
-		WarlockLeveling struct {
-			UsePacketLearning bool `yaml:"use_packet_learning"`
-		} `yaml:"warlock_leveling"`
 	} `yaml:"character"`
 
 	Game struct {
@@ -439,6 +444,10 @@ type CharacterCfg struct {
 		Summoner struct {
 			KillFireEye bool `yaml:"killFireEye"`
 		} `yaml:"summoner"`
+		ArcaneSanctuary struct {
+			OpenChests        bool `yaml:"openChests"`
+			FocusOnElitePacks bool `yaml:"focusOnElitePacks"`
+		} `yaml:"arcane_sanctuary"`
 		DrifterCavern struct {
 			OpenChests        bool `yaml:"openChests"`
 			FocusOnElitePacks bool `yaml:"focusOnElitePacks"`
@@ -528,6 +537,13 @@ type CharacterCfg struct {
 		Utility struct {
 			ParkingAct int `yaml:"parkingAct"`
 		} `yaml:"utility"`
+		ActRuns struct {
+			Act1 ActRunSettings `yaml:"act1"`
+			Act2 ActRunSettings `yaml:"act2"`
+			Act3 ActRunSettings `yaml:"act3"`
+			Act4 ActRunSettings `yaml:"act4"`
+			Act5 ActRunSettings `yaml:"act5"`
+		} `yaml:"act_runs"`
 		// RunewordOverrides and RunewordRerollRules are keyed by the display name shown in the UI.
 		RunewordOverrides   map[string]RunewordOverrideConfig `yaml:"runewordOverrides,omitempty"`
 		RunewordRerollRules map[string][]RunewordRerollRule   `yaml:"runewordRerollRules,omitempty"`

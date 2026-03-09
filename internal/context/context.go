@@ -56,6 +56,8 @@ type Context struct {
 	HealthManager             *health.Manager
 	Char                      Character
 	LastBuffAt                time.Time
+	WasInTown                 bool      // Track if we were in town (to detect leaving town)
+	BuffInProgress            bool      // Prevent concurrent buff execution for this character
 	LastCastAt                time.Time
 	ContextDebug              map[Priority]*Debug
 	CurrentGame               *CurrentGameHelper

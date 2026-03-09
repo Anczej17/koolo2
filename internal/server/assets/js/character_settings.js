@@ -8,8 +8,7 @@ const levelingBuilds = [
     'amazon_leveling',
     'necromancer',
     'assassin',
-    'barb_leveling',
-    'warlock_leveling'
+    'barb_leveling'
 ];
 
 window.onload = function () {
@@ -414,9 +413,6 @@ document.addEventListener('DOMContentLoaded', function () {
             { value: 'lightsorc', label: 'Lightning Sorceress' },
             { value: 'fireballsorc', label: 'Fireball Sorceress' },
             { value: 'sorceress_leveling', label: 'Sorceress (Leveling)' },
-        ],
-        warlock: [
-            { value: 'warlock_leveling', label: 'Warlock (Leveling)' },
         ],
         other: [
             { value: 'mule', label: 'Mule' },

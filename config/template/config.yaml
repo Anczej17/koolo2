@@ -64,7 +64,7 @@ inventory:
   rejuvPotionCount: 0     # Number of rejuvenation potions to keep in inventory
 
 character:
-  class: sorceress # Allowed values: sorceress, lightning, hammerdin, foh, dragondin, paladin (leveling only), barb_leveling, warlock_leveling
+  class: sorceress # Allowed values: sorceress, lightning, hammerdin, foh, dragondin, paladin (leveling only), barb_leveling
   useMerc: true
   stashToShared: false
   useTeleport: true # If set to false, bot will not use teleport skill and will walk to the destination
@@ -90,8 +90,10 @@ game:
   # Just add the runs you want to do and they will be executed respecting the order, unless randomizeRuns is set to true
   # Available runs: countess, andariel, ancient_tunnels, summoner, mephisto, council, eldritch, pindleskin, nihlathak,
   #                 tristram, lower_kurast, lower_kurast_chest, stony_tomb, pit, arachnid_lair, tal_rasha_tombs, baal, diablo, cows, terror_zone, development
+  #                 act1, act2, act3, act4, act5 (full act clears - see act_runs section below for configuration)
   # leveling: there is a "leveling" run, in combination with "sorceress or paladin" class will be able to start leveling character from level 1 (don't expect too much)
   # terror_zone: will detect current TZ and clear it
+  # act1-act5: clears entire act including all dungeons and bosses (see act_runs section for per-act configuration)
   # development: keeps the bot attached for manual play/debugging, skips town routines entirely
   runs: [ stony_tomb, pit, arachnid_lair ]
 
@@ -222,6 +224,37 @@ game:
       - 119 # Icy Cellar
       - 121 # Nihlathak's Temple (Will do Nihlathak run)
       - 128 # The Worldstone Keep Level 1 (Will do Baal run)
+
+  # Act Full Clear Runs - Clear entire acts from start to finish including all dungeons
+  # Available runs: act1, act2, act3, act4, act5
+  # Each act will clear ALL areas, dungeons, and kill the act boss
+  # Example: act1 clears Blood Moor → Tristram → Catacombs → Andariel (60+ areas)
+  act_runs:
+    act1:
+      focusOnElitePacks: false   # Only clear elite packs (faster) vs all monsters
+      openChests: true           # Open chests during clearing
+      useWorldStoneShard: false  # Use World Stone Shard before starting the run
+      pauseAfterRun: false       # Stop supervisor after completing this act
+    act2:
+      focusOnElitePacks: false
+      openChests: true
+      useWorldStoneShard: false
+      pauseAfterRun: false
+    act3:
+      focusOnElitePacks: false
+      openChests: true
+      useWorldStoneShard: false
+      pauseAfterRun: false
+    act4:
+      focusOnElitePacks: false
+      openChests: true
+      useWorldStoneShard: false
+      pauseAfterRun: false
+    act5:
+      focusOnElitePacks: false
+      openChests: true
+      useWorldStoneShard: false
+      pauseAfterRun: false       # Set to true if this is your last run
 
 companion:
   enabled: false

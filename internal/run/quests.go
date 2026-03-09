@@ -213,8 +213,8 @@ func (a Quests) rescueCainQuest() error {
 		return fmt.Errorf("error interacting with Inifuss Tree: %w", err)
 	}
 
-	scrollInifussUnitID := 539
-	scrollInifussAfterAkara := 540
+	scrollInifussUnitID := 524
+	scrollInifussAfterAkara := 525
 	scrollInifussName := "Scroll of Inifuss"
 
 PickupLoop:
