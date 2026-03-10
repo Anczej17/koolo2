@@ -53,7 +53,7 @@ func (tz TerrorZone) Run(parameters *RunParameters) error {
 	case area.AncientTunnels:
 		return NewAncientTunnels().Run(parameters)
 	case area.ArcaneSanctuary:
-		return NewArcaneSanctuaryTZ(tz.customTZEnemyFilter()).Run(parameters)
+		return NewSummonerTZ(tz.customTZEnemyFilter()).Run(parameters)
 	case area.Travincal:
 		return NewTravincal().Run(parameters)
 	case area.DuranceOfHateLevel1:
@@ -64,6 +64,17 @@ func (tz TerrorZone) Run(parameters *RunParameters) error {
 		return NewNihlathakTZ(tz.customTZEnemyFilter()).Run(parameters)
 	case area.TheWorldStoneKeepLevel1:
 		return NewBaal(tz.customTZEnemyFilter()).Run(parameters)
+
+		//custom tz boss runs
+		//custom made areas for tz boss hunt - diablo already has default config so there is no need to add any additional config for it
+	case area.CatacombsLevel4:
+		return NewAndariel().Run(parameters)
+	case area.TalRashasTomb4:
+		return NewDuriel().Run(parameters)
+	case area.DuranceOfHateLevel3:
+		return NewMephisto(nil).Run(parameters)
+	case area.ThroneOfDestruction:
+		return NewBaal(nil).Run(parameters)
 	}
 
 	// --- Generic TZ handling via centralized routes ---
@@ -75,14 +86,7 @@ func (tz TerrorZone) Run(parameters *RunParameters) error {
 		return nil
 	}
 
-	for routeIdx, route := range routes {
-		// Return to town between routes (e.g., after Tower Cellar 5, before Hole Level 1)
-		if routeIdx > 0 {
-			if err := action.ReturnTown(); err != nil {
-				return err
-			}
-		}
-
+	for _, route := range routes {
 		for idx, step := range route {
 			// Navigation: first step via waypoint, rest via MoveToArea
 			if idx == 0 {

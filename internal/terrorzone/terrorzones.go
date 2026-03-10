@@ -35,25 +35,26 @@ type ZoneInfo struct {
 
 var zones = map[area.ID]ZoneInfo{
 	area.Barracks:                {Act: 1, ExpTier: TierA, LootTier: TierS, BossPack: "24-32", Immunities: []string{"f", "c", "p", "ph"}, Group: "Barracks / Jail"},
-	area.BlackMarsh:              {Act: 1, ExpTier: TierA, LootTier: TierB, BossPack: "15-20", Immunities: []string{"f", "c", "l", "p"}, Group: "Black Marsh / Tower / The Hole"},
+	area.BlackMarsh:              {Act: 1, ExpTier: TierA, LootTier: TierB, BossPack: "15-20", Immunities: []string{"f", "c", "l", "p"}, Group: "Forgotten Tower / Black Marsh / The Hole"},
 	area.BloodMoor:               {Act: 1, ExpTier: TierF, LootTier: TierF, BossPack: "7-9", Immunities: []string{"f", "c"}, Group: "Blood Moor / Den of Evil"},
 	area.BurialGrounds:           {Act: 1, ExpTier: TierC, LootTier: TierD, BossPack: "8-10", Immunities: []string{"l"}, Group: "Burial Grounds / Crypt / Mausoleum"},
-	area.Cathedral:               {Act: 1, ExpTier: TierS, LootTier: TierS, BossPack: "27-35", Immunities: []string{"f", "c", "l", "ph"}, Group: "Cathedral / Catacombs"},
+	area.Cathedral:               {Act: 1, ExpTier: TierS, LootTier: TierS, BossPack: "27-35", Immunities: []string{"f", "c", "l", "ph"}, Group: "Cathedral / Catacombs"},//area.CatacombsLevel1:         {Act: 1, ExpTier: TierS, LootTier: TierS, BossPack: "27-35", Immunities: []string{"f", "c", "l", "ph"}, Group: "Catacombs"},
 	area.ColdPlains:              {Act: 1, ExpTier: TierC, LootTier: TierB, BossPack: "7-9", Immunities: []string{"f", "c", "l", "p"}, Group: "Cold Plains / Cave"},
 	area.DarkWood:                {Act: 1, ExpTier: TierB, LootTier: TierB, BossPack: "16-22", Immunities: []string{"f", "c", "l", "p"}, Group: "Dark Wood / Underground Passage"},
 	area.ForgottenTower:          {Act: 1, ExpTier: TierA, LootTier: TierA, BossPack: "15-20", Immunities: []string{"f", "l", "ph"}, Group: "Forgotten Tower"},
 	area.MooMooFarm:              {Act: 1, ExpTier: TierC, LootTier: TierS, BossPack: "6-8", Immunities: []string{}, Group: "Moo Moo Farm"},
-	area.PitLevel1:               {Act: 1, ExpTier: TierS, LootTier: TierS, BossPack: "27-35", Immunities: []string{"f", "c", "l", "ph"}, Group: "Pit"},
-	area.StonyField:              {Act: 1, ExpTier: TierC, LootTier: TierC, BossPack: "7-9", Immunities: []string{"f", "c", "l", "p"}, Group: "Stony Field"},
-	area.Tristram:                {Act: 1, ExpTier: TierC, LootTier: TierC, BossPack: "8-11", Immunities: []string{"f", "c", "l"}, Group: "Tristram"},
+	area.PitLevel1:               {Act: 1, ExpTier: TierS, LootTier: TierS, BossPack: "8-11", Immunities: []string{"f", "c", "l", "ph"}, Group: "Pit"},
+	area.TamoeHighland:           {Act: 1, ExpTier: TierS, LootTier: TierS, BossPack: "17-23", Immunities: []string{"f", "c", "l", "ph"}, Group: "Pit / Tamoe Highland / Outer Cloister"},
+	area.StonyField:              {Act: 1, ExpTier: TierC, LootTier: TierC, BossPack: "12-15", Immunities: []string{"f", "c", "l", "p"}, Group: "Stony Field / Tristram"},
+	area.Tristram:                {Act: 1, ExpTier: TierC, LootTier: TierC, BossPack: "5-6", Immunities: []string{"f", "c", "l"}, Group: "Tristram"},
 	area.SewersLevel1Act2:        {Act: 2, ExpTier: TierS, LootTier: TierB, BossPack: "18-24", Immunities: []string{"f", "c", "p", "m"}, Group: "Lut Gholein Sewers"},
 	area.RockyWaste:              {Act: 2, ExpTier: TierS, LootTier: TierA, BossPack: "17-23", Immunities: []string{"f", "c", "l", "p", "m"}, Group: "Rocky Waste / Stony Tomb"},
 	area.DryHills:                {Act: 2, ExpTier: TierS, LootTier: TierA, BossPack: "20-27", Immunities: []string{"f", "c", "l", "p"}, Group: "Dry Hills / Halls of the Dead"},
-	area.FarOasis:                {Act: 2, ExpTier: TierC, LootTier: TierD, BossPack: "7-9", Immunities: []string{"l", "p", "ph"}, Group: "Far Oasis"},
-	area.LostCity:                {Act: 2, ExpTier: TierA, LootTier: TierB, BossPack: "21-28", Immunities: []string{"f", "c", "l", "p", "m"}, Group: "Lost City / Valley of Snakes / Claw Viper Temple"},
+	area.FarOasis:                {Act: 2, ExpTier: TierC, LootTier: TierD, BossPack: "21-26", Immunities: []string{"l", "p", "ph"}, Group: "Far Oasis / Maggot Lair"},
+	area.LostCity:                {Act: 2, ExpTier: TierA, LootTier: TierB, BossPack: "20-27", Immunities: []string{"f", "c", "l", "p", "m"}, Group: "Lost City / Ancient Tunnels / Valley of Snakes / Claw Viper Temple"},
 	area.AncientTunnels:          {Act: 2, ExpTier: TierB, LootTier: TierA, BossPack: "6-8", Immunities: []string{"f", "l", "p", "m"}, Group: "Ancient Tunnels"},
 	area.ArcaneSanctuary:         {Act: 2, ExpTier: TierC, LootTier: TierA, BossPack: "7-9", Immunities: []string{"f", "c", "l", "p", "ph"}, Group: "Arcane Sanctuary"},
-	area.TalRashasTomb1:          {Act: 2, ExpTier: TierS, LootTier: TierS, BossPack: "49-63", Immunities: []string{"f", "c", "l", "p", "m"}, Group: "Tal Rasha's Tombs"},
+	area.TalRashasTomb1:          {Act: 2, ExpTier: TierS, LootTier: TierS, BossPack: "49-65", Immunities: []string{"f", "c", "l", "p", "m"}, Group: "Tal Rasha's Tombs"},
 	area.SpiderForest:            {Act: 3, ExpTier: TierB, LootTier: TierC, BossPack: "14-20", Immunities: []string{"f", "c", "l", "p"}, Group: "Spider Forest / Spider Cavern"},
 	area.GreatMarsh:              {Act: 3, ExpTier: TierB, LootTier: TierC, BossPack: "10-15", Immunities: []string{"f", "c", "l"}, Group: "Great Marsh"},
 	area.FlayerJungle:            {Act: 3, ExpTier: TierS, LootTier: TierA, BossPack: "22-29", Immunities: []string{"f", "c", "l", "p", "ph", "m"}, Group: "Flayer Jungle / Flayer Dungeon"},
@@ -67,9 +68,17 @@ var zones = map[area.ID]ZoneInfo{
 	area.ArreatPlateau:           {Act: 5, ExpTier: TierC, LootTier: TierF, BossPack: "15-19", Immunities: []string{"f", "c", "l", "p"}, Group: "Arreat Plateau / Pit of Acheron"},
 	area.CrystallinePassage:      {Act: 5, ExpTier: TierA, LootTier: TierC, BossPack: "13-17", Immunities: []string{"f", "c", "l", "p", "ph", "m"}, Group: "Crystalline Passage / Frozen River"},
 	area.GlacialTrail:            {Act: 5, ExpTier: TierA, LootTier: TierB, BossPack: "13-17", Immunities: []string{"f", "c", "l", "p", "ph"}, Group: "Glacial Trail / Drifter Cavern"},
+	area.FrozenTundra:            {Act: 5, ExpTier: TierA, LootTier: TierA, BossPack: "15-19", Immunities: []string{"f", "c", "l", "p", "ph"}, Group: "Frozen Tundra / Infernal Pit"},
 	area.TheAncientsWay:          {Act: 5, ExpTier: TierB, LootTier: TierB, BossPack: "6-8", Immunities: []string{"c", "l", "p", "ph"}, Group: "Ancient's Way / Icy Cellar"},
 	area.NihlathaksTemple:        {Act: 5, ExpTier: TierA, LootTier: TierA, BossPack: "12-14", Immunities: []string{"f", "c", "l", "p", "ph", "m"}, Group: "Nihlathak's Temple / Temple Halls"},
 	area.TheWorldStoneKeepLevel1: {Act: 5, ExpTier: TierS, LootTier: TierS, BossPack: "22-29", Immunities: []string{"f", "c", "l", "p", "ph", "m"}, Group: "Worldstone Keep / Throne of Destruction"},
+
+	//custom tz bos runs
+	//custom made areas for tz boss hunt - diablo already has default config so there is no need to add any additional config for it
+	area.CatacombsLevel4:         {Act: 1, ExpTier: TierS, LootTier: TierS, BossPack: "Boss", Immunities: []string{"f", "c", "l", "p", "ph", "m"}, Group: "Andariel / Boss"},
+	area.TalRashasTomb4:          {Act: 2, ExpTier: TierS, LootTier: TierS, BossPack: "Boss", Immunities: []string{"f", "c", "l", "p", "ph", "m"}, Group: "Duriel / Boss"},
+	area.DuranceOfHateLevel3:     {Act: 3, ExpTier: TierS, LootTier: TierS, BossPack: "Boss", Immunities: []string{"f", "c", "l", "p", "ph", "m"}, Group: "Mephisto / Boss"},
+	area.ThroneOfDestruction:     {Act: 5, ExpTier: TierS, LootTier: TierS, BossPack: "Boss", Immunities: []string{"f", "c", "l", "p", "ph", "m"}, Group: "Baal / Boss"},
 }
 
 // -----------------------------------------------------------------------------
