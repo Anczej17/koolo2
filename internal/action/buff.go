@@ -571,8 +571,13 @@ func getSkillBonusOnWeaponSet(sk skill.ID, checkSwap bool) int {
 			continue
 		}
 
-		// +Specific Skill (NonClassSkill)
+		// +Specific Skill (NonClassSkill - cross-class like CTA)
 		if skillBonus, found := itm.FindStat(stat.NonClassSkill, int(sk)); found {
+			totalBonus += skillBonus.Value
+		}
+
+		// +Specific Skill (SingleSkill - class items like +3 Energy Shield on staff)
+		if skillBonus, found := itm.FindStat(stat.SingleSkill, int(sk)); found {
 			totalBonus += skillBonus.Value
 		}
 
