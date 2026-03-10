@@ -9,6 +9,7 @@ import (
 	"github.com/hectorgimenez/d2go/pkg/data/npc"
 	"github.com/hectorgimenez/d2go/pkg/data/skill"
 	"github.com/hectorgimenez/d2go/pkg/data/stat"
+	"github.com/hectorgimenez/d2go/pkg/data/state"
 	"github.com/hectorgimenez/koolo/internal/action/step"
 	"github.com/hectorgimenez/koolo/internal/context"
 	"github.com/hectorgimenez/koolo/internal/game"
@@ -32,11 +33,11 @@ const (
 	StaticMaxDistance       = 22
 	NovaMaxAttacksLoop      = 10
 	StaticFieldThreshold    = 67 // Cast Static Field if monster HP is above this percentage
-	HeraldStaticThreshold   = 51 // Cast Static Field on Heralds until HP is below this percentage (like hell bosses)
+	HeraldStaticThreshold   = 55 // Cast Static Field on Heralds until HP is below this percentage (Static can't go below ~50% in Hell)
 
-	// Herald-specific constants (safe distance from dangerous DLC bosses)
-	HeraldMinDistance     = 5  // Minimum safe distance from Herald (within 8-tile Nova range)
-	HeraldTargetDistance  = 7  // Target distance when repositioning away from Herald
+	// Herald-specific constants
+	HeraldDangerDistance = 4 // If Herald closer than this → break burst & reposition
+	HeraldSafeDistance   = 8 // Always position at this distance from Herald
 
 	// Pack construction radius (tiles) around a seed/anchor.
 	NovaPackRadius = 15
@@ -110,93 +111,110 @@ func countOpenTiles(pos data.Position, r int, isWalkable func(data.Position) boo
 	return open
 }
 
-// hasLineOfSight checks if there's a clear line of sight between two positions
-func hasLineOfSight(from, to data.Position, isWalkable func(data.Position) bool) bool {
-	dx := to.X - from.X
-	dy := to.Y - from.Y
-
-	// Get the maximum of absolute dx and dy to determine number of steps
-	steps := dx
-	if dy > dx {
-		steps = dy
-	}
-	if -dx > steps {
-		steps = -dx
-	}
-	if -dy > steps {
-		steps = -dy
-	}
-
-	if steps == 0 {
-		return true
-	}
-
-	// Check each point along the line
-	for i := 0; i <= steps; i++ {
-		x := from.X + (dx * i / steps)
-		y := from.Y + (dy * i / steps)
-		if !isWalkable(data.Position{X: x, Y: y}) {
-			return false
-		}
-	}
-
-	return true
-}
-
-// findSafePositionFromHerald finds a walkable position at safe distance from Herald with LoS
+// findSafePositionFromHerald finds a reachable position at HeraldSafeDistance (8) from Herald.
+// Scans full ring of tiles at target distance, sorted by proximity to current player direction
+// (so bot retreats "backwards" rather than sideways). Falls back to closer rings if needed.
 func (s NovaSorceress) findSafePositionFromHerald(heraldPos data.Position, playerPos data.Position) (data.Position, bool) {
 	ctx := context.Get()
 	isWalkable := ctx.Data.AreaData.IsWalkable
 
-	// Try straight-line first (existing approach)
-	dist := gridDistance(playerPos, heraldPos)
-	if dist > 0 {
-		dx := playerPos.X - heraldPos.X
-		dy := playerPos.Y - heraldPos.Y
-		length := float64(dist)
-
-		targetX := heraldPos.X + int(float64(dx)/length*float64(HeraldTargetDistance))
-		targetY := heraldPos.Y + int(float64(dy)/length*float64(HeraldTargetDistance))
-		targetPos := data.Position{X: targetX, Y: targetY}
-
-		if isWalkable(targetPos) && hasLineOfSight(targetPos, heraldPos, isWalkable) {
-			return targetPos, true
-		}
+	// Direction vector from Herald to player (retreat direction)
+	retreatDX := float64(playerPos.X - heraldPos.X)
+	retreatDY := float64(playerPos.Y - heraldPos.Y)
+	retreatLen := math.Sqrt(retreatDX*retreatDX + retreatDY*retreatDY)
+	if retreatLen > 0 {
+		retreatDX /= retreatLen
+		retreatDY /= retreatLen
 	}
 
-	// Fallback: search for walkable tiles in 5-7 tile range with LoS
-	// Start from target distance (7), work down to minimum (5)
-	for radius := HeraldTargetDistance; radius >= HeraldMinDistance; radius-- {
-		// Try 16 angles around Herald (every 22.5 degrees)
-		for angle := 0; angle < 16; angle++ {
-			rad := float64(angle) * 0.39269908169872414 // 2*pi/16 radians
-			dx := int(float64(radius) * math.Cos(rad))
-			dy := int(float64(radius) * math.Sin(rad))
+	// Search rings from safe distance down, prioritize 8 > 7 > 6 > 5
+	for radius := HeraldSafeDistance; radius >= HeraldDangerDistance+1; radius-- {
+		type candidate struct {
+			pos   data.Position
+			score float64 // higher = more aligned with retreat direction
+		}
+		var candidates []candidate
 
-			candidate := data.Position{
-				X: heraldPos.X + dx,
-				Y: heraldPos.Y + dy,
-			}
+		// Scan full ring (all tiles at this Chebyshev distance from Herald)
+		for dx := -radius; dx <= radius; dx++ {
+			for dy := -radius; dy <= radius; dy++ {
+				// Only tiles at exactly this Chebyshev distance (ring, not filled circle)
+				adx, ady := dx, dy
+				if adx < 0 { adx = -adx }
+				if ady < 0 { ady = -ady }
+				maxD := adx
+				if ady > maxD { maxD = ady }
+				if maxD != radius {
+					continue
+				}
 
-			if isWalkable(candidate) && hasLineOfSight(candidate, heraldPos, isWalkable) {
-				return candidate, true
+				p := data.Position{X: heraldPos.X + dx, Y: heraldPos.Y + dy}
+				if !isWalkable(p) {
+					continue
+				}
+
+				// Must be reachable by pathfinder
+				_, _, found := ctx.PathFinder.GetPath(p)
+				if !found {
+					continue
+				}
+
+				// Score: dot product with retreat direction (prefer "behind" player)
+				ndx := float64(dx) / float64(radius)
+				ndy := float64(dy) / float64(radius)
+				dot := ndx*retreatDX + ndy*retreatDY
+
+				candidates = append(candidates, candidate{pos: p, score: dot})
 			}
 		}
+
+		if len(candidates) == 0 {
+			continue
+		}
+
+		// Pick candidate most aligned with retreat direction
+		best := candidates[0]
+		for _, c := range candidates[1:] {
+			if c.score > best.score {
+				best = c
+			}
+		}
+		return best.pos, true
 	}
 
 	return data.Position{}, false
 }
 
-// ensureHeraldDistance enforces 4-7 tile distance from any nearby Herald
-// Returns true if distance is OK and bot can attack
-// Returns false if repositioning happened (caller should skip attack this iteration)
-// ONLY applies when Heralds are present - no impact on normal combat
-func (s NovaSorceress) ensureHeraldDistance() bool {
+// repositionFromHerald moves player to HeraldSafeDistance (8) from the given Herald.
+// Returns true if repositioned, false if no valid position found.
+func (s NovaSorceress) repositionFromHerald(herald *data.Monster) bool {
 	ctx := context.Get()
 	playerPos := ctx.Data.PlayerUnit.Position
 
-	// Find closest Herald
-	var closestHerald *data.Monster
+	// Simple approach: teleport AWAY from Herald using BeyondPosition
+	// This extends the line Herald→Player by HeraldSafeDistance tiles
+	dest := ctx.PathFinder.BeyondPosition(herald.Position, playerPos, HeraldSafeDistance)
+
+	if err := step.MoveTo(dest); err != nil {
+		// Fallback: try the full ring search
+		if targetPos, found := s.findSafePositionFromHerald(herald.Position, playerPos); found {
+			if err := step.MoveTo(targetPos); err != nil {
+				s.Logger.Warn("Herald reposition failed", slog.String("error", err.Error()))
+				return false
+			}
+			return true
+		}
+		s.Logger.Warn("Herald reposition failed", slog.String("error", err.Error()))
+		return false
+	}
+	return true
+}
+
+// findClosestHerald returns the closest living Herald and its distance, or nil.
+func findClosestHerald() (*data.Monster, int) {
+	ctx := context.Get()
+	playerPos := ctx.Data.PlayerUnit.Position
+	var closest *data.Monster
 	closestDist := 999
 
 	for _, enemy := range ctx.Data.Monsters.Enemies() {
@@ -206,61 +224,25 @@ func (s NovaSorceress) ensureHeraldDistance() bool {
 		if !isHerald(enemy) {
 			continue
 		}
-
 		dist := gridDistance(playerPos, enemy.Position)
 		if dist < closestDist {
 			closestDist = dist
-			closestHerald = &enemy
+			closest = &enemy
 		}
 	}
+	return closest, closestDist
+}
 
-	// No Herald nearby - distance check not needed
-	if closestHerald == nil {
-		return true
-	}
-
-	// Enforce 4-7 tile distance for Herald safety
-	// < 4: too close (danger)
-	// > 7: too far (out of Nova range, need to move closer)
-	const minSafeDistance = 4
-	const maxSafeDistance = 7
-	const targetDistance = 5 // Reposition to middle of safe range
-
-	if closestDist >= minSafeDistance && closestDist <= maxSafeDistance {
-		// Distance OK, can attack
-		return true
-	}
-
-	// Distance out of safe range - must reposition
-	s.Logger.Info("Herald distance out of range, repositioning before attack",
-		slog.String("herald", string(closestHerald.Name)),
-		slog.Int("currentDistance", closestDist),
-		slog.Int("targetDistance", targetDistance))
-
-	// Calculate position at target distance from Herald
-	if targetPos, found := s.findSafePositionFromHerald(closestHerald.Position, playerPos); found {
-		if err := step.MoveTo(targetPos); err != nil {
-			s.Logger.Warn("Failed to reposition for Herald distance", slog.String("error", err.Error()))
-		} else {
-			s.Logger.Debug("Repositioned to maintain Herald safe distance")
-			time.Sleep(100 * time.Millisecond) // Brief pause after reposition
-		}
-	} else {
-		s.Logger.Warn("No safe position found for Herald distance enforcement")
-	}
-
-	// Repositioning happened - skip attack this iteration
-	return false
+// isHeraldTooClose returns true when any Herald is within HeraldDangerDistance (< 4 tiles).
+// Used as burstAttack abort callback.
+func isHeraldTooClose() bool {
+	_, dist := findClosestHerald()
+	return dist < HeraldDangerDistance
 }
 
 func desiredHitsForPack(packSize int) int {
-	// User thresholds:
-	// big 10+, medium 7+, small 3+
 	switch {
 	case packSize >= 10:
-		if packSize < 10 {
-			return packSize
-		}
 		return 10
 	case packSize >= 7:
 		return 7
@@ -580,9 +562,8 @@ func (s NovaSorceress) evalAggressiveNovaPosition(target data.Monster) novaPosEv
 	// Hard rule: do NOT move away from elite anchor.
 	// We allow tiny sideways drift, but never "escape the pack".
 	currentAnchorDist := gridDistance(playerPos, anchor)
-	maxAllowedAnchorDist := currentAnchorDist + 1
-	if packSize < 10 {
-		// For non-big packs allow slightly more lateral movement.
+	maxAllowedAnchorDist := currentAnchorDist + 3
+	if packSize >= 10 {
 		maxAllowedAnchorDist = currentAnchorDist + 2
 	}
 
@@ -652,7 +633,6 @@ func (s NovaSorceress) evalAggressiveNovaPosition(target data.Monster) novaPosEv
 		}
 
 		if score > bestScore {
-			bestScore = score
 			bestScore = score
 			bestPos = p
 			bestHits = hits
@@ -742,56 +722,29 @@ func (s NovaSorceress) KillMonsterSequence(
 			return nil
 		}
 
-		// HERALD HANDLING: Keep safe distance from ANY nearby Heralds
-		// Check ALL enemies for Heralds, not just current target
-		// This prevents deaths when targeting a normal but Herald is nearby
-		var closestHerald *data.Monster
-		closestHeraldDist := 999
-		for _, enemy := range ctx.Data.Monsters.Enemies() {
-			if enemy.Stats[stat.Life] <= 0 {
-				continue
-			}
-			if !isHerald(enemy) {
-				continue
-			}
-			dist := gridDistance(ctx.Data.PlayerUnit.Position, enemy.Position)
-			if dist < closestHeraldDist {
-				closestHeraldDist = dist
-				closestHerald = &enemy
-			}
+		// HERALD PRIORITY: If Herald is alive and within Nova range, target it instead
+		// of whatever monsterSelector picked. This prevents chasing minions near Herald
+		// (which causes ping-pong). Only override when Herald is already in range —
+		// if Herald is far away or behind a wall, let normal targeting work so bot
+		// doesn't teleport directly onto Herald.
+		if herald, dist := findClosestHerald(); herald != nil && dist <= NovaMaxDistance {
+			monster = *herald
 		}
 
-		// If any Herald is too close (< 5 tiles), FORCE TARGET SWITCH to Herald
-		// This ensures Herald is targeted first for Static Field (single-target spell)
-		// Nova is AoE so target doesn't matter, but Static MUST hit Herald
-		if closestHerald != nil && closestHeraldDist < HeraldMinDistance {
-			s.Logger.Info("Herald too close - breaking current kill sequence to target Herald",
-				slog.String("herald", string(closestHerald.Name)),
-				slog.Int("currentDistance", closestHeraldDist),
-				slog.String("currentTarget", string(monster.Name)))
-
-			// Find safe position with LoS check and fallback to walkable tile search
-			if targetPos, found := s.findSafePositionFromHerald(closestHerald.Position, ctx.Data.PlayerUnit.Position); found {
-				if err := step.MoveTo(targetPos); err != nil {
-					s.Logger.Warn("Failed to reposition away from Herald", slog.String("error", err.Error()))
-				} else {
-					s.Logger.Info("Successfully repositioned away from Herald")
-					time.Sleep(200 * time.Millisecond)
-				}
-			} else {
-				s.Logger.Warn("No safe position found from Herald, maintaining current position")
-			}
-
-			// BREAK kill sequence - return to clearRoom which will re-select target
-			// Herald has top priority in SortEnemiesByPriority, so it will be selected next
-			return nil
+		// HERALD SAFETY: if Herald is dangerously close (< 4 tiles), reposition to 8 immediately
+		if herald, dist := findClosestHerald(); herald != nil && dist < HeraldDangerDistance {
+			s.Logger.Info("Herald too close, repositioning to safe distance",
+				slog.Int("currentDist", dist))
+			s.repositionFromHerald(herald)
+			continue
 		}
 
 		// Aggressive Nova positioning:
 		// One decisive reposition per pack, anchored to elite center (when available),
 		// then "nova bum bum" without dancing.
-		// SKIP FOR HERALDS: If target is Herald OR pack contains Herald, skip aggressive positioning
-		if ctx.CharacterCfg.Character.NovaSorceress.AggressiveNovaPositioning && !isHerald(monster) {
+		// SKIP when any Herald is nearby — prevents pulling bot towards Herald
+		heraldNearby, _ := findClosestHerald()
+		if ctx.CharacterCfg.Character.NovaSorceress.AggressiveNovaPositioning && !isHerald(monster) && heraldNearby == nil {
 			ev := s.evalAggressiveNovaPosition(monster)
 
 			// CRITICAL: Check if pack contains Herald - if yes, skip aggressive positioning entirely
@@ -865,13 +818,6 @@ func (s NovaSorceress) KillMonsterSequence(
 			}
 		}
 
-		// HERALD DISTANCE ENFORCEMENT: Check before Static Field
-		// Ensures 4-7 tile distance maintained during combat
-		// Prevents teleporting too close during Static Field cast
-		if !s.ensureHeraldDistance() {
-			continue // Repositioned for Herald safety, skip attack this iteration
-		}
-
 		// Static Field first if needed.
 		// For Heralds: spam Static until HP < 51% (ignore staticFieldCast flag)
 		// For normal elites: cast once if HP > 67%
@@ -879,8 +825,14 @@ func (s NovaSorceress) KillMonsterSequence(
 		shouldCastStatic := s.shouldCastStaticField(monster)
 
 		if shouldCastStatic && (isHeraldMonster || !staticFieldCast) {
+			// For Heralds: minDistance=0 so bot casts Static from current position
+			// instead of teleporting away to reach min range 13.
+			staticMin := StaticMinDistance
+			if isHeraldMonster {
+				staticMin = 0
+			}
 			staticOpts := []step.AttackOption{
-				step.RangedDistance(StaticMinDistance, StaticMaxDistance),
+				step.RangedDistance(staticMin, StaticMaxDistance),
 			}
 
 			if err := step.SecondaryAttack(skill.StaticField, monster.UnitID, 1, staticOpts...); err == nil {
@@ -890,12 +842,10 @@ func (s NovaSorceress) KillMonsterSequence(
 			}
 		}
 
-		// HERALD DISTANCE ENFORCEMENT: Check before Nova
-		// Ensures 4-7 tile distance maintained during combat
-		// Prevents Nova spam when too close or too far from Herald
-		if !s.ensureHeraldDistance() {
-			continue // Repositioned for Herald safety, skip attack this iteration
-		}
+		// Herald distance is managed by:
+		// 1. Top-of-loop: Herald < 4 → reposition to 8
+		// 2. burstAttack AbortWhen: Herald < 4 → break burst
+		// No active "pull towards Herald" here — bot stays wherever it is after reposition
 
 		// Choose Nova distance based on config (aggressive / normal).
 		novaMin := NovaMinDistance
@@ -905,8 +855,15 @@ func (s NovaSorceress) KillMonsterSequence(
 			novaMax = NovaAggroMaxDistance
 		}
 
+		// For Heralds: use minDistance=0 — bot is at ~8 tiles (after reposition),
+		// cast Nova from current position without chasing.
+		if isHeraldMonster {
+			novaMin = 0
+		}
+
 		novaOpts := []step.AttackOption{
 			step.RangedDistance(novaMin, novaMax),
+			step.AbortWhen(isHeraldTooClose), // Break burst if Herald < 4 tiles
 		}
 
 		if err := step.SecondaryAttack(skill.Nova, monster.UnitID, 1, novaOpts...); err == nil {
@@ -921,10 +878,19 @@ func (s NovaSorceress) KillMonsterSequence(
 	}
 }
 
-// isHerald detects dangerous DLC bosses (Heralds) using state count heuristic
-// Heralds have 5+ states, regular elites have 3-4 states
+// isHerald identifies the Herald BOSS (not minions or nearby mobs).
+// state.Herald (228) spreads as aura to all nearby monsters,
+// so we combine it with elite type check: Herald boss is always Unique/SuperUnique.
+// Fallback: Herald-exclusive auras (Concentration, Vigor) that no regular Aura Enchanted elite can have.
 func isHerald(m data.Monster) bool {
-	return len(m.States) >= 5
+	if m.States.HasState(state.Herald) &&
+		(m.Type == data.MonsterTypeUnique || m.Type == data.MonsterTypeSuperUnique) {
+		return true
+	}
+	if m.IsElite() && (m.States.HasState(state.Concentration) || m.States.HasState(state.Stamina)) {
+		return true
+	}
+	return false
 }
 
 func (s NovaSorceress) shouldCastStaticField(monster data.Monster) bool {
