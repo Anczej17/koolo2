@@ -6,6 +6,7 @@ import (
 	"log"
 	"log/slog"
 	"math/rand"
+	"net"
 	_ "net/http/pprof"
 	"os"
 	"path/filepath"
@@ -60,6 +61,17 @@ var windowTitles = []string{
 	"Paint",
 }
 
+// findFreePort picks a random available TCP port by binding to :0
+func findFreePort() (int, error) {
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		return 0, err
+	}
+	port := l.Addr().(*net.TCPAddr).Port
+	l.Close()
+	return port, nil
+}
+
 // wrapWithRecover wraps a function with panic recovery logic
 func wrapWithRecover(logger *slog.Logger, f func() error) func() error {
 	return func() error {
@@ -101,6 +113,12 @@ func main() {
 	// Ensure a sensible default delay for Auto Start if not configured
 	if config.Koolo.AutoStart.DelaySeconds <= 0 {
 		config.Koolo.AutoStart.DelaySeconds = 60
+	}
+
+	// Pick a random available port for the HTTP server
+	serverPort, portErr := findFreePort()
+	if portErr != nil {
+		serverPort = 8087 // fallback
 	}
 
 	logger, err := sloggger.NewLogger(config.Koolo.Debug.Log, config.Koolo.LogSaveDirectory, "")
@@ -149,7 +167,7 @@ func main() {
 			logger.Warn("ngrok enabled but no authtoken set; skipping tunnel start")
 		} else {
 			opts := ngrokremote.Options{
-				LocalAddr:     "http://localhost:8087",
+				LocalAddr:     fmt.Sprintf("http://localhost:%d", serverPort),
 				Authtoken:     config.Koolo.Ngrok.Authtoken,
 				Region:        config.Koolo.Ngrok.Region,
 				Domain:        config.Koolo.Ngrok.Domain,
@@ -183,7 +201,7 @@ func main() {
 			height = 720
 		}
 
-		w, err := gowebview.New(&gowebview.Config{URL: "http://localhost:8087", WindowConfig: &gowebview.WindowConfig{
+		w, err := gowebview.New(&gowebview.Config{URL: fmt.Sprintf("http://localhost:%d", serverPort), WindowConfig: &gowebview.WindowConfig{
 			Title: "Koolo Resurrected",
 			Size: &gowebview.Point{
 				X: int64(float64(width) * displayScale),
@@ -308,7 +326,7 @@ func main() {
 
 	g.Go(wrapWithRecover(logger, func() error {
 		defer cancel()
-		return srv.Listen(8087)
+		return srv.Listen(serverPort)
 	}))
 
 	g.Go(wrapWithRecover(logger, func() error {

@@ -39,6 +39,7 @@ type attackSettings struct {
 	numOfAttacks     int           // Number of attacks to perform
 	timeout          time.Duration // Timeout for the attack sequence
 	isBurstCastSkill bool          // Whether this is a channeled/burst skill like Nova
+	abortFunc        func() bool   // If set, burstAttack checks this each iteration; returns true = abort
 }
 
 // AttackOption defines a function type for configuring attack settings
@@ -78,6 +79,14 @@ func StationaryDistance(minimum, maximum int) AttackOption {
 		step.minDistance = minimum
 		step.maxDistance = maximum
 		step.shouldStandStill = true
+	}
+}
+
+// AbortWhen sets an abort callback for burstAttack. Checked each iteration;
+// if it returns true, burstAttack exits immediately so the caller can react.
+func AbortWhen(fn func() bool) AttackOption {
+	return func(step *attackSettings) {
+		step.abortFunc = fn
 	}
 }
 
@@ -249,6 +258,11 @@ func burstAttack(settings attackSettings) error {
 	for {
 		ctx.PauseIfNotPriority()
 		chicken.CheckForScaryAuraAndCurse()
+
+		// Abort callback — lets caller break burst when danger is detected (e.g. Herald too close)
+		if settings.abortFunc != nil && settings.abortFunc() {
+			return nil
+		}
 
 		if !startedAt.IsZero() && time.Since(startedAt) > settings.timeout {
 			return nil // Timeout reached, finish attack sequence

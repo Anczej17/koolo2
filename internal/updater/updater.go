@@ -638,15 +638,6 @@ if exist "%s" (
     if exist "%s" goto WAIT_LOOP
 )
 :START_NEW
-set /a PORT_WAIT=0
-:WAIT_PORT
-netstat -ano | findstr /R /C:":8087 .*LISTENING" >nul
-if %%ERRORLEVEL%%==0 (
-    set /a PORT_WAIT+=1
-    if !PORT_WAIT! GEQ 60 goto WAIT_PID
-    timeout /t 1 /nobreak >nul
-    goto WAIT_PORT
-)
 :WAIT_PID
 tasklist /FI "PID eq %d" 2>nul | findstr /R /C:" %d " >nul
 if %%ERRORLEVEL%%==0 (

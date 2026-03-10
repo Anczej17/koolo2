@@ -170,24 +170,24 @@ func buildTrampoline(ssn uint32, gadget uintptr) (uintptr, error) {
 	code = append(code, gadgetBytes...)
 	code = append(code, 0x41, 0xFF, 0xE3) // jmp r11
 
-	// Allocate RWX memory for the trampoline
+	// Allocate RW memory (no execute yet — avoids RWX anomaly)
 	allocSize := uintptr(len(code))
 	addr, err := windows.VirtualAlloc(0, allocSize,
 		windows.MEM_COMMIT|windows.MEM_RESERVE,
-		windows.PAGE_EXECUTE_READWRITE)
+		windows.PAGE_READWRITE)
 	if err != nil {
 		return 0, fmt.Errorf("VirtualAlloc trampoline: %w", err)
 	}
 
-	// Copy code into executable page
+	// Copy code into writable page
 	dst := unsafe.Slice((*byte)(unsafe.Pointer(addr)), len(code))
 	copy(dst, code)
 
-	// Harden: change to RX (remove write)
+	// Flip to RX (executable, non-writable) — page is never RWX
 	var oldProtect uint32
 	err = windows.VirtualProtect(addr, allocSize, windows.PAGE_EXECUTE_READ, &oldProtect)
 	if err != nil {
-		// Non-fatal: trampoline still works with RWX
+		return 0, fmt.Errorf("VirtualProtect RW→RX: %w", err)
 	}
 
 	return addr, nil
