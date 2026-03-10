@@ -75,7 +75,14 @@ func (tz TerrorZone) Run(parameters *RunParameters) error {
 		return nil
 	}
 
-	for _, route := range routes {
+	for routeIdx, route := range routes {
+		// Return to town between routes (e.g., after Tower Cellar 5, before Hole Level 1)
+		if routeIdx > 0 {
+			if err := action.ReturnTown(); err != nil {
+				return err
+			}
+		}
+
 		for idx, step := range route {
 			// Navigation: first step via waypoint, rest via MoveToArea
 			if idx == 0 {
