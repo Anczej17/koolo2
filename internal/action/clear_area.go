@@ -7,6 +7,7 @@ import (
 
 	"github.com/hectorgimenez/d2go/pkg/data"
 	"github.com/hectorgimenez/d2go/pkg/data/npc"
+	"github.com/hectorgimenez/d2go/pkg/data/stat"
 	"github.com/hectorgimenez/koolo/internal/action/step"
 	"github.com/hectorgimenez/koolo/internal/context"
 	"github.com/hectorgimenez/koolo/internal/game"
@@ -17,10 +18,9 @@ func ClearAreaAroundPlayer(radius int, filter data.MonsterFilter) error {
 	return ClearAreaAroundPosition(context.Get().Data.PlayerUnit.Position, radius, filter)
 }
 
-// isHerald detects dangerous DLC bosses (Heralds) using state count heuristic
-// Heralds have >= 5 states, regular elites have 3-4 states
+// isHerald detects Herald bosses via stat.HeraldTier (1-5 = Fright→Terror).
 func isHerald(m data.Monster) bool {
-	return len(m.States) >= 5
+	return m.Stats[stat.HeraldTier] > 0
 }
 
 func IsPriorityMonster(m data.Monster) bool {

@@ -9,7 +9,6 @@ import (
 	"github.com/hectorgimenez/d2go/pkg/data/npc"
 	"github.com/hectorgimenez/d2go/pkg/data/skill"
 	"github.com/hectorgimenez/d2go/pkg/data/stat"
-	"github.com/hectorgimenez/d2go/pkg/data/state"
 	"github.com/hectorgimenez/koolo/internal/action/step"
 	"github.com/hectorgimenez/koolo/internal/context"
 	"github.com/hectorgimenez/koolo/internal/game"
@@ -722,20 +721,21 @@ func (s NovaSorceress) KillMonsterSequence(
 			return nil
 		}
 
+		// Single Herald lookup per loop iteration — avoids scanning all enemies 3+ times.
+		cachedHerald, cachedHeraldDist := findClosestHerald()
+
 		// HERALD PRIORITY: If Herald is alive and within Nova range, target it instead
 		// of whatever monsterSelector picked. This prevents chasing minions near Herald
-		// (which causes ping-pong). Only override when Herald is already in range —
-		// if Herald is far away or behind a wall, let normal targeting work so bot
-		// doesn't teleport directly onto Herald.
-		if herald, dist := findClosestHerald(); herald != nil && dist <= NovaMaxDistance {
-			monster = *herald
+		// (which causes ping-pong).
+		if cachedHerald != nil && cachedHeraldDist <= NovaMaxDistance {
+			monster = *cachedHerald
 		}
 
 		// HERALD SAFETY: if Herald is dangerously close (< 4 tiles), reposition to 8 immediately
-		if herald, dist := findClosestHerald(); herald != nil && dist < HeraldDangerDistance {
+		if cachedHerald != nil && cachedHeraldDist < HeraldDangerDistance {
 			s.Logger.Info("Herald too close, repositioning to safe distance",
-				slog.Int("currentDist", dist))
-			s.repositionFromHerald(herald)
+				slog.Int("currentDist", cachedHeraldDist))
+			s.repositionFromHerald(cachedHerald)
 			continue
 		}
 
@@ -743,8 +743,12 @@ func (s NovaSorceress) KillMonsterSequence(
 		// One decisive reposition per pack, anchored to elite center (when available),
 		// then "nova bum bum" without dancing.
 		// SKIP when any Herald is nearby — prevents pulling bot towards Herald
-		heraldNearby, _ := findClosestHerald()
-		if ctx.CharacterCfg.Character.NovaSorceress.AggressiveNovaPositioning && !isHerald(monster) && heraldNearby == nil {
+		if cachedHerald != nil {
+			s.Logger.Debug("Herald detected, skipping aggressive positioning",
+				slog.Int("heraldDist", cachedHeraldDist),
+				slog.Bool("isTarget", isHerald(monster)))
+		}
+		if ctx.CharacterCfg.Character.NovaSorceress.AggressiveNovaPositioning && !isHerald(monster) && cachedHerald == nil {
 			ev := s.evalAggressiveNovaPosition(monster)
 
 			// CRITICAL: Check if pack contains Herald - if yes, skip aggressive positioning entirely
@@ -819,7 +823,7 @@ func (s NovaSorceress) KillMonsterSequence(
 		}
 
 		// Static Field first if needed.
-		// For Heralds: spam Static until HP < 51% (ignore staticFieldCast flag)
+		// For Heralds: spam Static until HP < 55% (ignore staticFieldCast flag)
 		// For normal elites: cast once if HP > 67%
 		isHeraldMonster := isHerald(monster)
 		shouldCastStatic := s.shouldCastStaticField(monster)
@@ -828,17 +832,31 @@ func (s NovaSorceress) KillMonsterSequence(
 			// For Heralds: minDistance=0 so bot casts Static from current position
 			// instead of teleporting away to reach min range 13.
 			staticMin := StaticMinDistance
+			staticCasts := 1
 			if isHeraldMonster {
 				staticMin = 0
+				staticCasts = 4 // Cast multiple Statics per reposition to reduce ping-pong
 			}
 			staticOpts := []step.AttackOption{
 				step.RangedDistance(staticMin, StaticMaxDistance),
 			}
 
-			if err := step.SecondaryAttack(skill.StaticField, monster.UnitID, 1, staticOpts...); err == nil {
+			if err := step.SecondaryAttack(skill.StaticField, monster.UnitID, staticCasts, staticOpts...); err == nil {
 				staticFieldCast = true
 				attackedThisEngagement = true
-				continue
+
+				if !isHeraldMonster {
+					continue
+				}
+
+				// Herald: re-read monster data and check HP after Static batch.
+				// High-level Static does ~20-25% per hit, so after 4 casts Herald
+				// is likely below threshold. Must re-fetch — local `monster` is stale.
+				if freshMonster, ok := s.Data.Monsters.FindByID(monster.UnitID); ok && s.shouldCastStaticField(freshMonster) {
+					continue // HP still above 55%, need more Static
+				}
+				// HP ≤ 55% — Static phase done, fall through to Nova burst
+				s.Logger.Info("Herald Static phase complete, switching to Nova burst")
 			}
 		}
 
@@ -855,15 +873,22 @@ func (s NovaSorceress) KillMonsterSequence(
 			novaMax = NovaAggroMaxDistance
 		}
 
-		// For Heralds: use minDistance=0 — bot is at ~8 tiles (after reposition),
-		// cast Nova from current position without chasing.
+		// For Heralds: use minDistance=0, maxDistance=NovaSpellRadius(8).
+		// Bot is at ~8 tiles after safety reposition — cast Nova from current position.
+		// Nova actual hit radius is 8 tiles, so max=8 ensures bot stays in kill range.
+		// If merc holds Herald at 9 tiles, ensureEnemyIsInRange pulls bot to 8 — one move, then stable.
 		if isHeraldMonster {
 			novaMin = 0
+			novaMax = NovaSpellRadius // Always 8 — actual Nova hit radius
 		}
 
 		novaOpts := []step.AttackOption{
 			step.RangedDistance(novaMin, novaMax),
-			step.AbortWhen(isHeraldTooClose), // Break burst if Herald < 4 tiles
+		}
+		// AbortWhen only when Herald is present — avoids scanning all enemies
+		// every burst iteration (~120ms) when there's no Herald on screen.
+		if cachedHerald != nil {
+			novaOpts = append(novaOpts, step.AbortWhen(isHeraldTooClose))
 		}
 
 		if err := step.SecondaryAttack(skill.Nova, monster.UnitID, 1, novaOpts...); err == nil {
@@ -878,19 +903,11 @@ func (s NovaSorceress) KillMonsterSequence(
 	}
 }
 
-// isHerald identifies the Herald BOSS (not minions or nearby mobs).
-// state.Herald (228) spreads as aura to all nearby monsters,
-// so we combine it with elite type check: Herald boss is always Unique/SuperUnique.
-// Fallback: Herald-exclusive auras (Concentration, Vigor) that no regular Aura Enchanted elite can have.
+// isHerald identifies the Herald BOSS using stat.HeraldTier (values 1-5 for Fright→Terror).
+// This stat is set directly on the Herald monster by the game — no aura spreading,
+// no false positives from Aura Enchanted elites.
 func isHerald(m data.Monster) bool {
-	if m.States.HasState(state.Herald) &&
-		(m.Type == data.MonsterTypeUnique || m.Type == data.MonsterTypeSuperUnique) {
-		return true
-	}
-	if m.IsElite() && (m.States.HasState(state.Concentration) || m.States.HasState(state.Stamina)) {
-		return true
-	}
-	return false
+	return m.Stats[stat.HeraldTier] > 0
 }
 
 func (s NovaSorceress) shouldCastStaticField(monster data.Monster) bool {

@@ -137,6 +137,14 @@ func Buff() {
 	// Ensure we start on primary weapon
 	ensurePrimaryWeapon()
 
+	// --- Phase 0: Probe weapon sets (once per game session) ---
+	// Swaps to each weapon set, refreshes data, reads bonuses, caches results.
+	// Must run BEFORE any buff casting so the cache is ready.
+	if !weaponCacheReady {
+		ctx.Logger.Info("Probing weapon sets for buff skill bonuses...")
+		probeBestWeaponSlots()
+	}
+
 	// --- Phase 1: Pre-CTA Buffs ---
 	castPreCTABuffs()
 	ensurePrimaryWeapon()
@@ -329,24 +337,117 @@ func castPostCTABuffs(isBarbarian bool) {
 // INTERNAL: BUFF CASTING WITH WEAPON SELECTION
 // ============================================================================
 
-// castBuffWithBestWeapon automatically selects the weapon set with better +skills,
-// casts the buff with state verification, then returns to primary weapon
+// bestWeaponSlotCache stores the probed best weapon slot (0=primary, 1=secondary) per skill.
+// Populated once on first Buff() call via probeBestWeaponSlots().
+var (
+	bestWeaponSlotCache map[skill.ID]int
+	weaponCacheReady    bool
+)
+
+// probeBestWeaponSlots swaps to each weapon set, refreshes game data, and reads
+// skill bonuses from the ACTIVE set. This avoids relying on D2R memory reporting
+// stats for the inactive weapon set (which is unreliable — causes 50/50 wrong weapon).
+func probeBestWeaponSlots() {
+	ctx := context.Get()
+	bestWeaponSlotCache = make(map[skill.ID]int)
+
+	// Collect all buff skills that need weapon selection
+	allBuffs := make([]skill.ID, 0)
+	allBuffs = append(allBuffs, ctx.Char.PreCTABuffSkills()...)
+	allBuffs = append(allBuffs, ctx.Char.BuffSkills()...)
+
+	// Remove warcries — those are always cast on CTA set
+	var probeSkills []skill.ID
+	for _, sk := range allBuffs {
+		if !isWarcrySkill(sk) {
+			probeSkills = append(probeSkills, sk)
+		}
+	}
+
+	if len(probeSkills) == 0 {
+		weaponCacheReady = true
+		return
+	}
+
+	// Probe slot 0 (primary): swap there, refresh, read items in LocLeftArm/LocRightArm
+	ensureWeaponSlot(0)
+	ctx.RefreshGameData()
+	slot0Bonuses := make(map[skill.ID]int)
+	for _, sk := range probeSkills {
+		slot0Bonuses[sk] = getSkillBonusOnWeaponSet(sk, false)
+	}
+
+	// Probe slot 1 (secondary): swap there, refresh, read items in LocLeftArmSecondary/LocRightArmSecondary
+	ensureWeaponSlot(1)
+	ctx.RefreshGameData()
+	slot1Bonuses := make(map[skill.ID]int)
+	for _, sk := range probeSkills {
+		slot1Bonuses[sk] = getSkillBonusOnWeaponSet(sk, true)
+	}
+
+	// Also cross-read: while on slot 1, read slot 0 items (and vice versa from above)
+	// Take the MAX of both readings to handle partial data
+	slot0CrossRead := make(map[skill.ID]int)
+	for _, sk := range probeSkills {
+		slot0CrossRead[sk] = getSkillBonusOnWeaponSet(sk, false)
+	}
+
+	// Return to primary
+	ensureWeaponSlot(0)
+	ctx.RefreshGameData()
+	slot1CrossRead := make(map[skill.ID]int)
+	for _, sk := range probeSkills {
+		slot1CrossRead[sk] = getSkillBonusOnWeaponSet(sk, true)
+	}
+
+	// Best reading for each set = max of both probes
+	for _, sk := range probeSkills {
+		mainBest := slot0Bonuses[sk]
+		if slot0CrossRead[sk] > mainBest {
+			mainBest = slot0CrossRead[sk]
+		}
+		swapBest := slot1Bonuses[sk]
+		if slot1CrossRead[sk] > swapBest {
+			swapBest = slot1CrossRead[sk]
+		}
+
+		if swapBest > mainBest {
+			bestWeaponSlotCache[sk] = 1
+		} else {
+			bestWeaponSlotCache[sk] = 0
+		}
+
+		ctx.Logger.Info("Buff weapon probe result",
+			slog.String("skill", sk.Desc().Name),
+			slog.Int("slot0Bonus", mainBest),
+			slog.Int("slot1Bonus", swapBest),
+			slog.Int("bestSlot", bestWeaponSlotCache[sk]))
+	}
+
+	weaponCacheReady = true
+}
+
+// castBuffWithBestWeapon uses the cached weapon slot probe to select the best set,
+// casts the buff with state verification, then returns to primary weapon.
 func castBuffWithBestWeapon(buffSkill skill.ID, expectedState state.State) {
 	ctx := context.Get()
 
-	// Calculate skill bonuses on both weapon sets
-	mainBonus := getSkillBonusOnWeaponSet(buffSkill, false)
-	swapBonus := getSkillBonusOnWeaponSet(buffSkill, true)
+	// Use cached probe result
+	bestSlot := 0
+	if weaponCacheReady {
+		if slot, ok := bestWeaponSlotCache[buffSkill]; ok {
+			bestSlot = slot
+		}
+	}
 
-	useSwap := swapBonus > mainBonus
+	useSwap := bestSlot == 1
 
-	ctx.Logger.Debug("Buff weapon selection",
+	ctx.Logger.Debug("Buff weapon selection (cached)",
 		slog.String("skill", buffSkill.Desc().Name),
-		slog.Int("mainBonus", mainBonus),
-		slog.Int("swapBonus", swapBonus),
+		slog.Int("bestSlot", bestSlot),
 		slog.Bool("useSwap", useSwap))
 
-	// Swap to better weapon set if needed
+	// Swap to better weapon set
 	if useSwap {
 		swapToSecondary()
 	} else {

@@ -268,12 +268,28 @@ func burstAttack(settings attackSettings) error {
 			return nil // Timeout reached, finish attack sequence
 		}
 
+		// Find target: prefer enemies with LoS first (no movement needed),
+		// then fall back to any enemy in range. This prevents burstAttack from
+		// chasing wall-blocked minions which could pull bot into Herald danger zone.
+		playerPos := ctx.Data.PlayerUnit.Position
 		target := data.Monster{}
-		for _, m := range ctx.Data.Monsters.Enemies() { // Changed 'monster' to 'm' to avoid shadowing
+		for _, m := range ctx.Data.Monsters.Enemies() {
 			distance := ctx.PathFinder.DistanceFromMe(m.Position)
-			if isValidEnemy(m, ctx) && distance <= settings.maxDistance {
+			if isValidEnemy(m, ctx) && distance <= settings.maxDistance &&
+				ctx.PathFinder.LineOfSight(playerPos, m.Position) {
 				target = m
 				break
+			}
+		}
+		// Fallback: target without LoS, but only if no abort callback (no Herald mode).
+		// With abortFunc set, chasing a wall-blocked minion risks pulling into Herald.
+		if target.UnitID == 0 && settings.abortFunc == nil {
+			for _, m := range ctx.Data.Monsters.Enemies() {
+				distance := ctx.PathFinder.DistanceFromMe(m.Position)
+				if isValidEnemy(m, ctx) && distance <= settings.maxDistance {
+					target = m
+					break
+				}
 			}
 		}
 
@@ -288,11 +304,17 @@ func burstAttack(settings attackSettings) error {
 			time.Since(state.failedAttemptStartTime) > 3*time.Second
 
 		// If we don't have LoS we will need to interrupt and move :(
-		if !ctx.PathFinder.LineOfSight(ctx.Data.PlayerUnit.Position, target.Position) || needsRepositioning {
+		if !ctx.PathFinder.LineOfSight(playerPos, target.Position) || needsRepositioning {
+			// When abortFunc is set (Herald mode), don't chase — abort instead of moving
+			// into potential danger. The caller will handle repositioning safely.
+			if settings.abortFunc != nil && !needsRepositioning {
+				return nil // Exit burst, let caller handle Herald-safe repositioning
+			}
+
 			// ensureEnemyIsInRange will handle reposition attempts and return nil if it skips
 			err = ensureEnemyIsInRange(target, state, settings.maxDistance, settings.minDistance, needsRepositioning)
 			if err != nil {
-				if errors.Is(err, ErrMonsterUnreachable) { // HANDLE NEW ERROR
+				if errors.Is(err, ErrMonsterUnreachable) {
 					ctx.Logger.Info(fmt.Sprintf("Giving up on monster [%d] (Area: %s) due to unreachability/unkillability during burst.", target.Name, ctx.Data.PlayerUnit.Area.Area().Name))
 					statesMutex.Lock()
 					delete(monsterStates, target.UnitID) // Clean up state for this monster
