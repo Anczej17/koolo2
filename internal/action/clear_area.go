@@ -18,9 +18,13 @@ func ClearAreaAroundPlayer(radius int, filter data.MonsterFilter) error {
 	return ClearAreaAroundPosition(context.Get().Data.PlayerUnit.Position, radius, filter)
 }
 
-// isHerald detects Herald bosses via stat.HeraldTier (1-5 = Fright→Terror).
+// isHerald detects Herald BOSS via stat.HeraldTier (stat 367).
+// Both boss and minions get stat 367, but Herald boss is always Unique.
 func isHerald(m data.Monster) bool {
-	return m.Stats[stat.HeraldTier] > 0
+	if m.Stats[stat.HeraldTier] > 0 {
+		return m.Type == data.MonsterTypeUnique || m.Type == data.MonsterTypeSuperUnique
+	}
+	return false
 }
 
 func IsPriorityMonster(m data.Monster) bool {

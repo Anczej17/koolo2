@@ -9,6 +9,7 @@ import (
 	"github.com/hectorgimenez/d2go/pkg/data/npc"
 	"github.com/hectorgimenez/d2go/pkg/data/skill"
 	"github.com/hectorgimenez/d2go/pkg/data/stat"
+	"github.com/hectorgimenez/d2go/pkg/data/state"
 	"github.com/hectorgimenez/koolo/internal/action/step"
 	"github.com/hectorgimenez/koolo/internal/context"
 	"github.com/hectorgimenez/koolo/internal/game"
@@ -35,8 +36,10 @@ const (
 	HeraldStaticThreshold   = 55 // Cast Static Field on Heralds until HP is below this percentage (Static can't go below ~50% in Hell)
 
 	// Herald-specific constants
-	HeraldDangerDistance = 4 // If Herald closer than this → break burst & reposition
-	HeraldSafeDistance   = 8 // Always position at this distance from Herald
+	HeraldDangerDistance  = 4 // If Herald closer than this → break burst & reposition
+	HeraldSafeDistance    = 8 // Always position at this distance from Herald
+	HeraldBurstMinDist    = 6 // Min distance for Nova burst on Herald — never closer
+	HeraldBurstMaxDist    = 8 // Max distance for Nova burst on Herald — Nova radius=8 still hits
 
 	// Pack construction radius (tiles) around a seed/anchor.
 	NovaPackRadius = 15
@@ -219,6 +222,18 @@ func findClosestHerald() (*data.Monster, int) {
 	for _, enemy := range ctx.Data.Monsters.Enemies() {
 		if enemy.Stats[stat.Life] <= 0 {
 			continue
+		}
+		// Debug: log any monster with HeraldTier stat to verify detection
+		heraldTier := enemy.Stats[stat.HeraldTier]
+		if heraldTier > 0 {
+			isBoss := enemy.Type == data.MonsterTypeUnique || enemy.Type == data.MonsterTypeSuperUnique
+			ctx.Logger.Info("Monster with HeraldTier stat",
+				slog.Int("tier", heraldTier),
+				slog.Bool("isBoss", isBoss),
+				slog.Bool("isMinion", !isBoss),
+				slog.Int("name", int(enemy.Name)),
+				slog.String("type", string(enemy.Type)),
+				slog.Int("dist", gridDistance(playerPos, enemy.Position)))
 		}
 		if !isHerald(enemy) {
 			continue
@@ -829,16 +844,17 @@ func (s NovaSorceress) KillMonsterSequence(
 		shouldCastStatic := s.shouldCastStaticField(monster)
 
 		if shouldCastStatic && (isHeraldMonster || !staticFieldCast) {
-			// For Heralds: minDistance=0 so bot casts Static from current position
-			// instead of teleporting away to reach min range 13.
+			// For Heralds: minDistance=0 (cast from anywhere), keep default maxDistance.
+			// Static has 40+ tile range — no need to close in.
 			staticMin := StaticMinDistance
+			staticMax := StaticMaxDistance
 			staticCasts := 1
 			if isHeraldMonster {
 				staticMin = 0
-				staticCasts = 4 // Cast multiple Statics per reposition to reduce ping-pong
+				staticCasts = 4
 			}
 			staticOpts := []step.AttackOption{
-				step.RangedDistance(staticMin, StaticMaxDistance),
+				step.RangedDistance(staticMin, staticMax),
 			}
 
 			if err := step.SecondaryAttack(skill.StaticField, monster.UnitID, staticCasts, staticOpts...); err == nil {
@@ -873,13 +889,11 @@ func (s NovaSorceress) KillMonsterSequence(
 			novaMax = NovaAggroMaxDistance
 		}
 
-		// For Heralds: use minDistance=0, maxDistance=NovaSpellRadius(8).
-		// Bot is at ~8 tiles after safety reposition — cast Nova from current position.
-		// Nova actual hit radius is 8 tiles, so max=8 ensures bot stays in kill range.
-		// If merc holds Herald at 9 tiles, ensureEnemyIsInRange pulls bot to 8 — one move, then stable.
+		// For Heralds: min=6, max=8 — bot positions at 6-8 tiles before burst.
+		// Nova radius=8 hits from this range. Bot never teleports closer than 6.
 		if isHeraldMonster {
-			novaMin = 0
-			novaMax = NovaSpellRadius // Always 8 — actual Nova hit radius
+			novaMin = HeraldBurstMinDist
+			novaMax = HeraldBurstMaxDist
 		}
 
 		novaOpts := []step.AttackOption{
@@ -903,11 +917,22 @@ func (s NovaSorceress) KillMonsterSequence(
 	}
 }
 
-// isHerald identifies the Herald BOSS using stat.HeraldTier (values 1-5 for Fright→Terror).
-// This stat is set directly on the Herald monster by the game — no aura spreading,
-// no false positives from Aura Enchanted elites.
+// isHerald identifies the Herald BOSS using stat.HeraldTier (stat 367).
+// Both boss and minions get stat 367, but Herald boss is always Unique,
+// while Herald minions are white (MonsterTypeNone).
+// Fallback: state.Herald + Unique/SuperUnique for older memory readers.
 func isHerald(m data.Monster) bool {
-	return m.Stats[stat.HeraldTier] > 0
+	tier := m.Stats[stat.HeraldTier]
+	if tier > 0 {
+		// stat 367 present — only the Unique/SuperUnique is the boss
+		return m.Type == data.MonsterTypeUnique || m.Type == data.MonsterTypeSuperUnique
+	}
+	// Fallback: state-based detection (memory reader doesn't populate stat 367)
+	if m.States.HasState(state.Herald) &&
+		(m.Type == data.MonsterTypeUnique || m.Type == data.MonsterTypeSuperUnique) {
+		return true
+	}
+	return false
 }
 
 func (s NovaSorceress) shouldCastStaticField(monster data.Monster) bool {
