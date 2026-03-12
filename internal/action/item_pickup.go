@@ -476,7 +476,7 @@ func shouldBePickedUp(i data.Item) bool {
 	if specialRuns {
 		questItem := false
 		switch i.Name {
-		case "Scroll of Inifuss", "ScrollOfInifuss", "LamEsensTome", "HoradricCube", "HoradricMalus",
+		case "Scroll of Inifuss", "ScrollOfInifuss", "KeyToTheCairnStones", "LamEsensTome", "HoradricCube", "HoradricMalus",
 			"AmuletoftheViper", "StaffofKings", "HoradricStaff",
 			"AJadeFigurine", "KhalimsEye", "KhalimsBrain", "KhalimsHeart", "KhalimsFlail", "HellforgeHammer", "TheGidbinn":
 			questItem = true
@@ -493,7 +493,7 @@ func shouldBePickedUp(i data.Item) bool {
 				return false
 			}
 			switch i.Name {
-			case "Scroll of Inifuss", "ScrollOfInifuss":
+			case "Scroll of Inifuss", "ScrollOfInifuss", "KeyToTheCairnStones":
 				if ctx.Data.Quests[quest.Act1TheSearchForCain].Completed() {
 					return false
 				}
@@ -551,8 +551,8 @@ func shouldBePickedUp(i data.Item) bool {
 			return true
 		}
 	}
-	// Specific ID checks (e.g. Book of Skill and Scroll of Inifuss).
-	if i.ID == 552 || i.ID == 524 {
+	// Specific ID checks (e.g. Book of Skill, Scroll of Inifuss, DLC items).
+	if i.ID == 552 || i.ID == 524 || i.ID == 567 || i.ID == 539 || i.ID == 540 {
 		return true
 	}
 
