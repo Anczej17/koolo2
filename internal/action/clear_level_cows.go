@@ -23,20 +23,26 @@ func ClearCurrentLevelCows(openChests bool, filter data.MonsterFilter) error {
 		moveClearRadius  = 20 // used by ClearThroughPath
 	)
 
-	rooms := ctx.PathFinder.OptimizeRoomsTraverseOrder()
+	traverser := ctx.PathFinder.NewRoomTraverser(filter)
+	roomCount := 0
+	for {
+		r, hasMore := traverser.NextRoom()
+		if !hasMore {
+			break
+		}
 
-	for i, r := range rooms {
 		if errDeath := checkPlayerDeath(ctx); errDeath != nil {
 			return errDeath
 		}
 
-		// Aggressive “fight-through” movement to room center (no monster filter path-avoidance)
+		// Aggressive "fight-through" movement to room center (no monster filter path-avoidance)
 		if err := clearRoomCows(r, filter, moveClearRadius); err != nil {
 			ctx.Logger.Warn("Failed to clear room (cows)", slog.Any("error", err))
 		}
 
+		roomCount++
 		// Don’t loot-vacuum after every room
-		if (i%pickupEveryRooms == 0) || (i == len(rooms)-1) {
+		if roomCount%pickupEveryRooms == 0 {
 			if err := ItemPickup(pickupRadius); err != nil {
 				ctx.Logger.Warn("Failed to pickup items (cows)", slog.Any("error", err))
 			}
@@ -56,6 +62,13 @@ func ClearCurrentLevelCows(openChests bool, filter data.MonsterFilter) error {
 					utils.Sleep(250)
 				}
 			}
+		}
+	}
+
+	// Final pickup after all rooms
+	if roomCount%pickupEveryRooms != 0 {
+		if err := ItemPickup(pickupRadius); err != nil {
+			ctx.Logger.Warn("Failed to pickup items (cows)", slog.Any("error", err))
 		}
 	}
 
@@ -123,7 +136,7 @@ func clearRoomCows(room data.Room, filter data.MonsterFilter, moveClearRadius in
 	}
 }
 
-// Cow-only “alive AND (in-room OR near)” so you don’t target corpses near you.
+// Cow-only "alive AND (in-room OR near)" so you don’t target corpses near you.
 func getMonstersInRoomCows(room data.Room, filter data.MonsterFilter) []data.Monster {
 	ctx := context.Get()
 

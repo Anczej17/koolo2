@@ -1,6 +1,7 @@
 package action
 
 import (
+	"fmt"
 	"log/slog"
 	"time"
 
@@ -344,9 +345,10 @@ var (
 	weaponCacheReady    bool
 )
 
-// probeBestWeaponSlots swaps to each weapon set, refreshes game data, and reads
-// skill bonuses from the ACTIVE set. This avoids relying on D2R memory reporting
-// stats for the inactive weapon set (which is unreliable — causes 50/50 wrong weapon).
+// probeBestWeaponSlots reads +skill bonuses directly from weapon/shield items in each
+// weapon set. ByLocation(LocationEquipped) returns items from BOTH sets simultaneously,
+// so we filter by BodyLocation (LocLeftArm/LocRightArm vs LocLeftArmSecondary/LocRightArmSecondary).
+// Non-weapon items (armor, helm, etc.) are the same for both sets and cancel out.
 func probeBestWeaponSlots() {
 	ctx := context.Get()
 	bestWeaponSlotCache = make(map[skill.ID]int)
@@ -369,49 +371,46 @@ func probeBestWeaponSlots() {
 		return
 	}
 
-	// Probe slot 0 (primary): swap there, refresh, read items in LocLeftArm/LocRightArm
-	ensureWeaponSlot(0)
+	// Refresh once — both weapon sets are visible simultaneously
 	ctx.RefreshGameData()
-	slot0Bonuses := make(map[skill.ID]int)
-	for _, sk := range probeSkills {
-		slot0Bonuses[sk] = getSkillBonusOnWeaponSet(sk, false)
-	}
 
-	// Probe slot 1 (secondary): swap there, refresh, read items in LocLeftArmSecondary/LocRightArmSecondary
-	ensureWeaponSlot(1)
-	ctx.RefreshGameData()
-	slot1Bonuses := make(map[skill.ID]int)
-	for _, sk := range probeSkills {
-		slot1Bonuses[sk] = getSkillBonusOnWeaponSet(sk, true)
-	}
-
-	// Also cross-read: while on slot 1, read slot 0 items (and vice versa from above)
-	// Take the MAX of both readings to handle partial data
-	slot0CrossRead := make(map[skill.ID]int)
-	for _, sk := range probeSkills {
-		slot0CrossRead[sk] = getSkillBonusOnWeaponSet(sk, false)
-	}
-
-	// Return to primary
-	ensureWeaponSlot(0)
-	ctx.RefreshGameData()
-	slot1CrossRead := make(map[skill.ID]int)
-	for _, sk := range probeSkills {
-		slot1CrossRead[sk] = getSkillBonusOnWeaponSet(sk, true)
-	}
-
-	// Best reading for each set = max of both probes
-	for _, sk := range probeSkills {
-		mainBest := slot0Bonuses[sk]
-		if slot0CrossRead[sk] > mainBest {
-			mainBest = slot0CrossRead[sk]
+	// Split equipped items into primary weapons vs secondary weapons
+	var primaryWeapons, secondaryWeapons []data.Item
+	for _, itm := range ctx.Data.Inventory.ByLocation(item.LocationEquipped) {
+		switch itm.Location.BodyLocation {
+		case item.LocLeftArm, item.LocRightArm:
+			primaryWeapons = append(primaryWeapons, itm)
+			ctx.Logger.Info("Probe: primary slot item",
+				slog.String("name", string(itm.Name)),
+				slog.String("bodyLoc", string(itm.Location.BodyLocation)),
+				slog.Int("totalStats", len(itm.Stats)))
+			logItemSkillStats(itm)
+		case item.LocLeftArmSecondary, item.LocRightArmSecondary:
+			secondaryWeapons = append(secondaryWeapons, itm)
+			ctx.Logger.Info("Probe: secondary slot item",
+				slog.String("name", string(itm.Name)),
+				slog.String("bodyLoc", string(itm.Location.BodyLocation)),
+				slog.Int("totalStats", len(itm.Stats)))
+			logItemSkillStats(itm)
 		}
-		swapBest := slot1Bonuses[sk]
-		if slot1CrossRead[sk] > swapBest {
-			swapBest = slot1CrossRead[sk]
-		}
+	}
 
-		if swapBest > mainBest {
+	ctx.Logger.Info("Probe weapon items found",
+		slog.Int("primaryWeapons", len(primaryWeapons)),
+		slog.Int("secondaryWeapons", len(secondaryWeapons)))
+
+	// Compare bonuses per skill
+	playerClass := int(ctx.Data.PlayerUnit.Class)
+	ctx.Logger.Info("Probe: player class index", slog.Int("class", playerClass))
+	for _, sk := range probeSkills {
+		ctx.Logger.Info("Probing skill bonuses", slog.String("skill", sk.Desc().Name),
+			slog.Int("skillID", int(sk)))
+		ctx.Logger.Info("--- Primary weapon set ---")
+		b0 := sumSkillBonusFromItems(primaryWeapons, sk, playerClass)
+		ctx.Logger.Info("--- Secondary weapon set ---")
+		b1 := sumSkillBonusFromItems(secondaryWeapons, sk, playerClass)
+
+		if b1 > b0 {
 			bestWeaponSlotCache[sk] = 1
 		} else {
 			bestWeaponSlotCache[sk] = 0
@@ -419,12 +418,77 @@ func probeBestWeaponSlots() {
 
 		ctx.Logger.Info("Buff weapon probe result",
 			slog.String("skill", sk.Desc().Name),
-			slog.Int("slot0Bonus", mainBest),
-			slog.Int("slot1Bonus", swapBest),
+			slog.Int("slot0Bonus", b0),
+			slog.Int("slot1Bonus", b1),
 			slog.Int("bestSlot", bestWeaponSlotCache[sk]))
 	}
 
 	weaponCacheReady = true
+}
+
+// sumSkillBonusFromItems sums +skill bonuses from a specific set of items for a given skill.
+// Checks: AllSkills, AddClassSkills, NonClassSkill, SingleSkill.
+func sumSkillBonusFromItems(items []data.Item, sk skill.ID, playerClass int) int {
+	ctx := context.Get()
+	bonus := 0
+	for _, itm := range items {
+		itemBonus := 0
+		// +X to All Skills (e.g., Hoto, Spirit)
+		if s, found := itm.FindStat(stat.AllSkills, 0); found {
+			itemBonus += s.Value
+			ctx.Logger.Info("  stat AllSkills found",
+				slog.String("item", string(itm.Name)),
+				slog.Int("value", s.Value))
+		}
+		// +X to Class Skills (e.g., +2 to Sorceress Skills)
+		// Layer = class index: Amazon=0, Sorceress=1, Necro=2, Paladin=3, Barb=4, Druid=5, Assassin=6
+		if s, found := itm.FindStat(stat.AddClassSkills, playerClass); found {
+			itemBonus += s.Value
+			ctx.Logger.Info("  stat AddClassSkills found",
+				slog.String("item", string(itm.Name)),
+				slog.Int("value", s.Value),
+				slog.Int("classLayer", playerClass))
+		}
+		// +X to specific skill from non-class items (e.g., CTA Battle Orders)
+		if s, found := itm.FindStat(stat.NonClassSkill, int(sk)); found {
+			itemBonus += s.Value
+			ctx.Logger.Info("  stat NonClassSkill found",
+				slog.String("item", string(itm.Name)),
+				slog.Int("value", s.Value),
+				slog.String("skill", sk.Desc().Name))
+		}
+		// +X to specific skill (e.g., +3 Energy Shield on staff)
+		if s, found := itm.FindStat(stat.SingleSkill, int(sk)); found {
+			itemBonus += s.Value
+			ctx.Logger.Info("  stat SingleSkill found",
+				slog.String("item", string(itm.Name)),
+				slog.Int("value", s.Value),
+				slog.String("skill", sk.Desc().Name))
+		}
+		if itemBonus > 0 {
+			ctx.Logger.Info("  item total bonus",
+				slog.String("item", string(itm.Name)),
+				slog.Int("bonus", itemBonus),
+				slog.String("forSkill", sk.Desc().Name))
+		}
+		bonus += itemBonus
+	}
+	return bonus
+}
+
+// logItemSkillStats dumps all skill-related stats from an item for debugging the probe.
+func logItemSkillStats(itm data.Item) {
+	ctx := context.Get()
+	skillStatIDs := []stat.ID{stat.AllSkills, stat.AddClassSkills, stat.NonClassSkill, stat.SingleSkill, stat.AddSkillTab}
+	for _, s := range itm.Stats {
+		for _, target := range skillStatIDs {
+			if s.ID == target {
+				ctx.Logger.Info(fmt.Sprintf("  -> stat %s (id=%d layer=%d) = %d",
+					s.ID.String(), int(s.ID), s.Layer, s.Value),
+					slog.String("item", string(itm.Name)))
+			}
+		}
+	}
 }
 
 // castBuffWithBestWeapon uses the cached weapon slot probe to select the best set,
@@ -648,62 +712,6 @@ func ensurePrimaryWeapon() {
 // ============================================================================
 // INTERNAL: SKILL BONUS CALCULATION
 // ============================================================================
-
-// getSkillBonusOnWeaponSet calculates total +skill bonus for a given skill on a weapon set
-func getSkillBonusOnWeaponSet(sk skill.ID, checkSwap bool) int {
-	ctx := context.Get()
-	d := ctx.Data
-	totalBonus := 0
-
-	// Determine which weapon slots to check
-	var leftSlot, rightSlot item.LocationType
-	if checkSwap {
-		leftSlot, rightSlot = item.LocLeftArmSecondary, item.LocRightArmSecondary
-	} else {
-		leftSlot, rightSlot = item.LocLeftArm, item.LocRightArm
-	}
-
-	skillDesc := sk.Desc()
-	playerClass := getPlayerClass()
-
-	for _, itm := range d.Inventory.ByLocation(item.LocationEquipped) {
-		// Only check items in target weapon slots
-		if itm.Location.BodyLocation != leftSlot && itm.Location.BodyLocation != rightSlot {
-			continue
-		}
-
-		// +Specific Skill (NonClassSkill - cross-class like CTA)
-		if skillBonus, found := itm.FindStat(stat.NonClassSkill, int(sk)); found {
-			totalBonus += skillBonus.Value
-		}
-
-		// +Specific Skill (SingleSkill - class items like +3 Energy Shield on staff)
-		if skillBonus, found := itm.FindStat(stat.SingleSkill, int(sk)); found {
-			totalBonus += skillBonus.Value
-		}
-
-		// +All Skills
-		if allSkillsBonus, found := itm.FindStat(stat.AllSkills, 0); found {
-			totalBonus += allSkillsBonus.Value
-		}
-
-		// +Class Skills & +Skill Tab (only for native skills)
-		if isSkillNativeToClass(sk, playerClass) {
-			if classSkillsBonus, found := itm.FindStat(stat.AddClassSkills, int(playerClass)); found {
-				totalBonus += classSkillsBonus.Value
-			}
-
-			if skillDesc.Page >= 0 && skillDesc.Page < 3 {
-				tabID := int(playerClass)*3 + skillDesc.Page
-				if tabBonus, found := itm.FindStat(stat.AddSkillTab, tabID); found {
-					totalBonus += tabBonus.Value
-				}
-			}
-		}
-	}
-
-	return totalBonus
-}
 
 func getPlayerClass() data.Class {
 	ctx := context.Get()

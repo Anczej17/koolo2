@@ -36,10 +36,9 @@ const (
 	HeraldStaticThreshold   = 55 // Cast Static Field on Heralds until HP is below this percentage (Static can't go below ~50% in Hell)
 
 	// Herald-specific constants
-	HeraldDangerDistance  = 4 // If Herald closer than this → break burst & reposition
-	HeraldSafeDistance    = 8 // Always position at this distance from Herald
-	HeraldBurstMinDist    = 6 // Min distance for Nova burst on Herald — never closer
-	HeraldBurstMaxDist    = 8 // Max distance for Nova burst on Herald — Nova radius=8 still hits
+	HeraldDangerDistance = 4  // If Herald closer than this → break burst & reposition
+	HeraldSafeDistance   = 7  // Reposition target distance (7 so with variance bot lands 7-9)
+	HeraldNovaMaxRange   = 30 // Large value — ensureEnemyIsInRange must NOT move bot for Herald
 
 	// Pack construction radius (tiles) around a seed/anchor.
 	NovaPackRadius = 15
@@ -719,8 +718,20 @@ func (s NovaSorceress) KillMonsterSequence(
 	attackedThisEngagement := false
 	lastRepositionAt := time.Time{}
 
+	// Safety timeout: prevent infinite loop when monster is unreachable
+	killSequenceStart := time.Now()
+	lastDamageTime := time.Now()
+	var lastMonsterHP int
+
 	for {
 		ctx.PauseIfNotPriority()
+
+		// Safety: if no damage dealt for 15 seconds, give up on this target
+		if time.Since(lastDamageTime) > 15*time.Second {
+			s.Logger.Warn("KillMonsterSequence: no damage for 15s, skipping target",
+				slog.Duration("totalTime", time.Since(killSequenceStart)))
+			return nil
+		}
 
 		id, found := monsterSelector(*s.Data)
 		if !found {
@@ -735,6 +746,13 @@ func (s NovaSorceress) KillMonsterSequence(
 		if !found || monster.Stats[stat.Life] <= 0 {
 			return nil
 		}
+
+		// Track damage progress for safety timeout
+		currentHP := monster.Stats[stat.Life]
+		if lastMonsterHP == 0 || currentHP < lastMonsterHP {
+			lastDamageTime = time.Now()
+		}
+		lastMonsterHP = currentHP
 
 		// Single Herald lookup per loop iteration — avoids scanning all enemies 3+ times.
 		cachedHerald, cachedHeraldDist := findClosestHerald()
@@ -876,11 +894,6 @@ func (s NovaSorceress) KillMonsterSequence(
 			}
 		}
 
-		// Herald distance is managed by:
-		// 1. Top-of-loop: Herald < 4 → reposition to 8
-		// 2. burstAttack AbortWhen: Herald < 4 → break burst
-		// No active "pull towards Herald" here — bot stays wherever it is after reposition
-
 		// Choose Nova distance based on config (aggressive / normal).
 		novaMin := NovaMinDistance
 		novaMax := NovaMaxDistance
@@ -889,11 +902,23 @@ func (s NovaSorceress) KillMonsterSequence(
 			novaMax = NovaAggroMaxDistance
 		}
 
-		// For Heralds: min=6, max=8 — bot positions at 6-8 tiles before burst.
-		// Nova radius=8 hits from this range. Bot never teleports closer than 6.
+		// Herald: bypass ensureEnemyIsInRange completely (it has a BeyondPosition
+		// overshoot bug that catapults the bot into melee range). Instead we manage
+		// Herald distance ourselves: reposition puts bot at ~7, we approach to ≤8
+		// manually if needed, then fire Nova with maxDist=30 so burstAttack never moves.
 		if isHeraldMonster {
-			novaMin = HeraldBurstMinDist
-			novaMax = HeraldBurstMaxDist
+			novaMin = 0
+			novaMax = HeraldNovaMaxRange
+
+			// If too far for Nova to hit (>8 tiles), move ONE step closer.
+			// Use BeyondPosition Herald→Player at 7 tiles for controlled placement.
+			heraldDist := gridDistance(ctx.Data.PlayerUnit.Position, monster.Position)
+			if heraldDist > NovaSpellRadius {
+				dest := ctx.PathFinder.BeyondPosition(monster.Position, ctx.Data.PlayerUnit.Position, HeraldSafeDistance)
+				if err := step.MoveTo(dest, step.WithDistanceToFinish(2)); err != nil {
+					s.Logger.Debug("Herald approach failed", slog.String("error", err.Error()))
+				}
+			}
 		}
 
 		novaOpts := []step.AttackOption{

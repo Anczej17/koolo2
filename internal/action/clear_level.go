@@ -39,8 +39,13 @@ func ClearCurrentLevelEx(openChests bool, filter data.MonsterFilter, shouldInter
 	// We can make this configurable later, but 20 is a good starting radius.
 	const pickupRadius = 20
 
-	rooms := ctx.PathFinder.OptimizeRoomsTraverseOrder()
-	for _, r := range rooms {
+	traverser := ctx.PathFinder.NewRoomTraverser(filter)
+	for {
+		r, hasMore := traverser.NextRoom()
+		if !hasMore {
+			break
+		}
+
 		if errDeath := checkPlayerDeath(ctx); errDeath != nil {
 			return errDeath
 		}
@@ -139,7 +144,7 @@ func clearRoom(room data.Room, filter data.MonsterFilter) error {
 			Y: path.To().Y + ctx.Data.AreaOrigin.Y,
 		}
 
-		err := MoveToCoords(to, step.WithMonsterFilter(filter))
+		err := MoveToCoords(to, step.WithMonsterFilter(filter), step.WithTimeout(20*time.Second))
 		if err == nil {
 			movedToCenter = true
 			break

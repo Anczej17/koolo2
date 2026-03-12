@@ -444,7 +444,18 @@ func MoveTo(toFunc func() (data.Position, bool), options ...step.MoveOption) err
 		return err
 	}
 
+	// Optional timeout for the entire MoveTo operation
+	moveStartTime := time.Now()
+
 	for {
+		// Check timeout if configured
+		if opts.Timeout() != nil && time.Since(moveStartTime) > *opts.Timeout() {
+			ctx.Logger.Warn("MoveTo timeout reached, aborting movement",
+				slog.Duration("elapsed", time.Since(moveStartTime)),
+				slog.Any("destination", targetPosition),
+				slog.String("area", ctx.Data.PlayerUnit.Area.Area().Name))
+			return fmt.Errorf("MoveTo timeout after %v", *opts.Timeout())
+		}
 		ctx.PauseIfNotPriority()
 		ctx.RefreshGameData()
 		// Check for death after refreshing game data in the loop
@@ -699,6 +710,10 @@ func MoveTo(toFunc func() (data.Position, bool), options ...step.MoveOption) err
 			if errors.Is(moveErr, step.ErrMonstersInPath) {
 				continue
 			} else if errors.Is(moveErr, step.ErrPlayerStuck) || errors.Is(moveErr, step.ErrPlayerRoundTrip) {
+				ctx.Logger.Debug("MoveTo: step error, retrying",
+					slog.String("error", moveErr.Error()),
+					slog.Any("position", ctx.Data.PlayerUnit.Position),
+					slog.Any("destination", targetPosition))
 				if (!ctx.Data.CanTeleport() || stuck) || ctx.Data.PlayerUnit.Area.IsTown() {
 					ctx.PathFinder.RandomMovement()
 					time.Sleep(time.Millisecond * 200)
@@ -706,6 +721,9 @@ func MoveTo(toFunc func() (data.Position, bool), options ...step.MoveOption) err
 				stuck = true
 				continue
 			} else if errors.Is(moveErr, step.ErrNoPath) && pathStep > 0 {
+				ctx.Logger.Debug("MoveTo: no path, retrying with random movement",
+					slog.Any("position", ctx.Data.PlayerUnit.Position),
+					slog.Any("destination", targetPosition))
 				ctx.PathFinder.RandomMovement()
 				time.Sleep(time.Millisecond * 200)
 				continue

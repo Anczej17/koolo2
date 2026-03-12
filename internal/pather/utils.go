@@ -4,12 +4,14 @@ import (
 	"log/slog"
 	"math"
 	"math/rand"
+	"sort"
 	"time"
 
 	"github.com/hectorgimenez/d2go/pkg/data"
 	"github.com/hectorgimenez/d2go/pkg/data/area"
 	"github.com/hectorgimenez/d2go/pkg/data/object"
 	"github.com/hectorgimenez/d2go/pkg/data/skill"
+	"github.com/hectorgimenez/d2go/pkg/data/stat"
 	"github.com/hectorgimenez/koolo/internal/game"
 	"github.com/hectorgimenez/koolo/internal/utils"
 )
@@ -28,6 +30,8 @@ func (pf *PathFinder) DistanceFromMe(p data.Position) int {
 	return DistanceFromPoint(pf.data.PlayerUnit.Position, p)
 }
 
+// OptimizeRoomsTraverseOrder returns all rooms in greedy nearest-neighbor order (legacy).
+// Prefer using RoomTraverser for dynamic room selection with real path distances.
 func (pf *PathFinder) OptimizeRoomsTraverseOrder() []data.Room {
 	distanceMatrix := make(map[data.Room]map[data.Room]int)
 
@@ -73,6 +77,245 @@ func (pf *PathFinder) OptimizeRoomsTraverseOrder() []data.Room {
 	}
 
 	return order
+}
+
+// RoomTraverser dynamically picks the next room to visit, avoiding
+// bridge ping-pong by checking real A* path distance for top candidates.
+type RoomTraverser struct {
+	pf      *PathFinder
+	visited map[data.Room]bool
+	filter  []data.MonsterFilter
+}
+
+// NewRoomTraverser creates a traverser and marks the player's current room as visited.
+// Optional monster filters are applied when checking if a room has monsters.
+func (pf *PathFinder) NewRoomTraverser(filters ...data.MonsterFilter) *RoomTraverser {
+	rt := &RoomTraverser{
+		pf:      pf,
+		visited: make(map[data.Room]bool),
+		filter:  filters,
+	}
+	// Mark current room as visited
+	for _, r := range pf.data.Rooms {
+		if r.IsInside(pf.data.PlayerUnit.Position) {
+			rt.visited[r] = true
+			break
+		}
+	}
+	return rt
+}
+
+// roomHasMonsters checks if a room has any living enemies matching the filter.
+func (rt *RoomTraverser) roomHasMonsters(room data.Room) bool {
+	// Filter out nil filters to avoid panic on nil function call
+	var validFilters []data.MonsterFilter
+	for _, f := range rt.filter {
+		if f != nil {
+			validFilters = append(validFilters, f)
+		}
+	}
+	for _, m := range rt.pf.data.Monsters.Enemies(validFilters...) {
+		if m.Stats[stat.Life] > 0 && room.IsInside(m.Position) {
+			return true
+		}
+	}
+	return false
+}
+
+// roomIsActivated checks if the game has loaded ANY monsters for this room (regardless of filter).
+// If no monsters are loaded, the room hasn't been explored yet and shouldn't be skipped.
+func (rt *RoomTraverser) roomIsActivated(room data.Room) bool {
+	for _, m := range rt.pf.data.Monsters {
+		if room.IsInside(m.Position) {
+			return true
+		}
+	}
+	return false
+}
+
+// roomIsVisible checks if the room center is within visibility range (~40 tiles) of the player.
+func (rt *RoomTraverser) roomIsVisible(room data.Room) bool {
+	return DistanceFromPoint(rt.pf.data.PlayerUnit.Position, room.GetCenter()) < 40
+}
+
+// isAdjacent checks if two rooms share an edge or corner (touching boundaries).
+func isAdjacent(a, b data.Room) bool {
+	// Rooms are adjacent if their bounding boxes overlap or touch (gap <= 1 tile).
+	const gap = 1
+	aRight := a.Position.X + a.Width + gap
+	aBottom := a.Position.Y + a.Height + gap
+	bRight := b.Position.X + b.Width + gap
+	bBottom := b.Position.Y + b.Height + gap
+
+	if a.Position.X-gap > bRight || b.Position.X-gap > aRight {
+		return false
+	}
+	if a.Position.Y-gap > bBottom || b.Position.Y-gap > aBottom {
+		return false
+	}
+	return true
+}
+
+// currentRoomOk returns the room the player is currently standing in, and whether one was found.
+func (rt *RoomTraverser) currentRoomOk() (data.Room, bool) {
+	for _, r := range rt.pf.data.Rooms {
+		if r.IsInside(rt.pf.data.PlayerUnit.Position) {
+			return r, true
+		}
+	}
+	return data.Room{}, false
+}
+
+type roomCandidate struct {
+	room     data.Room
+	euclDist int
+	hasEnemy bool
+	adjacent bool
+}
+
+// NextRoom picks the best unvisited room to visit next. Returns room and false when done.
+// Priority: adjacent rooms with monsters > nearby rooms with monsters > adjacent empty > nearest unvisited.
+// For top euclidean candidates, checks real A* path length to avoid bridge ping-pong.
+func (rt *RoomTraverser) NextRoom() (data.Room, bool) {
+	cur, inRoom := rt.currentRoomOk()
+	playerPos := rt.pf.data.PlayerUnit.Position
+
+	// Two-tier room clearing: inner radius (no LoS check) + outer radius (with LoS).
+	// Inner = AoE spell radius, rooms this close are always cleared by Nova.
+	// Outer = movement + AoE range, needs LoS to avoid skipping rooms behind walls.
+	// Teleporters cover much more ground due to teleport mobility.
+	innerRadius := 8  // Nova spell radius — always cleared if bot is here
+	outerRadius := 15 // Movement + combat range
+	if rt.pf.data.CanTeleport() {
+		innerRadius = 15 // Teleporters move freely, Nova covers 15 easily
+		outerRadius = 25 // Teleport + AoE total coverage
+	}
+	for _, r := range rt.pf.data.Rooms {
+		if rt.visited[r] {
+			continue
+		}
+		dist := DistanceFromPoint(playerPos, r.GetCenter())
+		if dist <= innerRadius {
+			// Within AoE radius — definitely cleared, no LoS check needed
+			rt.visited[r] = true
+		} else if dist <= outerRadius && rt.pf.LineOfSight(playerPos, r.GetCenter()) {
+			// Within extended range but needs clear LoS
+			rt.visited[r] = true
+		}
+	}
+
+	// Skip activated empty rooms — room is activated (game loaded monsters for it)
+	// but no monsters match our filter. Safe to skip: we know what's there.
+	// For teleporters, don't require visibility — they can assess rooms from further away
+	// because they traverse the map faster and rooms activate at ~40 tile range anyway.
+	for _, r := range rt.pf.data.Rooms {
+		if rt.visited[r] || !rt.roomIsActivated(r) || rt.roomHasMonsters(r) {
+			continue
+		}
+		if rt.pf.data.CanTeleport() || rt.roomIsVisible(r) {
+			rt.visited[r] = true
+		}
+	}
+
+	// Build candidate list
+	var candidates []roomCandidate
+	for _, r := range rt.pf.data.Rooms {
+		if rt.visited[r] {
+			continue
+		}
+		candidates = append(candidates, roomCandidate{
+			room:     r,
+			euclDist: DistanceFromPoint(playerPos, r.GetCenter()),
+			hasEnemy: rt.roomHasMonsters(r),
+			adjacent: inRoom && isAdjacent(cur, r), // only check adjacency if player is in a room
+		})
+	}
+
+	if len(candidates) == 0 {
+		return data.Room{}, false
+	}
+
+	// Sort: adjacent+monsters first, then monsters, then adjacent, then distance.
+	sort.SliceStable(candidates, func(i, j int) bool {
+		ci, cj := candidates[i], candidates[j]
+		// Priority score: adjacent+enemy=3, enemy=2, adjacent=1, other=0
+		scoreI := 0
+		if ci.hasEnemy {
+			scoreI += 2
+		}
+		if ci.adjacent {
+			scoreI++
+		}
+		scoreJ := 0
+		if cj.hasEnemy {
+			scoreJ += 2
+		}
+		if cj.adjacent {
+			scoreJ++
+		}
+		if scoreI != scoreJ {
+			return scoreI > scoreJ
+		}
+		return ci.euclDist < cj.euclDist
+	})
+
+	// For top candidates (by priority+euclidean), check real path distance.
+	// This catches bridges: euclidean=5 but real path=50 → pick the other one.
+	// Check up to 5 candidates to avoid picking unreachable rooms when top 3 are walled off.
+	checkCount := 5
+	if checkCount > len(candidates) {
+		checkCount = len(candidates)
+	}
+
+	bestIdx := -1
+	bestRealDist := math.MaxInt
+
+	for i := 0; i < checkCount; i++ {
+		c := candidates[i]
+		_, realDist, found := rt.pf.GetClosestWalkablePath(c.room.GetCenter())
+		if !found {
+			// Can't reach this room — mark as visited so we don't try it again
+			rt.visited[c.room] = true
+			continue
+		}
+		// Weight: adjacent+monsters rooms get a distance bonus (prefer them even if slightly farther)
+		weight := realDist
+		if c.hasEnemy && c.adjacent {
+			weight = weight * 60 / 100 // 40% bonus
+		} else if c.hasEnemy {
+			weight = weight * 75 / 100 // 25% bonus
+		} else if c.adjacent {
+			weight = weight * 85 / 100 // 15% bonus
+		}
+
+		if weight < bestRealDist {
+			bestRealDist = weight
+			bestIdx = i
+		}
+	}
+
+	// All checked candidates were unreachable — retry with remaining rooms
+	if bestIdx < 0 {
+		// Recurse: visited set was updated with unreachable rooms, so next call skips them
+		return rt.NextRoom()
+	}
+
+	chosen := candidates[bestIdx].room
+	rt.visited[chosen] = true
+
+	slog.Debug("NextRoom selected",
+		slog.Int("euclDist", candidates[bestIdx].euclDist),
+		slog.Int("realDist", bestRealDist),
+		slog.Bool("hasMonsters", candidates[bestIdx].hasEnemy),
+		slog.Bool("adjacent", candidates[bestIdx].adjacent),
+		slog.Int("remainingRooms", len(candidates)-1))
+
+	return chosen, true
+}
+
+// MarkVisited marks a room as visited externally.
+func (rt *RoomTraverser) MarkVisited(r data.Room) {
+	rt.visited[r] = true
 }
 
 func (pf *PathFinder) MoveThroughPath(p Path, walkDuration time.Duration) {

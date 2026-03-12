@@ -34,6 +34,7 @@ type MoveOpts struct {
 	ignoreItems           bool
 	monsterFilters        []data.MonsterFilter
 	clearPathOverride     *int
+	timeout               *time.Duration
 }
 
 type MoveOption func(*MoveOpts)
@@ -101,6 +102,16 @@ func (opts MoveOpts) MonsterFilters() []data.MonsterFilter {
 
 func (opts MoveOpts) ClearPathOverride() *int {
 	return opts.clearPathOverride
+}
+
+func WithTimeout(d time.Duration) MoveOption {
+	return func(opts *MoveOpts) {
+		opts.timeout = &d
+	}
+}
+
+func (opts MoveOpts) Timeout() *time.Duration {
+	return opts.timeout
 }
 
 func MoveTo(dest data.Position, options ...MoveOption) error {
