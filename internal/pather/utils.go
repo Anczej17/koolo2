@@ -318,6 +318,20 @@ func (rt *RoomTraverser) MarkVisited(r data.Room) {
 	rt.visited[r] = true
 }
 
+// SkipNearbyRooms marks all unvisited rooms within radius of a position as visited.
+// Used when the bot fails to reach a room — skip the entire cluster to avoid
+// spending minutes trying adjacent rooms in the same unreachable area.
+func (rt *RoomTraverser) SkipNearbyRooms(pos data.Position, radius int) int {
+	skipped := 0
+	for _, r := range rt.pf.data.Rooms {
+		if !rt.visited[r] && DistanceFromPoint(pos, r.GetCenter()) <= radius {
+			rt.visited[r] = true
+			skipped++
+		}
+	}
+	return skipped
+}
+
 func (pf *PathFinder) MoveThroughPath(p Path, walkDuration time.Duration) {
 	if pf.data.CanTeleport() {
 		pf.moveThroughPathTeleport(p)

@@ -15,6 +15,8 @@ import (
 	"github.com/hectorgimenez/koolo/internal/utils"
 )
 
+var errRoomUnreachable = fmt.Errorf("room center unreachable after all attempts")
+
 var interactableShrines = []object.ShrineType{
 	object.ExperienceShrine,
 	object.StaminaShrine,
@@ -55,8 +57,17 @@ func ClearCurrentLevelEx(openChests bool, filter data.MonsterFilter, shouldInter
 
 		// First, clear the room of monsters
 		err := clearRoom(r, filter)
-		if err != nil {
-			ctx.Logger.Warn("Failed to clear room: %v", err)
+		if err == errRoomUnreachable {
+			// Skip entire cluster of rooms near the unreachable target
+			// to avoid wasting minutes trying adjacent rooms in the same area
+			const skipRadius = 30
+			skipped := traverser.SkipNearbyRooms(r.GetCenter(), skipRadius)
+			ctx.Logger.Warn("Room unreachable, skipping nearby cluster",
+				slog.Any("roomCenter", r.GetCenter()),
+				slog.Int("skippedRooms", skipped),
+				slog.Int("skipRadius", skipRadius))
+		} else if err != nil {
+			ctx.Logger.Warn("Failed to clear room", slog.Any("error", err))
 		}
 
 		//ctx.Logger.Debug(fmt.Sprintf("Clearing room complete, attempting to pickup items in a radius of %d", pickupRadius))
@@ -156,7 +167,15 @@ func clearRoom(room data.Room, filter data.MonsterFilter) error {
 	}
 
 	if !movedToCenter {
-		ctx.Logger.Debug("Could not reach room center, clearing from current position")
+		// Check if there are any monsters we can clear from current position
+		nearbyMonsters := getMonstersInRoom(room, filter)
+		if len(nearbyMonsters) == 0 {
+			ctx.Logger.Warn("Room unreachable and no nearby monsters, skipping",
+				slog.Any("roomCenter", room.GetCenter()))
+			return errRoomUnreachable
+		}
+		ctx.Logger.Debug("Could not reach room center, clearing nearby monsters from current position",
+			slog.Int("monstersFound", len(nearbyMonsters)))
 	}
 
 	// Track stuck detection (both iteration-based and time-based)
