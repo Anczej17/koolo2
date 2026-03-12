@@ -582,7 +582,25 @@ func MoveTo(toFunc func() (data.Position, bool), options ...step.MoveOption) err
 				continue
 			} else {
 				pathErrors++
-				//Try some randome movements to help pathfinding (not sure that it helps)
+
+				// If target is outside current area, the adjacent area grid may not be loaded yet.
+				// Refresh game data and teleport toward the target to trigger area loading.
+				if !ctx.Data.AreaData.IsInside(targetPosition) && pathErrors <= 7 {
+					ctx.Logger.Warn("No path to adjacent area, refreshing data and moving toward target",
+						slog.Int("attempt", pathErrors),
+						slog.Any("target", targetPosition))
+					ctx.RefreshGameData()
+					if ctx.Data.CanTeleport() {
+						ctx.PathFinder.RandomTeleport()
+					} else {
+						ctx.PathFinder.RandomMovement()
+					}
+					utils.Sleep(300)
+					pathFound = false // Force path recomputation
+					continue
+				}
+
+				// Target is inside current area — normal random movement retry
 				if pathErrors < 5 {
 					ctx.Logger.Warn("No path found, trying random movement to fix")
 					ctx.PathFinder.RandomMovement()
