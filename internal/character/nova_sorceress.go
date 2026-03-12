@@ -866,11 +866,10 @@ func (s NovaSorceress) KillMonsterSequence(
 		if isHeraldMonster {
 			novaMin = 0
 
-			// If too far for Nova to hit (>8 tiles), move closer.
+			// If too far for Nova to hit (>8 tiles), approach Herald but stop at safe distance.
 			heraldDist := gridDistance(ctx.Data.PlayerUnit.Position, monster.Position)
 			if heraldDist > NovaSpellRadius {
-				dest := ctx.PathFinder.BeyondPosition(monster.Position, ctx.Data.PlayerUnit.Position, HeraldSafeDistance)
-				if err := step.MoveTo(dest, step.WithDistanceToFinish(1)); err != nil {
+				if err := step.MoveTo(monster.Position, step.WithDistanceToFinish(HeraldSafeDistance)); err != nil {
 					s.Logger.Debug("Herald approach failed", slog.String("error", err.Error()))
 				}
 				// Re-check distance after approach — skip Nova if still out of range
