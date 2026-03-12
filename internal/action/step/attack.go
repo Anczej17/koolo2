@@ -268,22 +268,23 @@ func burstAttack(settings attackSettings) error {
 			return nil // Timeout reached, finish attack sequence
 		}
 
-		// Find target: prefer enemies with LoS first (no movement needed),
-		// then fall back to any enemy in range. This prevents burstAttack from
-		// chasing wall-blocked minions which could pull bot into Herald danger zone.
+		// Find target in range.
+		// Herald mode (abortFunc set): prefer LoS targets to avoid chasing wall-blocked minions.
+		// Normal mode: simple distance check only (fast path — no LineOfSight ray-casting).
 		playerPos := ctx.Data.PlayerUnit.Position
 		target := data.Monster{}
-		for _, m := range ctx.Data.Monsters.Enemies() {
-			distance := ctx.PathFinder.DistanceFromMe(m.Position)
-			if isValidEnemy(m, ctx) && distance <= settings.maxDistance &&
-				ctx.PathFinder.LineOfSight(playerPos, m.Position) {
-				target = m
-				break
+		if settings.abortFunc != nil {
+			// Herald mode: LoS-first pass
+			for _, m := range ctx.Data.Monsters.Enemies() {
+				distance := ctx.PathFinder.DistanceFromMe(m.Position)
+				if isValidEnemy(m, ctx) && distance <= settings.maxDistance &&
+					ctx.PathFinder.LineOfSight(playerPos, m.Position) {
+					target = m
+					break
+				}
 			}
-		}
-		// Fallback: target without LoS, but only if no abort callback (no Herald mode).
-		// With abortFunc set, chasing a wall-blocked minion risks pulling into Herald.
-		if target.UnitID == 0 && settings.abortFunc == nil {
+		} else {
+			// Normal mode: no LoS check needed (same as main branch)
 			for _, m := range ctx.Data.Monsters.Enemies() {
 				distance := ctx.PathFinder.DistanceFromMe(m.Position)
 				if isValidEnemy(m, ctx) && distance <= settings.maxDistance {

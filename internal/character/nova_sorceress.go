@@ -550,8 +550,9 @@ func (s NovaSorceress) evalAggressiveNovaPosition(target data.Monster) novaPosEv
 	// Hard rule: do NOT move away from elite anchor.
 	// We allow tiny sideways drift, but never "escape the pack".
 	currentAnchorDist := gridDistance(playerPos, anchor)
-	maxAllowedAnchorDist := currentAnchorDist + 3
-	if packSize >= 10 {
+	maxAllowedAnchorDist := currentAnchorDist + 1
+	if packSize < 10 {
+		// For non-big packs allow slightly more lateral movement.
 		maxAllowedAnchorDist = currentAnchorDist + 2
 	}
 
