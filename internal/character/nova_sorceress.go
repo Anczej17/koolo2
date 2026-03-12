@@ -222,18 +222,6 @@ func findClosestHerald() (*data.Monster, int) {
 		if enemy.Stats[stat.Life] <= 0 {
 			continue
 		}
-		// Debug: log any monster with HeraldTier stat to verify detection
-		heraldTier := enemy.Stats[stat.HeraldTier]
-		if heraldTier > 0 {
-			isBoss := enemy.Type == data.MonsterTypeUnique || enemy.Type == data.MonsterTypeSuperUnique
-			ctx.Logger.Info("Monster with HeraldTier stat",
-				slog.Int("tier", heraldTier),
-				slog.Bool("isBoss", isBoss),
-				slog.Bool("isMinion", !isBoss),
-				slog.Int("name", int(enemy.Name)),
-				slog.String("type", string(enemy.Type)),
-				slog.Int("dist", gridDistance(playerPos, enemy.Position)))
-		}
 		if !isHerald(enemy) {
 			continue
 		}
@@ -357,19 +345,6 @@ func buildPack(seed data.Position, enemies []data.Monster) []data.Monster {
 		}
 	}
 	return pack
-}
-
-// packHasHerald checks if any monster in the pack is a Herald
-func packHasHerald(pack []data.Monster) bool {
-	for _, m := range pack {
-		if m.Stats[stat.Life] <= 0 {
-			continue
-		}
-		if isHerald(m) {
-			return true
-		}
-	}
-	return false
 }
 
 func centroidOf(pack []data.Monster) data.Position {
@@ -784,21 +759,6 @@ func (s NovaSorceress) KillMonsterSequence(
 		if ctx.CharacterCfg.Character.NovaSorceress.AggressiveNovaPositioning && !isHerald(monster) && cachedHerald == nil {
 			ev := s.evalAggressiveNovaPosition(monster)
 
-			// CRITICAL: Check if pack contains Herald - if yes, skip aggressive positioning entirely
-			// This prevents jumping into the middle of a pack that has a Herald
-			hasHeraldInPack := false
-			if ev.ok && ev.packSize > 0 {
-				// Build the pack to check for Heralds
-				seed, seedOk := pickDenseSeed(ctx.Data.PlayerUnit.Position, monster.Position, ctx.Data.Monsters.Enemies())
-				if seedOk {
-					pack := buildPack(seed, ctx.Data.Monsters.Enemies())
-					hasHeraldInPack = packHasHerald(pack)
-					if hasHeraldInPack {
-						s.Logger.Info("Pack contains Herald, skipping aggressive positioning for safety")
-					}
-				}
-			}
-
 			if ev.engKey != 0 && ev.engKey != lastEngKey {
 				lastEngKey = ev.engKey
 				repositionCount = 0
@@ -806,8 +766,8 @@ func (s NovaSorceress) KillMonsterSequence(
 				lastRepositionAt = time.Time{}
 			}
 
-			// Only do aggressive positioning if pack does NOT contain Herald
-			if ev.ok && !attackedThisEngagement && !hasHeraldInPack {
+			// cachedHerald == nil means no Herald on screen — no need to check pack
+			if ev.ok && !attackedThisEngagement {
 				need := desiredHitsForPack(ev.packSize)
 				maxRep := maxRepositionsForPack(ev.packSize)
 

@@ -26,6 +26,43 @@ func (pf *PathFinder) RandomMovement() {
 	utils.Sleep(50)
 }
 
+// RandomTeleport tries to teleport to a random walkable position 5-10 tiles away.
+// Used to escape corners/walls when normal teleport pathing fails.
+func (pf *PathFinder) RandomTeleport() {
+	playerPos := pf.data.PlayerUnit.Position
+
+	// Try 8 random directions to find a walkable teleport destination
+	angles := []float64{0, 45, 90, 135, 180, 225, 270, 315}
+	// Shuffle to avoid always trying the same direction first
+	rand.Shuffle(len(angles), func(i, j int) { angles[i], angles[j] = angles[j], angles[i] })
+
+	for _, angleDeg := range angles {
+		angleRad := angleDeg * math.Pi / 180.0
+		for dist := 8; dist >= 4; dist -= 2 {
+			destX := playerPos.X + int(float64(dist)*math.Cos(angleRad))
+			destY := playerPos.Y + int(float64(dist)*math.Sin(angleRad))
+			dest := data.Position{X: destX, Y: destY}
+
+			if pf.data.AreaData.IsWalkable(dest) {
+				path, _, found := pf.GetPath(dest)
+				if found && len(path) > 0 {
+					slog.Debug("RandomTeleport: escaping stuck position",
+						slog.Any("from", playerPos),
+						slog.Any("to", dest),
+						slog.Float64("angle", angleDeg))
+					pf.moveThroughPathTeleport(path)
+					utils.Sleep(int(pf.data.PlayerCastDuration().Milliseconds()) + 50)
+					return
+				}
+			}
+		}
+	}
+
+	// Fallback: regular random movement if no walkable teleport destination found
+	slog.Debug("RandomTeleport: no walkable destination found, falling back to RandomMovement")
+	pf.RandomMovement()
+}
+
 func (pf *PathFinder) DistanceFromMe(p data.Position) int {
 	return DistanceFromPoint(pf.data.PlayerUnit.Position, p)
 }

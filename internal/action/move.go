@@ -714,7 +714,10 @@ func MoveTo(toFunc func() (data.Position, bool), options ...step.MoveOption) err
 					slog.String("error", moveErr.Error()),
 					slog.Any("position", ctx.Data.PlayerUnit.Position),
 					slog.Any("destination", targetPosition))
-				if (!ctx.Data.CanTeleport() || stuck) || ctx.Data.PlayerUnit.Area.IsTown() {
+				if ctx.Data.CanTeleport() && !ctx.Data.PlayerUnit.Area.IsTown() {
+					// Teleporter stuck in a corner/wall: teleport to a random walkable position
+					ctx.PathFinder.RandomTeleport()
+				} else {
 					ctx.PathFinder.RandomMovement()
 					time.Sleep(time.Millisecond * 200)
 				}

@@ -137,7 +137,10 @@ func clearRoom(room data.Room, filter data.MonsterFilter) error {
 		maxClearIterations     = 50             // Safety limit: max monster kill iterations per room
 		stuckPositionThreshold = 5              // If in same position for this many iterations, we're stuck
 		stuckTimeoutSeconds    = 60             // If position doesn't change for 60s, skip room
+		maxRoomTotalSeconds    = 120            // Absolute max time per room (immune to town trip resets)
 	)
+
+	roomStartTime := time.Now()
 
 	// Attempt to move to room center with retries
 	movedToCenter := false
@@ -190,6 +193,16 @@ func clearRoom(room data.Room, filter data.MonsterFilter) error {
 		ctx.PauseIfNotPriority()
 		if err := checkPlayerDeath(ctx); err != nil {
 			return err
+		}
+
+		// Absolute room timeout — immune to town trip position resets
+		if time.Since(roomStartTime) > maxRoomTotalSeconds*time.Second {
+			remaining := getMonstersInRoom(room, filter)
+			ctx.Logger.Warn("Room total timeout reached, skipping room",
+				slog.Duration("elapsed", time.Since(roomStartTime)),
+				slog.Int("monstersRemaining", len(remaining)),
+				slog.Any("roomCenter", room.GetCenter()))
+			return nil
 		}
 
 		// Track position for time-based stuck detection
