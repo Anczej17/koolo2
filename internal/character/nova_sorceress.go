@@ -38,8 +38,6 @@ const (
 	// Herald-specific constants
 	HeraldDangerDistance = 4  // If Herald closer than this → break burst & reposition
 	HeraldSafeDistance   = 7  // Reposition target distance (7 so with variance bot lands 7-9)
-	HeraldNovaMaxRange   = 30 // Large value — ensureEnemyIsInRange must NOT move bot for Herald
-
 	// Pack construction radius (tiles) around a seed/anchor.
 	NovaPackRadius = 15
 )
@@ -863,23 +861,27 @@ func (s NovaSorceress) KillMonsterSequence(
 			novaMax = NovaAggroMaxDistance
 		}
 
-		// Herald: bypass ensureEnemyIsInRange completely (it has a BeyondPosition
-		// overshoot bug that catapults the bot into melee range). Instead we manage
-		// Herald distance ourselves: reposition puts bot at ~7, we approach to ≤8
-		// manually if needed, then fire Nova with maxDist=30 so burstAttack never moves.
+		// Herald: bypass ensureEnemyIsInRange (it has a BeyondPosition overshoot bug
+		// that catapults the bot into melee range). We manage distance ourselves.
 		if isHeraldMonster {
 			novaMin = 0
-			novaMax = HeraldNovaMaxRange
 
-			// If too far for Nova to hit (>8 tiles), move ONE step closer.
-			// Use BeyondPosition Herald→Player at 7 tiles for controlled placement.
+			// If too far for Nova to hit (>8 tiles), move closer.
 			heraldDist := gridDistance(ctx.Data.PlayerUnit.Position, monster.Position)
 			if heraldDist > NovaSpellRadius {
 				dest := ctx.PathFinder.BeyondPosition(monster.Position, ctx.Data.PlayerUnit.Position, HeraldSafeDistance)
-				if err := step.MoveTo(dest, step.WithDistanceToFinish(2)); err != nil {
+				if err := step.MoveTo(dest, step.WithDistanceToFinish(1)); err != nil {
 					s.Logger.Debug("Herald approach failed", slog.String("error", err.Error()))
 				}
+				// Re-check distance after approach — skip Nova if still out of range
+				heraldDist = gridDistance(ctx.Data.PlayerUnit.Position, monster.Position)
+				if heraldDist > NovaSpellRadius {
+					continue // Try again next iteration
+				}
 			}
+
+			// Use actual Nova radius as max distance — never cast from beyond hit range
+			novaMax = NovaSpellRadius
 		}
 
 		novaOpts := []step.AttackOption{
