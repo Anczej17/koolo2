@@ -217,54 +217,83 @@ func (rt *RoomTraverser) NextRoom() (data.Room, bool) {
 	cur, inRoom := rt.currentRoomOk()
 	playerPos := rt.pf.data.PlayerUnit.Position
 
-	// Two-tier room clearing: inner radius (no LoS check) + outer radius (with LoS).
-	// Inner = AoE spell radius, rooms this close are always cleared by Nova.
-	// Outer = movement + AoE range, needs LoS to avoid skipping rooms behind walls.
-	// Teleporters cover much more ground due to teleport mobility.
+	// Auto-visit / auto-skip / candidate building in a single pass.
+	// Pre-compute monster state once to avoid repeated scans.
 	innerRadius := 8  // Nova spell radius — always cleared if bot is here
 	outerRadius := 15 // Movement + combat range
-	if rt.pf.data.CanTeleport() {
+	canTeleport := rt.pf.data.CanTeleport()
+	if canTeleport {
 		innerRadius = 15 // Teleporters move freely, Nova covers 15 easily
 		outerRadius = 25 // Teleport + AoE total coverage
 	}
-	for _, r := range rt.pf.data.Rooms {
-		if rt.visited[r] {
-			continue
-		}
-		dist := DistanceFromPoint(playerPos, r.GetCenter())
-		if dist <= innerRadius {
-			// Within AoE radius — definitely cleared, no LoS check needed
-			rt.visited[r] = true
-		} else if dist <= outerRadius && rt.pf.LineOfSight(playerPos, r.GetCenter()) {
-			// Within extended range but needs clear LoS
-			rt.visited[r] = true
+
+	// Pre-compute valid filters once (avoid nil-filter allocation per room)
+	var validFilters []data.MonsterFilter
+	for _, f := range rt.filter {
+		if f != nil {
+			validFilters = append(validFilters, f)
 		}
 	}
 
-	// Skip activated empty rooms — room is activated (game loaded monsters for it)
-	// but no monsters match our filter. Safe to skip: we know what's there.
-	// For teleporters, don't require visibility — they can assess rooms from further away
-	// because they traverse the map faster and rooms activate at ~40 tile range anyway.
-	for _, r := range rt.pf.data.Rooms {
-		if rt.visited[r] || !rt.roomIsActivated(r) || rt.roomHasMonsters(r) {
-			continue
-		}
-		if rt.pf.data.CanTeleport() || rt.roomIsVisible(r) {
-			rt.visited[r] = true
+	// Pre-compute alive enemies matching filter (single Enemies() call, reused for all rooms)
+	enemies := rt.pf.data.Monsters.Enemies(validFilters...)
+	aliveEnemies := make([]data.Monster, 0, len(enemies))
+	for _, m := range enemies {
+		if m.Stats[stat.Life] > 0 {
+			aliveEnemies = append(aliveEnemies, m)
 		}
 	}
 
-	// Build candidate list
+	// Pre-compute activated rooms (any monster loaded, regardless of filter)
+	activatedRooms := make(map[data.Room]bool, len(rt.pf.data.Rooms))
+	for _, m := range rt.pf.data.Monsters {
+		for _, r := range rt.pf.data.Rooms {
+			if !activatedRooms[r] && r.IsInside(m.Position) {
+				activatedRooms[r] = true
+				break // monster can only be in one room
+			}
+		}
+	}
+
+	// Helper: check if room has alive matching enemies (uses pre-computed slice)
+	roomHasAliveEnemy := func(room data.Room) bool {
+		for _, m := range aliveEnemies {
+			if room.IsInside(m.Position) {
+				return true
+			}
+		}
+		return false
+	}
+
+	// Single pass: auto-visit nearby, auto-skip empty activated, build candidates
 	var candidates []roomCandidate
 	for _, r := range rt.pf.data.Rooms {
 		if rt.visited[r] {
 			continue
 		}
+
+		dist := DistanceFromPoint(playerPos, r.GetCenter())
+
+		// Auto-visit rooms within AoE/teleport range
+		if dist <= innerRadius || (dist <= outerRadius && rt.pf.LineOfSight(playerPos, r.GetCenter())) {
+			rt.visited[r] = true
+			continue
+		}
+
+		// Check monster state once per room (used for both skip and candidate)
+		hasMonsters := roomHasAliveEnemy(r)
+
+		// Auto-skip activated empty rooms
+		if !hasMonsters && activatedRooms[r] && (canTeleport || rt.roomIsVisible(r)) {
+			rt.visited[r] = true
+			continue
+		}
+
 		candidates = append(candidates, roomCandidate{
 			room:     r,
-			euclDist: DistanceFromPoint(playerPos, r.GetCenter()),
-			hasEnemy: rt.roomHasMonsters(r),
-			adjacent: inRoom && isAdjacent(cur, r), // only check adjacency if player is in a room
+			euclDist: dist,
+			hasEnemy: hasMonsters,
+			adjacent: inRoom && isAdjacent(cur, r),
 		})
 	}
 
@@ -298,8 +327,7 @@ func (rt *RoomTraverser) NextRoom() (data.Room, bool) {
 
 	// For top candidates (by priority+euclidean), check real path distance.
 	// This catches bridges: euclidean=5 but real path=50 → pick the other one.
-	// Check up to 5 candidates to avoid picking unreachable rooms when top 3 are walled off.
-	checkCount := 5
+	checkCount := 3
 	if checkCount > len(candidates) {
 		checkCount = len(candidates)
 	}

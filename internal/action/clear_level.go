@@ -188,6 +188,11 @@ func clearRoom(room data.Room, filter data.MonsterFilter) error {
 	lastPositionChangeTime := time.Now()
 	var lastRecordedPos data.Position
 
+	// Path cache: avoid expensive A* for the same target on consecutive iterations
+	var cachedPathTargetID data.UnitID
+	var cachedPathValid bool
+	var cachedPathTime time.Time
+
 	// Main clearing loop with safety limits
 	for {
 		ctx.PauseIfNotPriority()
@@ -195,12 +200,14 @@ func clearRoom(room data.Room, filter data.MonsterFilter) error {
 			return err
 		}
 
+		// Get monsters once per iteration — reused for all checks below
+		monsters := getMonstersInRoom(room, filter)
+
 		// Absolute room timeout — immune to town trip position resets
 		if time.Since(roomStartTime) > maxRoomTotalSeconds*time.Second {
-			remaining := getMonstersInRoom(room, filter)
 			ctx.Logger.Warn("Room total timeout reached, skipping room",
 				slog.Duration("elapsed", time.Since(roomStartTime)),
-				slog.Int("monstersRemaining", len(remaining)),
+				slog.Int("monstersRemaining", len(monsters)),
 				slog.Any("roomCenter", room.GetCenter()))
 			return nil
 		}
@@ -218,10 +225,9 @@ func clearRoom(room data.Room, filter data.MonsterFilter) error {
 				// Position hasn't changed, check timeout
 				stuckDuration := time.Since(lastPositionChangeTime)
 				if stuckDuration > stuckTimeoutSeconds*time.Second {
-					remaining := getMonstersInRoom(room, filter)
 					ctx.Logger.Warn("Position stuck timeout - skipping room",
 						slog.Duration("stuckFor", stuckDuration),
-						slog.Int("monstersRemaining", len(remaining)),
+						slog.Int("monstersRemaining", len(monsters)),
 						slog.Any("stuckPosition", currentPos))
 					return nil
 				}
@@ -231,14 +237,12 @@ func clearRoom(room data.Room, filter data.MonsterFilter) error {
 		// Safety: prevent infinite loop
 		iterationCount++
 		if iterationCount > maxClearIterations {
-			remaining := getMonstersInRoom(room, filter)
 			ctx.Logger.Warn("Room clear iteration limit reached, moving on",
 				slog.Int("iterations", iterationCount),
-				slog.Int("monstersRemaining", len(remaining)))
+				slog.Int("monstersRemaining", len(monsters)))
 			return nil
 		}
 
-		monsters := getMonstersInRoom(room, filter)
 		if len(monsters) == 0 {
 			return nil
 		}
@@ -260,9 +264,14 @@ func clearRoom(room data.Room, filter data.MonsterFilter) error {
 			return nil
 		}
 
-		// Check if we can path to the monster
-		_, _, mPathFound := ctx.PathFinder.GetPath(targetMonster.Position)
-		if !mPathFound {
+		// Check if we can path to the monster — skip expensive A* if same target checked recently
+		if targetMonster.UnitID != cachedPathTargetID || time.Since(cachedPathTime) > 2*time.Second {
+			_, _, mPathFound := ctx.PathFinder.GetPath(targetMonster.Position)
+			cachedPathTargetID = targetMonster.UnitID
+			cachedPathValid = mPathFound
+			cachedPathTime = time.Now()
+		}
+		if !cachedPathValid {
 			ctx.Logger.Debug("No path to monster, skipping",
 				slog.String("monster", string(targetMonster.Name)),
 				slog.Any("position", targetMonster.Position))
