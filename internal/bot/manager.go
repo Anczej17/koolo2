@@ -33,6 +33,8 @@ type SupervisorManager struct {
 
 func NewSupervisorManager(logger *slog.Logger, eventListener *event.Listener) *SupervisorManager {
 
+	GetPartyRegistry().SetLogger(logger)
+
 	return &SupervisorManager{
 		logger:         logger,
 		supervisors:    make(map[string]Supervisor),

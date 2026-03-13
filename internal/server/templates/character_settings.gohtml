@@ -1704,8 +1704,28 @@
             </fieldset>
             <h3 id="companion-settings"><i class="bi bi-people section-icon" aria-hidden="true"></i>Companion System</h3><br>
             <label>
+                <input type="checkbox" name="companionEnabled" id="companionEnabled" {{ if .Config.Companion.Enabled }}checked{{ end }}/>
+                Enable Companion System
+            </label>
+            <label>
                 <input type="checkbox" name="companionLeader" id="companionLeader" {{ if .Config.Companion.Leader }}checked{{ end }}/>
-                Open tp for manual player
+                Leader (creates games)
+            </label>
+            <label>
+                Leader Name
+                <input name="companionLeaderName" type="text" placeholder="Leader character name" value="{{ .Config.Companion.LeaderName }}"/>
+            </label>
+            <label>
+                <input type="checkbox" name="companionWaitForParty" id="companionWaitForParty" {{ if .Config.Companion.WaitForParty }}checked{{ end }}/>
+                Wait for Party (idle in town until all members finish)
+            </label>
+            <label>
+                Party Wait Timeout (seconds, 0 = 300s default)
+                <input name="companionPartyWaitTimeout" min="0" type="number" placeholder="{{ .Config.Companion.PartyWaitTimeout }}" value="{{ .Config.Companion.PartyWaitTimeout }}"/>
+            </label>
+            <label>
+                <input type="checkbox" name="companionOpenTPForPlayer" {{ if .Config.Companion.OpenTPForPlayer }}checked{{ end }}/>
+                Open TP for manual player (independent of leader role)
             </label>
             <h3 id="run-settings"><i class="bi bi-play-circle section-icon" aria-hidden="true"></i>Run Settings</h3><br>
             <label>
