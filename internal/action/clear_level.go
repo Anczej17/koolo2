@@ -35,6 +35,19 @@ func ClearCurrentLevelEx(openChests bool, filter data.MonsterFilter, shouldInter
 	ctx := context.Get()
 	ctx.SetLastAction("ClearCurrentLevel")
 
+	// Per-run OpenChests=false overrides global chest settings for this run.
+	// Temporarily disable globals so MoveTo navigation also respects per-run setting.
+	if !openChests {
+		origChests := ctx.CharacterCfg.Game.InteractWithChests
+		origSuperChests := ctx.CharacterCfg.Game.InteractWithSuperChests
+		ctx.CharacterCfg.Game.InteractWithChests = false
+		ctx.CharacterCfg.Game.InteractWithSuperChests = false
+		defer func() {
+			ctx.CharacterCfg.Game.InteractWithChests = origChests
+			ctx.CharacterCfg.Game.InteractWithSuperChests = origSuperChests
+		}()
+	}
+
 	openAllChests := ctx.CharacterCfg.Game.InteractWithChests
 	openSuperOnly := ctx.CharacterCfg.Game.InteractWithSuperChests && !openAllChests
 

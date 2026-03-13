@@ -18,23 +18,32 @@ func doesExceedQuantity(rule nip.Rule) bool {
 	ctx := context.Get()
 	ctx.SetLastAction("doesExceedQuantity")
 
-	stashItems := ctx.Data.Inventory.ByLocation(item.LocationStash, item.LocationSharedStash)
-
 	maxQuantity := rule.MaxQuantity()
 	if maxQuantity == 0 {
 		return false
 	}
 
-	if maxQuantity == 0 {
-		return false
+	// Include DLC tabs (gems, runes, materials) when counting stashed items
+	locations := []item.LocationType{item.LocationStash, item.LocationSharedStash}
+	if ctx.Data.IsDLC() {
+		locations = append(locations, item.LocationGemsTab, item.LocationRunesTab, item.LocationMaterialsTab)
 	}
+	stashItems := FilterDLCGhostItems(ctx.Data.Inventory.ByLocation(locations...))
 
 	matchedItemsInStash := 0
 
 	for _, stashItem := range stashItems {
 		res, _ := rule.Evaluate(stashItem)
 		if res == nip.RuleResultFullMatch {
-			matchedItemsInStash += 1
+			// DLC tabs stack items — count actual quantity, not just 1
+			switch stashItem.Location.LocationType {
+			case item.LocationGemsTab, item.LocationRunesTab, item.LocationMaterialsTab:
+				if stashItem.StackedQuantity > 0 {
+					matchedItemsInStash += stashItem.StackedQuantity
+				}
+			default:
+				matchedItemsInStash += 1
+			}
 		}
 	}
 
