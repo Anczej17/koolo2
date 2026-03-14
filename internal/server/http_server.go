@@ -3343,6 +3343,9 @@ func (s *HttpServer) characterSettings(w http.ResponseWriter, r *http.Request) {
 			cfg.Game.Pindleskin.SkipOnImmunities = append(cfg.Game.Pindleskin.SkipOnImmunities, stat.Resist(i))
 		}
 
+		cfg.Game.ArcaneSanctuary.OpenChests = r.Form.Has("gameArcaneSanctuaryOpenChests")
+		cfg.Game.ArcaneSanctuary.FocusOnElitePacks = r.Form.Has("gameArcaneSanctuaryFocusOnElitePacks")
+
 		cfg.Game.StonyTomb.OpenChests = r.Form.Has("gameStonytombOpenChests")
 		cfg.Game.StonyTomb.FocusOnElitePacks = r.Form.Has("gameStonytombFocusOnElitePacks")
 
@@ -3958,6 +3961,9 @@ func (s *HttpServer) applyRunDetails(values url.Values, cfg *config.CharacterCfg
 			} else {
 				cfg.Game.Pindleskin.SkipOnImmunities = nil
 			}
+		case "arcane_sanctuary":
+			cfg.Game.ArcaneSanctuary.OpenChests = values.Has("gameArcaneSanctuaryOpenChests")
+			cfg.Game.ArcaneSanctuary.FocusOnElitePacks = values.Has("gameArcaneSanctuaryFocusOnElitePacks")
 		case "stony_tomb":
 			cfg.Game.StonyTomb.OpenChests = values.Has("gameStonytombOpenChests")
 			cfg.Game.StonyTomb.FocusOnElitePacks = values.Has("gameStonytombFocusOnElitePacks")
