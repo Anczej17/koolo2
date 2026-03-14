@@ -82,6 +82,32 @@ const (
 	DevelopmentRun Run = "development"
 )
 
+var ShortBonusRuns = []Run{
+	CountessRun,
+	AndarielRun,
+	SummonerRun,
+	MephistoRun,
+	TravincalRun,
+	EldritchRun,
+	PindleskinRun,
+	NihlathakRun,
+	AncientTunnelsRun,
+	MausoleumRun,
+	PitRun,
+	StonyTombRun,
+	ArachnidLairRun,
+	TristramRun,
+	BoneAshRun,
+	CaveRun,
+	SpiderCavernRun,
+	DrifterCavernRun,
+	ThreshsocketRun,
+	EnduguRun,
+	FireEyeRun,
+	RakanishuRun,
+	LowerKurastChestRun,
+}
+
 type LevelingRunInfo struct {
 	Run         Run
 	Act         int

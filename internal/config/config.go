@@ -560,9 +560,11 @@ type CharacterCfg struct {
 		GamePassword          string `yaml:"gamePassword"`
 		CompanionGameName     string `yaml:"companionGameName"`
 		CompanionGamePassword string `yaml:"companionGamePassword"`
-		WaitForParty          bool   `yaml:"waitForParty"`
-		PartyWaitTimeout      int    `yaml:"partyWaitTimeout"`
-		OpenTPForPlayer       bool   `yaml:"openTPForPlayer"`
+		WaitForParty          bool     `yaml:"waitForParty"`
+		PartyWaitTimeout      int      `yaml:"partyWaitTimeout"`
+		OpenTPForPlayer       bool     `yaml:"openTPForPlayer"`
+		BonusRuns             bool     `yaml:"bonusRuns"`
+		RandomGameNames       bool     `yaml:"randomGameNames"`
 	} `yaml:"companion"`
 	Gambling struct {
 		Enabled bool     `yaml:"enabled"`
