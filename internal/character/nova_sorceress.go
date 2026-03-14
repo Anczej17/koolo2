@@ -36,8 +36,8 @@ const (
 	HeraldStaticThreshold = 55 // Cast Static Field on Heralds until HP is below this percentage (Static can't go below ~50% in Hell)
 
 	// Herald-specific constants
-	HeraldDangerDistance = 4 // If Herald closer than this → break burst & reposition
-	HeraldSafeDistance   = 7 // Reposition target distance (7 so with variance bot lands 7-9)
+	HeraldDangerDistance = 6 // If Herald closer than this → break burst & reposition (aura ~3-4 tiles)
+	HeraldSafeDistance   = 8 // Reposition target distance (== NovaSpellRadius, max Nova hit range)
 	// Pack construction radius (tiles) around a seed/anchor.
 	NovaPackRadius = 15
 
@@ -920,10 +920,10 @@ func (s NovaSorceress) KillMonsterSequence(
 			novaMax = NovaAggroMaxDistance
 		}
 
-		// Herald: bypass ensureEnemyIsInRange (it has a BeyondPosition overshoot bug
-		// that catapults the bot into melee range). We manage distance ourselves.
+		// Herald: enforce safe distance. We use HeraldDangerDistance as novaMin so
+		// ensureEnemyIsInRange moves the bot away if Herald gets too close.
 		if isHeraldMonster {
-			novaMin = 0
+			novaMin = HeraldDangerDistance
 
 			// If too far for Nova to hit (>8 tiles), approach Herald but stop at safe distance.
 			heraldDist := gridDistance(playerPos, monster.Position)

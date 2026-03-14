@@ -642,6 +642,11 @@ func MoveTo(toFunc func() (data.Position, bool), options ...step.MoveOption) err
 				shrine = data.Object{}
 				continue
 			} else if chest.ID != 0 && targetPosition == chest.Position {
+				// Clear nearby monsters before opening chest (prevents getting stuck
+				// when "only elites" filter skipped white mobs surrounding the chest)
+				if enemyFound, _ := IsAnyEnemyAroundPlayer(10); enemyFound {
+					ClearAreaAroundPlayer(10, nil)
+				}
 				//Handle chest if any
 				if err := InteractObject(chest, func() bool {
 					obj, found := ctx.Data.Objects.FindByID(chest.ID)

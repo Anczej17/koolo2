@@ -477,7 +477,7 @@ func ensureEnemyIsInRange(monster data.Monster, state *attackState, maxDistance,
 
 	// If we are already in range, have LoS, and don't need repositioning, we are good.
 	// Reset repositionAttempts for future needs.
-	if hasLoS && distanceToMonster <= maxDistance && !needsRepositioning {
+	if hasLoS && distanceToMonster <= maxDistance && distanceToMonster >= minDistance && !needsRepositioning {
 		state.repositionAttempts = 0 // Reset attempts if we're in a good state
 		return nil
 	}

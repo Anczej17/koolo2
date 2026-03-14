@@ -123,6 +123,11 @@ func ClearCurrentLevelEx(openChests bool, filter data.MonsterFilter, shouldInter
 						continue
 					}
 
+					// Clear nearby monsters before opening (prevents stuck when filter skipped white mobs)
+					if enemyFound, _ := IsAnyEnemyAroundPlayer(10); enemyFound {
+						ClearAreaAroundPlayer(10, nil)
+					}
+
 					err = InteractObject(o, func() bool {
 						chest, _ := ctx.Data.Objects.FindByID(o.ID)
 						return !chest.Selectable
