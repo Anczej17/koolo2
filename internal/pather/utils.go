@@ -170,9 +170,25 @@ func (rt *RoomTraverser) roomIsActivated(room data.Room) bool {
 	return false
 }
 
-// roomIsVisible checks if the room center is within visibility range (~40 tiles) of the player.
+// roomIsVisible checks if the NEAREST EDGE of the room is within D2R's monster
+// activation range (~40 tiles). Using nearest edge instead of center avoids
+// false positives on large rooms where the center is close but far edges aren't loaded.
 func (rt *RoomTraverser) roomIsVisible(room data.Room) bool {
-	return DistanceFromPoint(rt.pf.data.PlayerUnit.Position, room.GetCenter()) < 40
+	p := rt.pf.data.PlayerUnit.Position
+	// Clamp player position to room bounding box to find nearest point on room
+	nx := p.X
+	if nx < room.Position.X {
+		nx = room.Position.X
+	} else if nx > room.Position.X+room.Width {
+		nx = room.Position.X + room.Width
+	}
+	ny := p.Y
+	if ny < room.Position.Y {
+		ny = room.Position.Y
+	} else if ny > room.Position.Y+room.Height {
+		ny = room.Position.Y + room.Height
+	}
+	return DistanceFromPoint(p, data.Position{X: nx, Y: ny}) < 35
 }
 
 // isAdjacent checks if two rooms share an edge or corner (touching boundaries).
@@ -219,12 +235,12 @@ func (rt *RoomTraverser) NextRoom() (data.Room, bool) {
 
 	// Auto-visit / auto-skip / candidate building in a single pass.
 	// Pre-compute monster state once to avoid repeated scans.
-	innerRadius := 8  // Nova spell radius — always cleared if bot is here
-	outerRadius := 15 // Movement + combat range
+	innerRadius := 8  // Nova spell radius — room is cleared if bot stood here
+	outerRadius := 15 // Movement + combat range (non-teleport)
 	canTeleport := rt.pf.data.CanTeleport()
 	if canTeleport {
-		innerRadius = 15 // Teleporters move freely, Nova covers 15 easily
-		outerRadius = 25 // Teleport + AoE total coverage
+		// innerRadius stays 8: Nova only reaches 8 tiles, don't auto-skip farther rooms
+		outerRadius = 20 // Teleport movement range for LoS-based auto-visit
 	}
 
 	// Pre-compute valid filters once (avoid nil-filter allocation per room)
@@ -283,8 +299,8 @@ func (rt *RoomTraverser) NextRoom() (data.Room, bool) {
 		// Check monster state once per room (used for both skip and candidate)
 		hasMonsters := roomHasAliveEnemy(r)
 
-		// Auto-skip empty rooms: either activated (monsters were loaded and killed)
-		// or visible (close enough that monsters would have been loaded if any existed)
+		// Auto-skip empty rooms: activated (monsters loaded & killed) or close enough
+		// that D2R would have loaded monsters if any existed (~20 tiles activation radius).
 		if !hasMonsters && (activatedRooms[r] || rt.roomIsVisible(r)) {
 			rt.visited[r] = true
 			continue
@@ -302,8 +318,12 @@ func (rt *RoomTraverser) NextRoom() (data.Room, bool) {
 		return data.Room{}, false
 	}
 
-	// Early exit: if no candidate has monsters and there are no alive enemies on the map,
-	// stop traversing — remaining rooms are empty edges we don't need to visit.
+	// Early exit: stop traversing when all of these are true:
+	// 1. No candidate room has visible monsters
+	// 2. No alive enemies remain on the map
+	// 3. We've visited at least 75% of rooms (prevents quitting before exploring dungeons)
+	// Without condition 3, the bot could exit a dungeon after clearing the first room
+	// when the next room behind a corridor hasn't been activated yet.
 	hasAnyMonsterCandidate := false
 	for _, c := range candidates {
 		if c.hasEnemy {
@@ -311,7 +331,15 @@ func (rt *RoomTraverser) NextRoom() (data.Room, bool) {
 			break
 		}
 	}
-	if !hasAnyMonsterCandidate && len(aliveEnemies) == 0 {
+	totalRooms := len(rt.pf.data.Rooms)
+	visitedCount := 0
+	for _, r := range rt.pf.data.Rooms {
+		if rt.visited[r] {
+			visitedCount++
+		}
+	}
+	exploredEnough := totalRooms > 0 && visitedCount*100/totalRooms >= 75
+	if !hasAnyMonsterCandidate && len(aliveEnemies) == 0 && exploredEnough {
 		return data.Room{}, false
 	}
 
@@ -475,11 +503,20 @@ func (pf *PathFinder) moveThroughPathTeleport(p Path) {
 					)
 					usePacket = false
 				} else {
-					nearBoundary := pf.isNearAreaBoundary(worldPos, 60)
-					if nearBoundary {
+					// Check both destination AND current player position — if either is near
+					// the area boundary, use mouse click to avoid packet teleport crossing areas.
+					playerWorldPos := data.Position{
+						X: pf.data.PlayerUnit.Position.X + pf.data.AreaOrigin.X,
+						Y: pf.data.PlayerUnit.Position.Y + pf.data.AreaOrigin.Y,
+					}
+					nearBoundaryDest := pf.isNearAreaBoundary(worldPos, 60)
+					nearBoundaryPlayer := pf.isNearAreaBoundary(playerWorldPos, 60)
+					if nearBoundaryDest || nearBoundaryPlayer {
 						slog.Debug("Near area boundary detected, using mouse click instead of packet",
-							slog.Int("x", worldPos.X),
-							slog.Int("y", worldPos.Y),
+							slog.Int("destX", worldPos.X),
+							slog.Int("destY", worldPos.Y),
+							slog.Bool("destNear", nearBoundaryDest),
+							slog.Bool("playerNear", nearBoundaryPlayer),
 						)
 						usePacket = false
 					}
