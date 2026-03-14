@@ -771,8 +771,16 @@
             <input type="checkbox"
                    id="novaAggressiveNovaPositioning"
                    name="aggressiveNovaPositioning"
-                   {{ if .Config.Character.NovaSorceress.AggressiveNovaPositioning }}checked{{ end }}/>
+                   {{ if .Config.Character.NovaSorceress.AggressiveNovaPositioning }}checked{{ end }}
+                   onchange="document.getElementById('skipMinNormalsRow').style.display = this.checked ? '' : 'none'"/>
             Aggressive Positioning (focus packs / skip leftovers)
+        </label>
+        <label id="skipMinNormalsRow"
+               style="{{ if not .Config.Character.NovaSorceress.AggressiveNovaPositioning }}display:none{{ end }}">
+            Min normals to engage (skip smaller packs):
+            <input type="number" name="aggressiveSkipMinNormals"
+                   min="1" max="20" step="1"
+                   value="{{ if .Config.Character.NovaSorceress.AggressiveSkipMinNormals }}{{ .Config.Character.NovaSorceress.AggressiveSkipMinNormals }}{{ else }}3{{ end }}">
         </label>
     </fieldset>
 </div>

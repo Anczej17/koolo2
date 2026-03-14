@@ -2804,6 +2804,9 @@ func (s *HttpServer) updateClassSpecificConfig(values url.Values, cfg *config.Ch
 	// Nova Sorceress specific options (Extra)
 	if cfg.Character.Class == "nova" {
 		cfg.Character.NovaSorceress.AggressiveNovaPositioning = values.Has("aggressiveNovaPositioning")
+		if v := values.Get("aggressiveSkipMinNormals"); v != "" {
+			cfg.Character.NovaSorceress.AggressiveSkipMinNormals, _ = strconv.Atoi(v)
+		}
 	}
 
 	// Javazon specific options
@@ -3245,6 +3248,9 @@ func (s *HttpServer) characterSettings(w http.ResponseWriter, r *http.Request) {
 		// Nova Sorceress specific options
 		if cfg.Character.Class == "nova" {
 			cfg.Character.NovaSorceress.AggressiveNovaPositioning = r.Form.Has("aggressiveNovaPositioning")
+			if v := r.FormValue("aggressiveSkipMinNormals"); v != "" {
+				cfg.Character.NovaSorceress.AggressiveSkipMinNormals, _ = strconv.Atoi(v)
+			}
 		}
 
 		// Javazon specific options

@@ -334,7 +334,8 @@ type CharacterCfg struct {
 		NovaSorceress struct {
 			BossStaticThreshold int `yaml:"boss_static_threshold"`
 
-			AggressiveNovaPositioning bool `yaml:"aggressive_nova_positioning"`
+			AggressiveNovaPositioning    bool `yaml:"aggressive_nova_positioning"`
+			AggressiveSkipMinNormals    int  `yaml:"aggressive_skip_min_normals"` // Min normal mobs to NOT skip (default 3)
 		} `yaml:"nova_sorceress"`
 		LightningSorceress struct {
 		} `yaml:"lightning_sorceress"`

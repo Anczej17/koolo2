@@ -40,6 +40,7 @@ type attackSettings struct {
 	timeout          time.Duration // Timeout for the attack sequence
 	isBurstCastSkill bool          // Whether this is a channeled/burst skill like Nova
 	abortFunc        func() bool   // If set, burstAttack checks this each iteration; returns true = abort
+	skipRangeCheck   bool          // Skip initial ensureEnemyIsInRange (caller already positioned optimally)
 }
 
 // AttackOption defines a function type for configuring attack settings
@@ -87,6 +88,14 @@ func StationaryDistance(minimum, maximum int) AttackOption {
 func AbortWhen(fn func() bool) AttackOption {
 	return func(step *attackSettings) {
 		step.abortFunc = fn
+	}
+}
+
+// SkipRangeCheck tells burstAttack to skip the initial ensureEnemyIsInRange call.
+// Use when the caller has already positioned optimally (e.g. aggressive Nova centering).
+func SkipRangeCheck() AttackOption {
+	return func(step *attackSettings) {
+		step.skipRangeCheck = true
 	}
 }
 
@@ -241,17 +250,19 @@ func burstAttack(settings attackSettings) error {
 	}
 
 	// Initially we try to move to the enemy, later we will check for closer enemies to keep attacking
-	_, state := checkMonsterDamage(monster)                                                        // Get the state for the initial monster
-	err := ensureEnemyIsInRange(monster, state, settings.maxDistance, settings.minDistance, false) // No initial repositioning check for burst
-	if err != nil {
-		if errors.Is(err, ErrMonsterUnreachable) {
-			ctx.Logger.Info(fmt.Sprintf("Giving up on initial monster [%d] (Area: %s) due to unreachability/unkillability during burst.", monster.Name, ctx.Data.PlayerUnit.Area.Area().Name))
-			statesMutex.Lock()
-			delete(monsterStates, monster.UnitID) // Clean up state for this monster
-			statesMutex.Unlock()
-			return nil // Exit burst attack, caller will find next target.
+	_, state := checkMonsterDamage(monster) // Get the state for the initial monster
+	if !settings.skipRangeCheck {
+		err := ensureEnemyIsInRange(monster, state, settings.maxDistance, settings.minDistance, false) // No initial repositioning check for burst
+		if err != nil {
+			if errors.Is(err, ErrMonsterUnreachable) {
+				ctx.Logger.Info(fmt.Sprintf("Giving up on initial monster [%d] (Area: %s) due to unreachability/unkillability during burst.", monster.Name, ctx.Data.PlayerUnit.Area.Area().Name))
+				statesMutex.Lock()
+				delete(monsterStates, monster.UnitID) // Clean up state for this monster
+				statesMutex.Unlock()
+				return nil // Exit burst attack, caller will find next target.
+			}
+			return err // Propagate error from initial range check
 		}
-		return err // Propagate error from initial range check
 	}
 
 	startedAt := time.Now()
@@ -269,12 +280,12 @@ func burstAttack(settings attackSettings) error {
 		}
 
 		// Find target in range.
-		// Herald mode (abortFunc set): prefer LoS targets to avoid chasing wall-blocked minions.
+		// Herald mode (abortFunc set) or skipRangeCheck: require LoS to avoid chasing wall-blocked enemies.
 		// Normal mode: simple distance check only (fast path — no LineOfSight ray-casting).
 		playerPos := ctx.Data.PlayerUnit.Position
 		target := data.Monster{}
-		if settings.abortFunc != nil {
-			// Herald mode: LoS-first pass
+		if settings.abortFunc != nil || settings.skipRangeCheck {
+			// LoS-first pass: don't pick targets we'd need to move to reach
 			for _, m := range ctx.Data.Monsters.Enemies() {
 				distance := ctx.PathFinder.DistanceFromMe(m.Position)
 				if isValidEnemy(m, ctx) && distance <= settings.maxDistance &&
@@ -306,14 +317,14 @@ func burstAttack(settings attackSettings) error {
 
 		// If we don't have LoS we will need to interrupt and move :(
 		if !ctx.PathFinder.LineOfSight(playerPos, target.Position) || needsRepositioning {
-			// When abortFunc is set (Herald mode), don't chase — abort instead of moving
-			// into potential danger. The caller will handle repositioning safely.
-			if settings.abortFunc != nil && !needsRepositioning {
-				return nil // Exit burst, let caller handle Herald-safe repositioning
+			// When abortFunc is set (Herald mode) or skipRangeCheck (aggressive Nova),
+			// don't chase — exit burst and let caller handle repositioning.
+			if (settings.abortFunc != nil || settings.skipRangeCheck) && !needsRepositioning {
+				return nil // Exit burst, let caller handle repositioning
 			}
 
 			// ensureEnemyIsInRange will handle reposition attempts and return nil if it skips
-			err = ensureEnemyIsInRange(target, state, settings.maxDistance, settings.minDistance, needsRepositioning)
+			err := ensureEnemyIsInRange(target, state, settings.maxDistance, settings.minDistance, needsRepositioning)
 			if err != nil {
 				if errors.Is(err, ErrMonsterUnreachable) {
 					ctx.Logger.Info(fmt.Sprintf("Giving up on monster [%d] (Area: %s) due to unreachability/unkillability during burst.", target.Name, ctx.Data.PlayerUnit.Area.Area().Name))
