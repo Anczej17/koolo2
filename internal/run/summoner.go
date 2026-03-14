@@ -203,8 +203,8 @@ func NewArcaneLanes() *ArcaneLanes {
 			{X: 25637, Y: 5506}, // Center on Left Lane 5
 			{X: 25683, Y: 5453}, // Center of Lane 6
 		},
-		sequence:       []int{1, 2, 6, 3, 4}, // Go to End Point via right side
-		returnSequence: []int{5, 6, 1, 0},    // Return to center via left side
+		sequence:       []int{1, 2, 3, 4}, // Go to End Point via right side (straight)
+		returnSequence: []int{5, 6, 1, 0}, // Return to center via left side + center
 		clearRange:     30,
 		ctx:            context.Get(),
 	}

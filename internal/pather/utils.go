@@ -283,8 +283,9 @@ func (rt *RoomTraverser) NextRoom() (data.Room, bool) {
 		// Check monster state once per room (used for both skip and candidate)
 		hasMonsters := roomHasAliveEnemy(r)
 
-		// Auto-skip activated empty rooms
-		if !hasMonsters && activatedRooms[r] && (canTeleport || rt.roomIsVisible(r)) {
+		// Auto-skip empty rooms: either activated (monsters were loaded and killed)
+		// or visible (close enough that monsters would have been loaded if any existed)
+		if !hasMonsters && (activatedRooms[r] || rt.roomIsVisible(r)) {
 			rt.visited[r] = true
 			continue
 		}
@@ -298,6 +299,19 @@ func (rt *RoomTraverser) NextRoom() (data.Room, bool) {
 	}
 
 	if len(candidates) == 0 {
+		return data.Room{}, false
+	}
+
+	// Early exit: if no candidate has monsters and there are no alive enemies on the map,
+	// stop traversing — remaining rooms are empty edges we don't need to visit.
+	hasAnyMonsterCandidate := false
+	for _, c := range candidates {
+		if c.hasEnemy {
+			hasAnyMonsterCandidate = true
+			break
+		}
+	}
+	if !hasAnyMonsterCandidate && len(aliveEnemies) == 0 {
 		return data.Room{}, false
 	}
 
