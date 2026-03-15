@@ -5,14 +5,19 @@ import (
 	"context"
 	"fmt"
 	"image/jpeg"
+	"log/slog"
+	"os"
 	"path/filepath"
 	"strings"
 	"time"
 
 	"github.com/bwmarrin/discordgo"
+	"github.com/hectorgimenez/d2go/pkg/data"
 	d2stat "github.com/hectorgimenez/d2go/pkg/data/stat"
+	"github.com/hectorgimenez/d2go/pkg/data/item"
 	"github.com/hectorgimenez/koolo/internal/config"
 	"github.com/hectorgimenez/koolo/internal/event"
+	"github.com/hectorgimenez/koolo/internal/remote/discord/enrichment"
 )
 
 var excludedStatIDs = map[int]bool{
@@ -67,6 +72,34 @@ func (b *Bot) Handle(ctx context.Context, e event.Event) error {
 		if config.Koolo.Discord.DisableItemStashScreenshots {
 			if b.useWebhook {
 				embed := buildItemStashEmbed(evt)
+				// Try to attach item thumbnail from local assets
+				imgData, imgFilename := findItemThumbnail(evt.Item.Item)
+				if imgData != nil {
+					embed.Thumbnail = &discordgo.MessageEmbedThumbnail{
+						URL: "attachment://" + imgFilename,
+					}
+				}
+				// If fancy drops enabled, send with response ID for async enrichment
+				if b.enrichmentService != nil {
+					var msgID string
+					var err error
+					if imgData != nil {
+						msgID, err = b.itemWebhookClient().SendEmbedWithThumbnail(ctx, embed, imgData, imgFilename)
+					} else {
+						msgID, err = b.itemWebhookClient().SendEmbedWithResponse(ctx, embed)
+					}
+					if err != nil {
+						return err
+					}
+					if msgID != "" {
+						b.asyncEnrich(evt, embed.Description, embed.Color, msgID, imgData, imgFilename)
+					}
+					return nil
+				}
+				if imgData != nil {
+					_, err := b.itemWebhookClient().SendEmbedWithThumbnail(ctx, embed, imgData, imgFilename)
+					return err
+				}
 				return b.itemWebhookClient().SendEmbed(ctx, embed)
 			}
 			return b.sendItemStashEmbed(evt)
@@ -278,12 +311,13 @@ func buildItemStashDescription(evt event.ItemStashedEvent) string {
 				continue
 			}
 			statText := s.String()
-			if statText != "" {
-				if strings.Contains(statText, "Socketed") || strings.Contains(statText, "Sockets") {
-					hasSocketStat = true
-				}
-				description.WriteString(fmt.Sprintf("%s\n", statText))
+			if statText == "" || strings.Contains(statText, "????") {
+				continue
 			}
+			if strings.Contains(statText, "Socketed") || strings.Contains(statText, "Sockets") {
+				hasSocketStat = true
+			}
+			description.WriteString(fmt.Sprintf("%s\n", statText))
 		}
 	}
 
@@ -432,6 +466,61 @@ func isAllDigits(val string) bool {
 	return true
 }
 
+// sanitizeImageName strips non-alphanumeric chars from item name for asset lookup.
+func sanitizeImageName(name string) string {
+	var b strings.Builder
+	for _, c := range name {
+		if (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') {
+			b.WriteRune(c)
+		}
+	}
+	return b.String()
+}
+
+// findItemThumbnail tries to load the item's .webp asset from assets/items/.
+// Returns (imageData, filename) or (nil, "") if not found.
+func findItemThumbnail(itm data.Item) ([]byte, string) {
+	// Use executable-relative path (exe is in build/, assets in ../assets/items/)
+	// CWD may differ from exe location, so resolve from executable path.
+	assetsPath := filepath.Join("..", "assets", "items")
+	if exePath, err := os.Executable(); err == nil {
+		assetsPath = filepath.Join(filepath.Dir(exePath), "..", "assets", "items")
+	}
+
+	// For unique/set items, try identified name first
+	if (itm.Quality == item.QualityUnique || itm.Quality == item.QualitySet) && itm.IdentifiedName != "" {
+		name := sanitizeImageName(itm.IdentifiedName)
+		if imgData, fname := tryLoadImage(assetsPath, name); imgData != nil {
+			return imgData, fname
+		}
+	}
+
+	// For runewords, try runeword name
+	if itm.IsRuneword && itm.RunewordName != "" {
+		name := sanitizeImageName(string(itm.RunewordName))
+		if imgData, fname := tryLoadImage(assetsPath, name); imgData != nil {
+			return imgData, fname
+		}
+	}
+
+	// Fall back to base item name
+	name := sanitizeImageName(string(itm.Name))
+	imgData, fname := tryLoadImage(assetsPath, name)
+	return imgData, fname
+}
+
+func tryLoadImage(dir, baseName string) ([]byte, string) {
+	for _, ext := range []string{".webp", ".png", ".jpg"} {
+		filename := baseName + ext
+		path := filepath.Join(dir, filename)
+		data, err := os.ReadFile(path)
+		if err == nil {
+			return data, filename
+		}
+	}
+	return nil, ""
+}
+
 func (b *Bot) sendEventMessage(ctx context.Context, message string) error {
 	if b.useWebhook {
 		return b.webhookClient.Send(ctx, message, "", nil)
@@ -452,6 +541,84 @@ func (b *Bot) sendScreenshot(ctx context.Context, message string, image []byte) 
 		Content: message,
 	})
 	return err
+}
+
+// asyncEnrich spawns a goroutine that enriches the item embed with roll quality,
+// d2jsp prices, and AI analysis, then PATCHes the original Discord message.
+// imgData/imgFilename are the original item thumbnail to re-attach on PATCH.
+func (b *Bot) asyncEnrich(evt event.ItemStashedEvent, baseDescription string, baseColor int, messageID string, imgData []byte, imgFilename string) {
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+		defer cancel()
+
+		statsText := buildItemStashDescription(evt)
+		result := b.enrichmentService.Enrich(ctx, evt.Item.Item, statsText)
+
+		// Only update if we got any enrichment data
+		if result.RollReport == nil && result.D2JSPPrice == nil && result.TraderiePrice == nil {
+			return
+		}
+
+		enrichedEmbed := enrichment.BuildEnrichedEmbed(baseDescription, baseColor, result)
+
+		// Collect file attachments for multipart PATCH
+		var files []FileAttachment
+
+		// Re-attach item thumbnail so it persists after PATCH
+		if len(imgData) > 0 && imgFilename != "" {
+			files = append(files, FileAttachment{Data: imgData, Filename: imgFilename})
+			enrichedEmbed.Thumbnail = &discordgo.MessageEmbedThumbnail{
+				URL: "attachment://" + imgFilename,
+			}
+		}
+
+		// If Traderie price includes a rune, attach rune icon as footer image
+		if result.TraderiePrice != nil {
+			runeName := enrichment.ExtractRuneName(result.TraderiePrice.AvgPrice)
+			if runeName != "" {
+				runeFile := strings.ToLower(runeName) + "rune.webp"
+				runeData, _ := loadRuneAsset(runeFile)
+				if runeData != nil {
+					files = append(files, FileAttachment{Data: runeData, Filename: runeFile})
+					fgValue := enrichment.RuneFGValue(runeName)
+					footerText := fmt.Sprintf("Traderie: %s", result.TraderiePrice.AvgPrice)
+					if fgValue > 0 {
+						footerText = fmt.Sprintf("Traderie: %s (%d fg)", result.TraderiePrice.AvgPrice, fgValue)
+					}
+					enrichedEmbed.Footer = &discordgo.MessageEmbedFooter{
+						Text:    footerText,
+						IconURL: "attachment://" + runeFile,
+					}
+				}
+			}
+		}
+
+		var err error
+		if len(files) > 0 {
+			err = b.itemWebhookClient().EditEmbedWithFiles(ctx, messageID, enrichedEmbed, files)
+		} else {
+			err = b.itemWebhookClient().EditEmbed(ctx, messageID, enrichedEmbed)
+		}
+		if err != nil {
+			slog.Default().Warn("Failed to update enriched embed",
+				slog.String("messageID", messageID),
+				slog.Any("error", err))
+		}
+	}()
+}
+
+// loadRuneAsset loads a rune .webp file from assets/items/.
+func loadRuneAsset(filename string) ([]byte, string) {
+	assetsPath := filepath.Join("..", "assets", "items")
+	if exePath, err := os.Executable(); err == nil {
+		assetsPath = filepath.Join(filepath.Dir(exePath), "..", "assets", "items")
+	}
+	path := filepath.Join(assetsPath, filename)
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, ""
+	}
+	return data, filename
 }
 
 func (b *Bot) shouldPublish(e event.Event) bool {

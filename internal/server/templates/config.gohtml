@@ -517,7 +517,75 @@
                         <input type="checkbox" id="discord-include-pickit-info" name="discord_include_pickit_info_in_item_text" value="{{ .Discord.IncludePickitInfoInItemText }}" {{ if .Discord.IncludePickitInfoInItemText }} checked="checked" {{ end }} {{ if not .Discord.DisableItemStashScreenshots }} disabled="disabled" {{ end }} />
                         Show NIP rule (send text only)
                     </label>
+                    <label>
+                        <input type="checkbox" id="discord-fancy-loot" name="discord_enable_fancy_item_drops" value="true" {{ if .Discord.EnableFancyItemDrops }} checked="checked" {{ end }} />
+                        Fancy Loot Drops (roll quality, prices, AI analysis)
+                    </label>
                 </fieldset>
+                <div id="discord-fancy-loot-config" style="{{ if not .Discord.EnableFancyItemDrops }}display:none;{{ end }}">
+                    <div class="grid">
+                        <label>
+                            Claude API Key
+                            <input
+                                    name="discord_claude_api_key"
+                                    type="password"
+                                    placeholder="sk-ant-api03-..."
+                                    value="{{ .Discord.ClaudeAPIKey }}"
+                            />
+                        </label>
+                        <label>
+                            Claude Model
+                            <input
+                                    name="discord_claude_model"
+                                    placeholder="claude-haiku-4-5-20251001"
+                                    value="{{ .Discord.ClaudeModel }}"
+                            />
+                        </label>
+                    </div>
+                    <div class="grid">
+                        <label>
+                            FlareSolverr URL (for live d2jsp/traderie prices)
+                            <input
+                                    name="discord_flaresolverr_url"
+                                    placeholder="http://localhost:8191/v1"
+                                    value="{{ .Discord.FlareSolverrURL }}"
+                            />
+                        </label>
+                    </div>
+                    <div class="grid">
+                        <label>
+                            d2jsp Cookie (session cookies for live fg prices)
+                            <div style="display:flex; gap:8px; align-items:center">
+                                <input
+                                        id="d2jsp_cookie_input"
+                                        name="discord_d2jsp_cookie"
+                                        placeholder="member_id=12345; msec=abc123..."
+                                        value="{{ .Discord.D2JSPCookie }}"
+                                        style="flex:1"
+                                />
+                                <button type="button" onclick="document.getElementById('cookie_help').style.display = document.getElementById('cookie_help').style.display === 'none' ? 'block' : 'none'" style="white-space:nowrap; padding:6px 12px">
+                                    ? How to get
+                                </button>
+                            </div>
+                        </label>
+                    </div>
+                    <div id="cookie_help" style="display:none; background:var(--bg-tertiary); border:1px solid var(--border-color); border-radius:8px; padding:12px; margin-bottom:12px">
+                        <p style="margin:0 0 8px 0; font-weight:bold; color:var(--accent-yellow)">How to get d2jsp cookies:</p>
+                        <ol style="margin:0; padding-left:20px; line-height:1.8">
+                            <li>Open Chrome and go to <a href="https://forums.d2jsp.org" target="_blank">forums.d2jsp.org</a></li>
+                            <li>Log in if not already logged in</li>
+                            <li>Press <kbd style="background:#444;padding:2px 6px;border-radius:3px">F12</kbd> to open DevTools</li>
+                            <li>Click the <b>Application</b> tab (or <b>Storage</b> in some versions)</li>
+                            <li>In the left sidebar: <b>Cookies</b> &rarr; <b>https://forums.d2jsp.org</b></li>
+                            <li>Find <code>member_id</code> and <code>msec</code> cookies</li>
+                            <li>Copy their values and paste here as: <code>member_id=VALUE; msec=VALUE</code></li>
+                        </ol>
+                        <p style="margin:8px 0 0 0"><small style="color:var(--text-secondary)">These cookies expire periodically. If d2jsp prices stop working, repeat this process.</small></p>
+                    </div>
+                    <p><small style="color:var(--text-secondary)">
+                        FlareSolverr bypasses Cloudflare for live prices. Install: <a href="https://github.com/FlareSolverr/FlareSolverr" target="_blank">github.com/FlareSolverr</a>.
+                    </small></p>
+                </div>
                 <h4>Telegram integration</h4>
                 <label>
                     <input
@@ -876,6 +944,16 @@ document.addEventListener("DOMContentLoaded", function () {
 
         disableItemStashScreenshots.addEventListener("change", updatePickitInfoOption);
         updatePickitInfoOption();
+    }
+
+    const fancyLootCheckbox = document.getElementById("discord-fancy-loot");
+    const fancyLootConfig = document.getElementById("discord-fancy-loot-config");
+    if (fancyLootCheckbox && fancyLootConfig) {
+        function updateFancyLootFields() {
+            fancyLootConfig.style.display = fancyLootCheckbox.checked ? "" : "none";
+        }
+        fancyLootCheckbox.addEventListener("change", updateFancyLootFields);
+        updateFancyLootFields();
     }
 
     if (!ngrokEnabled || !ngrokConfig) {

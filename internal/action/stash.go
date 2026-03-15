@@ -41,6 +41,12 @@ func Stash(forceStash bool) error {
 	ctx := context.Get()
 	ctx.SetLastAction("Stash")
 
+	// Never attempt to stash outside of town — bank object doesn't exist in dungeons
+	// and trying to path to it causes the bot to run around aimlessly.
+	if !ctx.Data.PlayerUnit.Area.IsTown() {
+		return nil
+	}
+
 	ctx.Logger.Debug("Checking for items to stash...")
 	if !isStashingRequired(forceStash) {
 		return nil
@@ -81,6 +87,10 @@ func isStashingRequired(firstRun bool) bool {
 
 	for _, i := range ctx.Data.Inventory.ByLocation(item.LocationInventory) {
 		if i.IsPotion() {
+			continue
+		}
+		// Skip items that already failed to stash this game
+		if ctx.CurrentGame.UnstashableItems[i.UnitID] {
 			continue
 		}
 
@@ -196,9 +206,15 @@ func stashInventory(firstRun bool) {
 			continue
 		}
 
+		// Skip items already marked unstashable this game (all tabs were full on a prior attempt)
+		if ctx.CurrentGame.UnstashableItems[i.UnitID] {
+			continue
+		}
+
 		stashed := stashItemAcrossTabs(i, matchedRule, ruleFile, firstRun)
 		if !stashed {
-			ctx.Logger.Warn(fmt.Sprintf("ERROR: Item %s [%s] could not be stashed into any tab. All stash tabs might be full.", i.Desc().Name, i.Quality.ToString()))
+			ctx.CurrentGame.UnstashableItems[i.UnitID] = true
+			ctx.Logger.Warn(fmt.Sprintf("Item %s [%s] could not be stashed into any tab, skipping for rest of game.", i.Desc().Name, i.Quality.ToString()))
 		}
 	}
 	step.CloseAllMenus()

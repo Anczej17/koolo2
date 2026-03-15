@@ -73,6 +73,13 @@ type KooloCfg struct {
 		UseWebhook                   bool     `yaml:"useWebhook"`
 		WebhookURL                   string   `yaml:"webhookUrl"`
 		ItemWebhookURL               string   `yaml:"itemWebhookUrl"`
+		EnableFancyItemDrops         bool     `yaml:"enableFancyItemDrops"`
+		D2JSPScraping                bool     `yaml:"d2jspScraping"`
+		D2JSPRealm                   string   `yaml:"d2jspRealm"`
+		D2JSPCookie                 string   `yaml:"d2jspCookie"`
+		ClaudeAPIKey                 string   `yaml:"claudeApiKey"`
+		ClaudeModel                  string   `yaml:"claudeModel"`
+		FlareSolverrURL              string   `yaml:"flareSolverrUrl"`
 	} `yaml:"discord"`
 	Telegram struct {
 		Enabled bool   `yaml:"enabled"`

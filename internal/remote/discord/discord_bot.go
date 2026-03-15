@@ -3,22 +3,25 @@ package discord
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"slices"
 	"strings"
 
 	"github.com/bwmarrin/discordgo"
 	"github.com/hectorgimenez/koolo/internal/bot"
 	"github.com/hectorgimenez/koolo/internal/config"
+	"github.com/hectorgimenez/koolo/internal/remote/discord/enrichment"
 )
 
 type Bot struct {
-	discordSession *discordgo.Session
-	channelID      string
-	itemChannelID  string
-	manager        *bot.SupervisorManager
-	useWebhook     bool
-	webhookClient  *webhookClient
-	itemWebhook    *webhookClient
+	discordSession    *discordgo.Session
+	channelID         string
+	itemChannelID     string
+	manager           *bot.SupervisorManager
+	useWebhook        bool
+	webhookClient     *webhookClient
+	itemWebhook       *webhookClient
+	enrichmentService *enrichment.Service
 }
 
 func NewBot(token, channelID, itemChannelID string, manager *bot.SupervisorManager, useWebhook bool, webhookURL, itemWebhookURL string) (*Bot, error) {
@@ -29,6 +32,21 @@ func NewBot(token, channelID, itemChannelID string, manager *bot.SupervisorManag
 		useWebhook:    useWebhook,
 		webhookClient: nil,
 		itemWebhook:   nil,
+	}
+
+	// Initialize enrichment service if enabled
+	if config.Koolo.Discord.EnableFancyItemDrops {
+		logger := slog.Default()
+
+		// FlareSolverr for bypassing Cloudflare on d2jsp/traderie
+		var flare *enrichment.FlareSolverr
+		if config.Koolo.Discord.FlareSolverrURL != "" || config.Koolo.Discord.D2JSPScraping {
+			flare = enrichment.NewFlareSolverr(config.Koolo.Discord.FlareSolverrURL, logger)
+		}
+
+		d2jspScraper := enrichment.NewD2JSPScraper(config.Koolo.Discord.D2JSPRealm, flare, logger, config.Koolo.Discord.D2JSPCookie)
+		traderieScraper := enrichment.NewTraderieScraper(flare, logger)
+		botInstance.enrichmentService = enrichment.NewService(d2jspScraper, traderieScraper, logger)
 	}
 
 	if useWebhook {

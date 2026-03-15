@@ -725,11 +725,16 @@
             <!-- Stash -->
             <div class="p-4 flex-1 min-w-[200px] border-r border-[#4a4a4a]">
                 <h3 class="section-title"><i class="bi bi-box-seam mr-2"></i>Stash</h3>
-                <div class="stash-tabs">
+                <div class="stash-tabs" style="flex-wrap: wrap;">
                     <button class="stash-tab active" onclick="showStashTab('personal')">Personal</button>
                     <button class="stash-tab" onclick="showStashTab('shared1')">Shared 1</button>
                     <button class="stash-tab" onclick="showStashTab('shared2')">Shared 2</button>
                     <button class="stash-tab" onclick="showStashTab('shared3')">Shared 3</button>
+                    <button class="stash-tab" onclick="showStashTab('shared4')">Shared 4</button>
+                    <button class="stash-tab" onclick="showStashTab('shared5')">Shared 5</button>
+                    <button class="stash-tab" onclick="showStashTab('gems')">Gems</button>
+                    <button class="stash-tab" onclick="showStashTab('materials')">Materials</button>
+                    <button class="stash-tab" onclick="showStashTab('runes')">Runes</button>
                 </div>
                 
                 <!-- Personal Stash -->
@@ -816,6 +821,126 @@
                         </div>
                         <div class="inventory-items-layer">
                             {{ range .Armory.SharedStash3 }}
+                            <div class="inventory-item"
+                                 style="left: calc({{ .Position.X }} * 30px + 2px); top: calc({{ .Position.Y }} * 30px + 2px); width: {{ mul .Width 29 }}px; height: {{ mul .Height 29 }}px; background-image: url('/items/{{ .ImageName }}');"
+                                 data-item='{{ . | json }}'
+                                 onmouseenter="showTooltip(event, this)"
+                                 onmouseleave="hideTooltip()"
+                                 onmousemove="moveTooltip(event)">
+                            </div>
+                            {{ end }}
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Shared Stash 4 -->
+                <div id="stash-shared4" class="stash-content">
+                    <div class="inventory-container">
+                        <div class="inventory-grid" style="grid-template-columns: repeat(10, 29px); grid-template-rows: repeat(10, 29px);">
+                            {{ range $row := iterate 10 }}
+                            {{ range $col := iterate 10 }}
+                            <div class="inventory-slot" data-row="{{ $row }}" data-col="{{ $col }}"></div>
+                            {{ end }}
+                            {{ end }}
+                        </div>
+                        <div class="inventory-items-layer">
+                            {{ range .Armory.SharedStash4 }}
+                            <div class="inventory-item"
+                                 style="left: calc({{ .Position.X }} * 30px + 2px); top: calc({{ .Position.Y }} * 30px + 2px); width: {{ mul .Width 29 }}px; height: {{ mul .Height 29 }}px; background-image: url('/items/{{ .ImageName }}');"
+                                 data-item='{{ . | json }}'
+                                 onmouseenter="showTooltip(event, this)"
+                                 onmouseleave="hideTooltip()"
+                                 onmousemove="moveTooltip(event)">
+                            </div>
+                            {{ end }}
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Shared Stash 5 -->
+                <div id="stash-shared5" class="stash-content">
+                    <div class="inventory-container">
+                        <div class="inventory-grid" style="grid-template-columns: repeat(10, 29px); grid-template-rows: repeat(10, 29px);">
+                            {{ range $row := iterate 10 }}
+                            {{ range $col := iterate 10 }}
+                            <div class="inventory-slot" data-row="{{ $row }}" data-col="{{ $col }}"></div>
+                            {{ end }}
+                            {{ end }}
+                        </div>
+                        <div class="inventory-items-layer">
+                            {{ range .Armory.SharedStash5 }}
+                            <div class="inventory-item"
+                                 style="left: calc({{ .Position.X }} * 30px + 2px); top: calc({{ .Position.Y }} * 30px + 2px); width: {{ mul .Width 29 }}px; height: {{ mul .Height 29 }}px; background-image: url('/items/{{ .ImageName }}');"
+                                 data-item='{{ . | json }}'
+                                 onmouseenter="showTooltip(event, this)"
+                                 onmouseleave="hideTooltip()"
+                                 onmousemove="moveTooltip(event)">
+                            </div>
+                            {{ end }}
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Gems Tab -->
+                <div id="stash-gems" class="stash-content">
+                    <div class="inventory-container">
+                        <div class="inventory-grid" style="grid-template-columns: repeat(10, 29px); grid-template-rows: repeat(10, 29px);">
+                            {{ range $row := iterate 10 }}
+                            {{ range $col := iterate 10 }}
+                            <div class="inventory-slot" data-row="{{ $row }}" data-col="{{ $col }}"></div>
+                            {{ end }}
+                            {{ end }}
+                        </div>
+                        <div class="inventory-items-layer">
+                            {{ range .Armory.GemsTab }}
+                            <div class="inventory-item"
+                                 style="left: calc({{ .Position.X }} * 30px + 2px); top: calc({{ .Position.Y }} * 30px + 2px); width: {{ mul .Width 29 }}px; height: {{ mul .Height 29 }}px; background-image: url('/items/{{ .ImageName }}');"
+                                 data-item='{{ . | json }}'
+                                 onmouseenter="showTooltip(event, this)"
+                                 onmouseleave="hideTooltip()"
+                                 onmousemove="moveTooltip(event)">
+                            </div>
+                            {{ end }}
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Materials Tab -->
+                <div id="stash-materials" class="stash-content">
+                    <div class="inventory-container">
+                        <div class="inventory-grid" style="grid-template-columns: repeat(10, 29px); grid-template-rows: repeat(10, 29px);">
+                            {{ range $row := iterate 10 }}
+                            {{ range $col := iterate 10 }}
+                            <div class="inventory-slot" data-row="{{ $row }}" data-col="{{ $col }}"></div>
+                            {{ end }}
+                            {{ end }}
+                        </div>
+                        <div class="inventory-items-layer">
+                            {{ range .Armory.MaterialsTab }}
+                            <div class="inventory-item"
+                                 style="left: calc({{ .Position.X }} * 30px + 2px); top: calc({{ .Position.Y }} * 30px + 2px); width: {{ mul .Width 29 }}px; height: {{ mul .Height 29 }}px; background-image: url('/items/{{ .ImageName }}');"
+                                 data-item='{{ . | json }}'
+                                 onmouseenter="showTooltip(event, this)"
+                                 onmouseleave="hideTooltip()"
+                                 onmousemove="moveTooltip(event)">
+                            </div>
+                            {{ end }}
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Runes Tab -->
+                <div id="stash-runes" class="stash-content">
+                    <div class="inventory-container">
+                        <div class="inventory-grid" style="grid-template-columns: repeat(10, 29px); grid-template-rows: repeat(10, 29px);">
+                            {{ range $row := iterate 10 }}
+                            {{ range $col := iterate 10 }}
+                            <div class="inventory-slot" data-row="{{ $row }}" data-col="{{ $col }}"></div>
+                            {{ end }}
+                            {{ end }}
+                        </div>
+                        <div class="inventory-items-layer">
+                            {{ range .Armory.RunesTab }}
                             <div class="inventory-item"
                                  style="left: calc({{ .Position.X }} * 30px + 2px); top: calc({{ .Position.Y }} * 30px + 2px); width: {{ mul .Width 29 }}px; height: {{ mul .Height 29 }}px; background-image: url('/items/{{ .ImageName }}');"
                                  data-item='{{ . | json }}'

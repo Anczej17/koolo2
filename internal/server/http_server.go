@@ -945,7 +945,7 @@ func (s *HttpServer) Listen(port int) error {
 	http.HandleFunc("/attach-process", s.attachProcess)
 	http.HandleFunc("/ws", s.wsServer.HandleWebSocket)                         // Web socket
 	http.HandleFunc("/initial-data", s.initialData)                            // Web socket data
-	http.HandleFunc("/api/reload-config", s.reloadConfig)                      // New handler
+	http.HandleFunc("/api/reload-config", s.reloadConfig)
 	http.HandleFunc("/api/supervisors/reorder", s.reorderSupervisors)
 	http.HandleFunc("/api/supervisors/hide", s.hideSupervisor)
 	http.HandleFunc("/api/supervisors/unhide", s.unhideSupervisor)
@@ -2093,6 +2093,11 @@ func (s *HttpServer) config(w http.ResponseWriter, r *http.Request) {
 		newConfig.Discord.UseWebhook = r.Form.Get("discord_use_webhook") == "true"
 		newConfig.Discord.WebhookURL = strings.TrimSpace(r.Form.Get("discord_webhook_url"))
 		newConfig.Discord.ItemWebhookURL = strings.TrimSpace(r.Form.Get("discord_item_webhook_url"))
+		newConfig.Discord.EnableFancyItemDrops = r.Form.Get("discord_enable_fancy_item_drops") == "true"
+		newConfig.Discord.ClaudeAPIKey = strings.TrimSpace(r.Form.Get("discord_claude_api_key"))
+		newConfig.Discord.ClaudeModel = strings.TrimSpace(r.Form.Get("discord_claude_model"))
+		newConfig.Discord.FlareSolverrURL = strings.TrimSpace(r.Form.Get("discord_flaresolverr_url"))
+		newConfig.Discord.D2JSPCookie = strings.TrimSpace(r.Form.Get("discord_d2jsp_cookie"))
 
 		// Discord admins who can use bot commands
 		discordAdmins := r.Form.Get("discord_admins")
