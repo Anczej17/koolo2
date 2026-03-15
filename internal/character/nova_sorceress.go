@@ -802,6 +802,34 @@ func (s NovaSorceress) KillMonsterSequence(
 		}
 		lastMonsterHP = currentHP
 
+		// Leftover skip: don't waste time chasing a lone low-HP white mob far away.
+		// Merc or AoE splash will finish it; Nova should hunt the next pack.
+		if ctx.CharacterCfg.Character.NovaSorceress.AggressiveNovaPositioning {
+			monsterDist := gridDistance(ctx.Data.PlayerUnit.Position, monster.Position)
+			isWhite := monster.Type == data.MonsterTypeNone || monster.Type == data.MonsterTypeMinion
+			maxHP := monster.Stats[stat.MaxLife]
+			isLowHP := maxHP > 0 && float64(currentHP)/float64(maxHP) < 0.35
+
+			if monsterDist > NovaSpellRadius && isWhite && isLowHP {
+				// Check if it's truly alone (no pack around it)
+				nearbyAlive := 0
+				for _, m := range ctx.Data.Monsters.Enemies() {
+					if m.Stats[stat.Life] > 0 && gridDistance(monster.Position, m.Position) <= 15 {
+						nearbyAlive++
+						if nearbyAlive >= 3 {
+							break
+						}
+					}
+				}
+				if nearbyAlive < 3 {
+					s.Logger.Debug("Skipping lone low-HP leftover",
+						slog.Int("monsterDist", monsterDist),
+						slog.Int("nearbyAlive", nearbyAlive))
+					return nil // let caller pick next target / room
+				}
+			}
+		}
+
 		// ── OPT 1: Cache enemies once per loop iteration ──
 		// All functions below reuse this slice instead of calling ctx.Data.Monsters.Enemies() again.
 		enemies := ctx.Data.Monsters.Enemies()
