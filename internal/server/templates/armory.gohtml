@@ -3975,7 +3975,11 @@
             const propLower = prop.property.toLowerCase();
 
             // Defense field (direct on item, not in stats array)
-            if (prop.property === 'Defense' || prop.property === '+' + '{'+'{value}'+'}' + ' Defense') {
+            // Traderie has: "Defense" (id=1855) and "+{value} Defense" (id=399)
+            if (propLower === 'defense' || (propLower.endsWith(' defense') && !propLower.includes('enhanced'))) {
+                // For "+{value} Defense", return the Defense stat value
+                const defStat = stats.find(s => s.name === 'Defense');
+                if (defStat) return defStat.value;
                 return traderieItemData.defense || null;
             }
 
