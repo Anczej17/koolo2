@@ -3,6 +3,7 @@ package character
 import (
 	"log/slog"
 	"math"
+	"strings"
 	"time"
 
 	"github.com/hectorgimenez/d2go/pkg/data"
@@ -13,6 +14,7 @@ import (
 	"github.com/hectorgimenez/koolo/internal/action/step"
 	"github.com/hectorgimenez/koolo/internal/context"
 	"github.com/hectorgimenez/koolo/internal/game"
+	"github.com/hectorgimenez/koolo/internal/utils"
 )
 
 const (
@@ -28,6 +30,10 @@ const (
 
 	// Real Nova hit radius (tiles) used for scoring and leftover ignore.
 	NovaSpellRadius = 8
+
+	// Effective radius for positioning: melee monsters walk ~3 tiles/sec toward player,
+	// so monsters within NovaSpellRadius+3 will be in Nova range after 1 second.
+	NovaEffectiveRadius = NovaSpellRadius + 3
 
 	StaticMinDistance    = 13
 	StaticMaxDistance    = 22
@@ -84,9 +90,9 @@ func packKey(pos data.Position) int64 {
 	return (qx << 32) ^ qy
 }
 
-// countHitsAt counts how many monsters are within NovaSpellRadius from `pos`.
-func countHitsAt(pos data.Position, pack []data.Monster) int {
-	r2 := NovaSpellRadius * NovaSpellRadius
+// countHitsAt counts how many monsters are within the given radius from `pos`.
+func countHitsAt(pos data.Position, pack []data.Monster, radius int) int {
+	r2 := radius * radius
 	hits := 0
 	for _, m := range pack {
 		if m.Stats[stat.Life] <= 0 {
@@ -262,11 +268,8 @@ func desiredHitsForPack(packSize int) int {
 }
 
 func maxRepositionsForPack(packSize int) int {
-	// Fast clear: no dancing.
-	// big/medium: 1 decisive reposition, small: allow 2.
-	if packSize >= 7 {
-		return 1
-	}
+	// Allow 2 repositions: first to approach, second to adjust after new monsters load.
+	// Small packs: 2 is enough. Big packs: 2 prevents dancing while allowing post-teleport correction.
 	return 2
 }
 
@@ -443,13 +446,15 @@ func chooseAnchorForPack(target data.Monster, pack []data.Monster, seed data.Pos
 // -------------------------------------------------------------------------------------
 
 type novaPosEval struct {
-	ok          bool
-	bestPos     data.Position
-	bestHits    int
-	currentHits int
-	packSize    int
-	engKey      int64
-	anchorPos   data.Position
+	ok              bool
+	bestPos         data.Position
+	bestHits        int    // effective hits (NovaEffectiveRadius) at bestPos — for scoring
+	bestActualHits  int    // actual Nova hits (NovaSpellRadius) at bestPos — for worthIt decisions
+	currentHits     int    // effective hits at current position
+	currentActualHits int  // actual Nova hits at current position
+	packSize        int
+	engKey          int64
+	anchorPos       data.Position
 }
 
 // evalAggressiveNovaPosition finds one best "entry" position for the current pack.
@@ -483,42 +488,51 @@ func (s NovaSorceress) evalAggressiveNovaPosition(target data.Monster, enemies [
 	key := packKey(anchor)
 
 	packSize := len(pack)
-	currentHits := countHitsAt(playerPos, pack)
+	currentHits := countHitsAt(playerPos, pack, NovaEffectiveRadius)
+	currentActualHits := countHitsAt(playerPos, pack, NovaSpellRadius)
 
 	// If pack is tiny, no need to reposition here.
 	if packSize < 3 {
 		return novaPosEval{
-			ok:          false,
-			packSize:    packSize,
-			currentHits: currentHits,
-			engKey:      key,
-			anchorPos:   anchor,
+			ok:                false,
+			packSize:          packSize,
+			currentHits:       currentHits,
+			currentActualHits: currentActualHits,
+			engKey:            key,
+			anchorPos:         anchor,
 		}
 	}
 
 	cent := centroidOf(pack)
 	isWalkable := ctx.Data.AreaData.IsWalkable
-	need := desiredHitsForPack(packSize)
+	// Use actual hittable count (NovaSpellRadius) for desiredHits threshold,
+	// not inflated effective count which includes ranged mobs that won't approach.
+	actualPackAtCenter := countHitsAt(cent, pack, NovaSpellRadius)
+	need := desiredHitsForPack(actualPackAtCenter)
 
 	// ── FAST PATH: try centroid first ──
-	// If centroid is walkable and gives enough hits, skip the expensive grid scan.
+	// If centroid is walkable and gives enough ACTUAL hits, skip the expensive grid scan.
 	// This handles ~90% of normal packs where monsters cluster around center.
 	if isWalkable(cent) {
-		centHits := countHitsAt(cent, pack)
-		if centHits >= need {
+		centActualHits := countHitsAt(cent, pack, NovaSpellRadius)
+		if centActualHits >= need {
+			centEffHits := countHitsAt(cent, pack, NovaEffectiveRadius)
 			s.Logger.Debug("Nova eval: centroid fast path",
 				slog.Int("pack", packSize),
-				slog.Int("centHits", centHits),
+				slog.Int("actualHits", centActualHits),
+				slog.Int("effHits", centEffHits),
 				slog.Int("curHits", currentHits),
 				slog.Duration("eval", time.Since(evalStart)))
 			return novaPosEval{
-				ok:          true,
-				bestPos:     cent,
-				bestHits:    centHits,
-				currentHits: currentHits,
-				packSize:    packSize,
-				engKey:      key,
-				anchorPos:   anchor,
+				ok:                true,
+				bestPos:           cent,
+				bestHits:          centEffHits,
+				bestActualHits:    centActualHits,
+				currentHits:       currentHits,
+				currentActualHits: currentActualHits,
+				packSize:          packSize,
+				engKey:            key,
+				anchorPos:         anchor,
 			}
 		}
 	}
@@ -627,6 +641,7 @@ func (s NovaSorceress) evalAggressiveNovaPosition(target data.Monster, enemies [
 
 	bestPos := playerPos
 	bestHits := currentHits
+	bestActualHits := currentActualHits
 	bestScore := -1e18
 
 	for _, p := range candidates {
@@ -635,8 +650,9 @@ func (s NovaSorceress) evalAggressiveNovaPosition(target data.Monster, enemies [
 			continue
 		}
 
-		hits := countHitsAt(p, pack)
-		if hits == 0 {
+		actualHits := countHitsAt(p, pack, NovaSpellRadius)
+		effHits := countHitsAt(p, pack, NovaEffectiveRadius)
+		if effHits == 0 {
 			continue
 		}
 
@@ -645,7 +661,12 @@ func (s NovaSorceress) evalAggressiveNovaPosition(target data.Monster, enemies [
 		dCent := float64(gridDistance(p, cent))
 		open := float64(countOpenCorners(p, isWalkable))
 
-		score := float64(hits)*hitsW -
+		// Score weighted 70% actual hits + 30% effective hits.
+		// Actual hits (8 tiles) matter most — ranged mobs won't approach.
+		// Effective hits (11 tiles) break ties for melee-heavy packs.
+		blendedHits := float64(actualHits)*0.7 + float64(effHits)*0.3
+
+		score := blendedHits*hitsW -
 			dAnchor*anchorW -
 			dp*moveW -
 			dCent*centroidW +
@@ -665,25 +686,30 @@ func (s NovaSorceress) evalAggressiveNovaPosition(target data.Monster, enemies [
 		if score > bestScore {
 			bestScore = score
 			bestPos = p
-			bestHits = hits
+			bestHits = effHits
+			bestActualHits = actualHits
 		}
 	}
 
 	s.Logger.Debug("Nova eval: grid scan fallback",
 		slog.Int("pack", packSize),
 		slog.Int("candidates", len(candidates)),
-		slog.Int("bestHits", bestHits),
-		slog.Int("curHits", currentHits),
+		slog.Int("bestActual", bestActualHits),
+		slog.Int("bestEff", bestHits),
+		slog.Int("curActual", currentActualHits),
+		slog.Int("curEff", currentHits),
 		slog.Duration("eval", time.Since(evalStart)))
 
 	return novaPosEval{
-		ok:          true,
-		bestPos:     bestPos,
-		bestHits:    bestHits,
-		currentHits: currentHits,
-		packSize:    packSize,
-		engKey:      key,
-		anchorPos:   anchor,
+		ok:                true,
+		bestPos:           bestPos,
+		bestHits:          bestHits,
+		bestActualHits:    bestActualHits,
+		currentHits:       currentHits,
+		currentActualHits: currentActualHits,
+		packSize:          packSize,
+		engKey:            key,
+		anchorPos:         anchor,
 	}
 }
 
@@ -820,31 +846,26 @@ func (s NovaSorceress) KillMonsterSequence(
 
 			// cachedHerald == nil means no Herald on screen — no need to check pack
 			if ev.ok && !attackedThisEngagement {
-				need := desiredHitsForPack(ev.packSize)
 				maxRep := maxRepositionsForPack(ev.packSize)
 
-				if need > 0 && repositionCount < maxRep && ev.currentHits < need {
+				// Use ACTUAL hits (NovaSpellRadius) for repositioning decisions,
+				// not effective hits which inflate counts for ranged mobs that won't approach.
+				if repositionCount < maxRep && ev.bestActualHits > ev.currentActualHits {
 					// OPT 3: Cooldown reduced from 650ms to 300ms for faster pack transitions.
 					if lastRepositionAt.IsZero() || time.Since(lastRepositionAt) > aggressiveRepositionCooldown {
-						gain := ev.bestHits - ev.currentHits
+						actualGain := ev.bestActualHits - ev.currentActualHits
 
-						// Big packs: demand meaningful improvement.
+						// Demand meaningful improvement in ACTUAL Nova coverage.
 						worthIt := false
-						if ev.bestHits > ev.currentHits {
-							if ev.bestHits >= need {
-								worthIt = true
-							} else {
-								if ev.packSize >= 10 {
-									worthIt = gain >= 2
-								} else {
-									worthIt = gain >= 1
-								}
-							}
+						if ev.packSize >= 10 {
+							worthIt = actualGain >= 2
+						} else {
+							worthIt = actualGain >= 1
 						}
 
-						// Do not waste time on long teleports unless it reaches desired hits.
+						// Do not waste time on long teleports unless actual gain is significant.
 						dist := gridDistance(playerPos, ev.bestPos)
-						if dist >= 18 && ev.bestHits < need {
+						if dist >= 18 && actualGain < 3 {
 							worthIt = false
 						}
 
@@ -856,18 +877,46 @@ func (s NovaSorceress) KillMonsterSequence(
 						if worthIt {
 							s.Logger.Info("Nova aggressive reposition",
 								slog.Int("pack", ev.packSize),
-								slog.Int("curHits", ev.currentHits),
-								slog.Int("bestHits", ev.bestHits),
+								slog.Int("curActual", ev.currentActualHits),
+								slog.Int("bestActual", ev.bestActualHits),
+								slog.Int("curEff", ev.currentHits),
+								slog.Int("bestEff", ev.bestHits),
 								slog.Int("tpDist", dist))
 							if err := step.MoveTo(ev.bestPos); err != nil {
-								s.Logger.Debug("Aggressive Nova reposition failed", slog.String("error", err.Error()))
+								if strings.Contains(err.Error(), "area transition") {
+									// Teleport landed on area boundary — collision data is broken.
+									// Try random teleports to get back to a valid area.
+									s.Logger.Warn("Nova reposition: area transition error, attempting recovery teleports",
+										slog.String("error", err.Error()))
+									recovered := false
+									for retry := 0; retry < 5; retry++ {
+										ctx.PathFinder.RandomTeleport()
+										utils.Sleep(200)
+										ctx.RefreshGameData()
+										if ctx.Data.AreaData.Grid != nil &&
+											ctx.Data.AreaData.Grid.CollisionGrid != nil &&
+											len(ctx.Data.AreaData.Grid.CollisionGrid) > 0 {
+											s.Logger.Info("Nova reposition: recovered from area transition",
+												slog.Int("retries", retry+1))
+											recovered = true
+											break
+										}
+									}
+									if !recovered {
+										s.Logger.Error("Nova reposition: could not recover from area transition, aborting fight")
+										return nil
+									}
+									playerPos = ctx.Data.PlayerUnit.Position
+								} else {
+									s.Logger.Debug("Aggressive Nova reposition failed", slog.String("error", err.Error()))
+								}
 								repositionCount++
 							} else {
 								lastRepositionAt = time.Now()
 								repositionCount++
-								// Refresh playerPos after teleport — stale value would
-								// break hasNearbyEnemy check below (SkipRangeCheck decision).
-								playerPos = ctx.Data.PlayerUnit.Position
+								// After teleport, new monsters may have loaded on screen.
+								// Re-evaluate position with fresh data before attacking.
+								continue
 							}
 						}
 					}
