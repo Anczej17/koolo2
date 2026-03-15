@@ -4105,7 +4105,7 @@
                 // Use endsWith check via special prefix
             ];
 
-            // Exact-end patterns: "to X" should only match "+{{value}} to X", not "+{{value}} to X after each Kill"
+            // Exact-end patterns: "to X" should only match "+{value} to X", not "+{value} to X after each Kill"
             const propExact = {
                 'to strength': 'Strength',
                 'to energy': 'Energy',
@@ -4124,7 +4124,7 @@
             }
 
             // Exact-end patterns: prop must END with the pattern (no trailing words)
-            // Strip {{value}}/{{level}}/etc. placeholders, then +/% signs
+            // Strip {value}/{level}/etc. placeholders, then +/% signs
             const propStripped = propLower.replace(/\{\{[^}]+\}\}/g, '').replace(/[+%]/g, '').trim();
             for (const [pattern, statName] of Object.entries(propExact)) {
                 if (propStripped === pattern || propStripped.endsWith(pattern)) {
