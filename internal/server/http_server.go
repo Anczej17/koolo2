@@ -1011,6 +1011,13 @@ func (s *HttpServer) Listen(port int) error {
 	http.HandleFunc("/api/armory/characters", s.armoryCharactersAPI)
 	// http.HandleFunc("/api/armory/all", s.armoryAllAPI) // Commented out - method not available in this version
 
+	// Traderie integration routes
+	http.HandleFunc("/api/traderie/search", s.traderieSearchItems)
+	http.HandleFunc("/api/traderie/listings", s.traderieGetListings)
+	http.HandleFunc("/api/traderie/create-listing", s.traderieCreateListing)
+	http.HandleFunc("/api/traderie/status", s.traderieGetCookieStatus)
+	http.HandleFunc("/api/traderie/cookies", s.traderieSetCookies)
+
 	s.registerDropRoutes()
 
 	assets, _ := fs.Sub(assetsFS, "assets")
@@ -2108,6 +2115,10 @@ func (s *HttpServer) config(w http.ResponseWriter, r *http.Request) {
 			return -1
 		}, discordAdmins)
 		newConfig.Discord.BotAdmins = strings.Split(cleanedAdmins, ",")
+		// Traderie integration
+		newConfig.Traderie.Token = strings.TrimSpace(r.Form.Get("traderie_token"))
+		newConfig.Traderie.CfClearance = strings.TrimSpace(r.Form.Get("traderie_cf_clearance"))
+
 		newConfig.Telegram.Enabled = r.Form.Get("telegram_enabled") == "true"
 		newConfig.Telegram.Token = r.Form.Get("telegram_token")
 		telegramChatId, err := strconv.ParseInt(r.Form.Get("telegram_chat_id"), 10, 64)

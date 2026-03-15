@@ -177,6 +177,7 @@ func convertArmoryItem(itm data.Item, assetsPath string) ArmoryItem {
 // getArmoryStatName returns the name of a stat
 func getArmoryStatName(id stat.ID) string {
 	names := map[stat.ID]string{
+		// Core attributes
 		stat.Strength:              "Strength",
 		stat.Energy:                "Energy",
 		stat.Dexterity:             "Dexterity",
@@ -185,36 +186,131 @@ func getArmoryStatName(id stat.ID) string {
 		stat.MaxLife:               "Max Life",
 		stat.Mana:                  "Mana",
 		stat.MaxMana:               "Max Mana",
+		stat.Stamina:               "Stamina",
+		stat.MaxStamina:            "Maximum Stamina",
+		stat.Level:                 "Level",
+		stat.Experience:            "Experience",
+
+		// Defense & damage
 		stat.Defense:               "Defense",
 		stat.EnhancedDefense:       "Enhanced Defense",
 		stat.EnhancedDamage:        "Enhanced Damage",
 		stat.AttackRating:          "Attack Rating",
-		stat.FireResist:            "Fire Resist",
-		stat.ColdResist:            "Cold Resist",
-		stat.LightningResist:       "Lightning Resist",
-		stat.PoisonResist:          "Poison Resist",
-		stat.MagicFind:             "Magic Find",
-		stat.GoldFind:              "Gold Find",
-		stat.FasterCastRate:        "Faster Cast Rate",
-		stat.FasterHitRecovery:     "Faster Hit Recovery",
-		stat.FasterRunWalk:         "Faster Run/Walk",
-		stat.IncreasedAttackSpeed:  "Increased Attack Speed",
-		stat.LifeSteal:             "Life Steal",
-		stat.ManaSteal:             "Mana Steal",
-		stat.Durability:            "Durability",
-		stat.MaxDurability:         "Max Durability",
-		stat.AllSkills:             "All Skills",
-		stat.AddClassSkills:        "Class Skills",
-		stat.ReplenishLife:         "Replenish Life",
-		stat.DamageReduced:         "Damage Reduced",
-		stat.MagicDamageReduction:  "Magic Damage Reduction",
-		stat.NormalDamageReduction: "Physical Damage Reduction",
-		stat.Requirements:          "Requirements",
 		stat.ChanceToBlock:         "Chance to Block",
 		stat.MinDamage:             "Min Damage",
 		stat.MaxDamage:             "Max Damage",
 		stat.TwoHandedMinDamage:    "Two-Handed Min Damage",
 		stat.TwoHandedMaxDamage:    "Two-Handed Max Damage",
+		stat.NormalDamageReduction: "Physical Damage Reduction",
+		stat.MagicDamageReduction:  "Magic Damage Reduction",
+		stat.DamageReduced:         "Damage Reduced",
+
+		// Elemental damage
+		stat.FireMinDamage:         "Minimum Fire Damage",
+		stat.FireMaxDamage:         "Maximum Fire Damage",
+		stat.LightningMinDamage:    "Minimum Lightning Damage",
+		stat.LightningMaxDamage:    "Maximum Lightning Damage",
+		stat.ColdMinDamage:         "Minimum Cold Damage",
+		stat.ColdMaxDamage:         "Maximum Cold Damage",
+		stat.MagicMinDamage:        "Minimum Magic Damage",
+		stat.MagicMaxDamage:        "Maximum Magic Damage",
+		stat.PoisonMinDamage:       "Minimum Poison Damage",
+		stat.PoisonMaxDamage:       "Maximum Poison Damage",
+		stat.PoisonLength:          "Poison Duration",
+
+		// Resistances
+		stat.FireResist:            "Fire Resist",
+		stat.ColdResist:            "Cold Resist",
+		stat.LightningResist:       "Lightning Resist",
+		stat.PoisonResist:          "Poison Resist",
+		stat.MaxFireResist:         "Max Fire Resist",
+		stat.MaxColdResist:         "Max Cold Resist",
+		stat.MaxLightningResist:    "Max Lightning Resist",
+		stat.MaxPoisonResist:       "Max Poison Resist",
+
+		// MF, GF, speeds
+		stat.MagicFind:             "Magic Find",
+		stat.GoldFind:              "Gold Find",
+		stat.FasterCastRate:        "Faster Cast Rate",
+		stat.FasterHitRecovery:     "Faster Hit Recovery",
+		stat.FasterRunWalk:         "Faster Run/Walk",
+		stat.FasterBlockRate:       "Faster Block Rate",
+		stat.IncreasedAttackSpeed:  "Increased Attack Speed",
+
+		// Leech & recovery
+		stat.LifeSteal:             "Life Steal",
+		stat.ManaSteal:             "Mana Steal",
+		stat.ReplenishLife:         "Replenish Life",
+		stat.ManaRecovery:          "Regenerate Mana",
+		stat.LifeAfterEachKill:     "Life After Each Kill",
+		stat.ManaAfterKill:         "Mana After Each Kill",
+
+		// Durability
+		stat.Durability:            "Durability",
+		stat.MaxDurability:         "Max Durability",
+		stat.Indestructible:        "Indestructible",
+
+		// Skills
+		stat.AllSkills:             "All Skills",
+		stat.AddClassSkills:        "Class Skills",
+		stat.NonClassSkill:         "Non-Class Skill",
+		stat.SingleSkill:           "Single Skill",
+		stat.AddSkillTab:           "Skill Tab",
+
+		// Combat
+		stat.CrushingBlow:          "Crushing Blow",
+		stat.OpenWounds:            "Open Wounds",
+		stat.DeadlyStrike:          "Deadly Strike",
+		stat.SlowsTarget:           "Slows Target",
+		stat.HitBlindsTarget:       "Hit Blinds Target",
+		stat.HitCausesMonsterToFlee: "Hit Causes Monster to Flee",
+		stat.PreventMonsterHeal:    "Prevent Monster Heal",
+		stat.Knockback:             "Knockback",
+		stat.FreezesTarget:         "Freezes Target",
+		stat.Pierce:                "Pierce",
+		stat.IgnoreTargetsDefense:  "Ignore Target's Defense",
+
+		// Absorb
+		stat.AbsorbFire:            "Fire Absorb",
+		stat.AbsorbFirePercent:     "Fire Absorb Percent",
+		stat.AbsorbLightning:       "Lightning Absorb",
+		stat.AbsorbLightningPercent: "Lightning Absorb Percent",
+		stat.AbsorbCold:            "Cold Absorb",
+		stat.AbsorbColdPercent:     "Cold Absorb Percent",
+		stat.AbsorbMagic:           "Magic Absorb",
+		stat.AbsorbMagicPercent:    "Magic Absorb Percent",
+
+		// Misc
+		stat.Requirements:          "Requirements",
+		stat.LevelRequire:          "Required Level",
+		stat.AttackerTakesDamage:   "Attacker Takes Damage",
+		stat.AttackRatingPercent:   "Attack Rating Percent",
+		stat.LightRadius:           "Light Radius",
+		stat.DamageTakenGoesToMana: "Damage Taken Goes To Mana",
+		stat.HalfFreezeDuration:    "Half Freeze Duration",
+		stat.CannotBeFrozen:        "Cannot Be Frozen",
+		stat.PoisonLengthReduced:   "Poison Length Reduced",
+		stat.NumSockets:            "Sockets",
+		stat.DemonDamagePercent:    "Damage to Demons",
+		stat.UndeadDamagePercent:   "Damage to Undead",
+		stat.DemonAttackRating:     "Attack Rating vs Demons",
+		stat.UndeadAttackRating:    "Attack Rating vs Undead",
+
+		// Per-level
+		stat.LifePerLevel:          "Life Per Level",
+		stat.ManaPerLevel:          "Mana Per Level",
+		stat.DefensePerLevel:       "Defense Per Level",
+		stat.AttackRatingPerLevel:  "Attack Rating Per Level",
+
+		// Charged skills
+		stat.ItemChargedSkill:      "Charged Skill",
+		stat.SkillOnAttack:         "Skill On Attack",
+		stat.SkillOnHit:            "Skill On Hit",
+		stat.SkillOnGetHit:         "Skill On Get Hit",
+		stat.SkillOnKill:           "Skill On Kill",
+
+		// Fire skills bonus (Sorceress)
+		stat.FireSkills:            "Fire Skills",
 	}
 
 	if name, ok := names[id]; ok {

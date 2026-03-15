@@ -2022,6 +2022,10 @@
         <div class="context-menu-item" onclick="copyItemName()">
             <i class="bi bi-type"></i> Copy Item Name
         </div>
+        <div style="border-top: 1px solid #444; margin: 4px 0;"></div>
+        <div class="context-menu-item" onclick="event.stopPropagation(); openTraderieModal();">
+            <i class="bi bi-shop"></i> List on Traderie
+        </div>
     </div>
 
     <!-- Keyboard Shortcuts Help -->
@@ -2064,6 +2068,124 @@
                 <button class="btn-drop-confirm" id="dropConfirmBtn" onclick="executeDropRequest()">
                     <i class="bi bi-send"></i> Drop Now
                 </button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Traderie Listing Modal -->
+    <div class="drop-modal-overlay" id="traderieModalOverlay" onclick="closeTraderieModalOnOverlay(event)">
+        <div class="drop-modal" style="max-width: 550px; max-height: 85vh; overflow-y: auto;">
+            <h3><i class="bi bi-shop"></i> List on Traderie</h3>
+
+            <!-- Auth Setup (shown when token not configured) -->
+            <div id="traderieCookieSetup" style="display: none;">
+                <p style="color: #ff6b6b; font-size: 13px; margin-bottom: 12px;">
+                    Traderie nie skonfigurowane. Wklej dane logowania poniżej.
+                </p>
+                <div style="margin-bottom: 10px;">
+                    <label style="font-size: 12px; color: #888; display: block; margin-bottom: 4px;">JWT Token (z nagłówka Authorization w DevTools)</label>
+                    <p style="color: #666; font-size: 11px; margin-bottom: 4px;">F12 → Network → kliknij request do traderie.com/api → Headers → Authorization: Bearer <strong>TEN_TOKEN</strong></p>
+                    <textarea id="traderieTokenInput" rows="3" style="width: 100%; background: rgba(0,0,0,0.3); border: 1px solid #444; color: #fff; padding: 8px; border-radius: 4px; font-size: 11px; word-break: break-all;" placeholder="eyJhbGciOiJIUzI1NiIs..."></textarea>
+                </div>
+                <div style="margin-bottom: 10px;">
+                    <label style="font-size: 12px; color: #888; display: block; margin-bottom: 4px;">cf_clearance cookie (opcjonalne)</label>
+                    <p style="color: #666; font-size: 11px; margin-bottom: 4px;">F12 → Application → Cookies → traderie.com → cf_clearance</p>
+                    <input type="text" id="traderieCfInput" style="width: 100%; background: rgba(0,0,0,0.3); border: 1px solid #444; color: #fff; padding: 8px; border-radius: 4px; font-size: 11px;" placeholder="5SzGUzlY...">
+                </div>
+                <div style="margin-top: 8px; display: flex; gap: 8px;">
+                    <button onclick="saveTraderieAuth()" style="padding: 6px 16px; background: #4a9eff; color: #fff; border: none; border-radius: 4px; cursor: pointer;">Zapisz</button>
+                    <button onclick="closeTraderieModal()" style="padding: 6px 16px; background: #444; color: #fff; border: none; border-radius: 4px; cursor: pointer;">Anuluj</button>
+                </div>
+            </div>
+
+            <!-- Listing Form (shown when cookies are configured) -->
+            <div id="traderieListingForm" style="display: none;">
+                <!-- Item Info -->
+                <div id="traderieItemInfo" style="display: flex; align-items: center; gap: 12px; margin-bottom: 16px; padding: 10px; background: rgba(0,0,0,0.3); border-radius: 6px;">
+                    <div id="traderieItemImg" style="width: 48px; height: 48px; background-size: contain; background-repeat: no-repeat; background-position: center;"></div>
+                    <div>
+                        <div id="traderieItemName" style="font-size: 16px; font-weight: bold;"></div>
+                        <div id="traderieItemType" style="font-size: 12px; color: #888;"></div>
+                    </div>
+                </div>
+
+                <!-- Traderie Search Status -->
+                <div id="traderieSearchStatus" style="color: #888; font-size: 13px; margin-bottom: 12px;">
+                    <i class="bi bi-hourglass-split"></i> Searching Traderie...
+                </div>
+
+                <!-- Properties (auto-filled from item stats) -->
+                <div id="traderieProperties" style="margin-bottom: 16px;"></div>
+
+                <!-- Global Properties (Platform, Mode, Ladder, Game Version) -->
+                <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-bottom: 16px;">
+                    <div>
+                        <label style="font-size: 12px; color: #888;">Platform</label>
+                        <select id="traderiePlatform" style="width: 100%; padding: 6px; background: rgba(0,0,0,0.3); border: 1px solid #444; color: #fff; border-radius: 4px;">
+                            <option value="PC" selected>PC</option>
+                            <option value="switch">Switch</option>
+                            <option value="playstation">PlayStation</option>
+                            <option value="xbox">Xbox</option>
+                        </select>
+                    </div>
+                    <div>
+                        <label style="font-size: 12px; color: #888;">Mode</label>
+                        <select id="traderieMode" style="width: 100%; padding: 6px; background: rgba(0,0,0,0.3); border: 1px solid #444; color: #fff; border-radius: 4px;">
+                            <option value="softcore" selected>Softcore</option>
+                            <option value="hardcore">Hardcore</option>
+                        </select>
+                    </div>
+                    <div>
+                        <label style="font-size: 12px; color: #888;">Ladder</label>
+                        <select id="traderieLadder" style="width: 100%; padding: 6px; background: rgba(0,0,0,0.3); border: 1px solid #444; color: #fff; border-radius: 4px;">
+                            <option value="true" selected>Ladder</option>
+                            <option value="false">Non Ladder</option>
+                        </select>
+                    </div>
+                    <div>
+                        <label style="font-size: 12px; color: #888;">Game Version</label>
+                        <select id="traderieGameVersion" style="width: 100%; padding: 6px; background: rgba(0,0,0,0.3); border: 1px solid #444; color: #fff; border-radius: 4px;">
+                            <option value="reign of the warlock" selected>Reign of the Warlock</option>
+                            <option value="lord of destruction">Lord of Destruction</option>
+                            <option value="classic">Classic</option>
+                        </select>
+                    </div>
+                </div>
+
+                <!-- Listing Type -->
+                <div style="margin-bottom: 16px;">
+                    <label style="font-size: 12px; color: #888;">Listing Type</label>
+                    <div style="display: flex; gap: 12px; margin-top: 4px;">
+                        <label style="display: flex; align-items: center; gap: 4px; cursor: pointer;">
+                            <input type="radio" name="traderieListingType" value="offer" checked onchange="toggleTraderiePrice()"> Make Offer
+                        </label>
+                        <label style="display: flex; align-items: center; gap: 4px; cursor: pointer;">
+                            <input type="radio" name="traderieListingType" value="price" onchange="toggleTraderiePrice()"> Set Price
+                        </label>
+                    </div>
+                </div>
+
+                <!-- Price Input (hidden by default) -->
+                <div id="traderiePriceSection" style="display: none; margin-bottom: 16px;">
+                    <label style="font-size: 12px; color: #888;">Price (runes/items)</label>
+                    <input type="text" id="traderiePrice" placeholder="e.g. Vex, 2 Ist" style="width: 100%; padding: 6px; background: rgba(0,0,0,0.3); border: 1px solid #444; color: #fff; border-radius: 4px;">
+                </div>
+
+                <!-- Current Listings Info -->
+                <div id="traderieAvgPrice" style="margin-bottom: 16px; padding: 8px; background: rgba(74, 158, 255, 0.1); border: 1px solid rgba(74, 158, 255, 0.3); border-radius: 4px; font-size: 13px; display: none;">
+                    <i class="bi bi-graph-up"></i> <span id="traderieAvgPriceText"></span>
+                </div>
+
+                <!-- Actions -->
+                <div class="drop-modal-actions">
+                    <button class="btn-drop-cancel" onclick="closeTraderieModal()">Cancel</button>
+                    <button class="btn-drop-confirm" id="traderieSubmitBtn" onclick="submitTraderieListing()" disabled>
+                        <i class="bi bi-shop"></i> Create Listing
+                    </button>
+                </div>
+
+                <!-- Result -->
+                <div id="traderieResult" style="display: none; margin-top: 12px; padding: 8px; border-radius: 4px; font-size: 13px;"></div>
             </div>
         </div>
     </div>
@@ -3559,6 +3681,616 @@
                 renderDLCTabs(window._dlcArmoryData);
             }
         })();
+
+        // ===================== Traderie Listing Integration =====================
+        let traderieItemData = null;       // Current armory item JSON
+        let traderieSearchResult = null;   // Traderie item search result
+        let traderieCookiesOk = false;
+
+        function closeTraderieModal() {
+            document.getElementById('traderieModalOverlay').classList.remove('visible');
+        }
+
+        function closeTraderieModalOnOverlay(event) {
+            if (event.target === event.currentTarget) closeTraderieModal();
+        }
+
+        function toggleTraderiePrice() {
+            const isPrice = document.querySelector('input[name="traderieListingType"][value="price"]').checked;
+            document.getElementById('traderiePriceSection').style.display = isPrice ? 'block' : 'none';
+        }
+
+        async function openTraderieModal() {
+            // Save target before hideContextMenu clears it (document click event)
+            const target = contextMenuTarget;
+            console.log('openTraderieModal called, target:', target);
+            if (!target) {
+                console.log('No contextMenuTarget, aborting');
+                return;
+            }
+            hideContextMenu();
+
+            traderieItemData = JSON.parse(target.dataset.item || '{}');
+            console.log('Item data:', traderieItemData.name || traderieItemData.identifiedName);
+            if (!traderieItemData.name && !traderieItemData.identifiedName) {
+                alert('No item data available');
+                return;
+            }
+
+            const overlay = document.getElementById('traderieModalOverlay');
+            overlay.classList.add('visible');
+
+            // Check cookie status
+            try {
+                const statusResp = await fetch('/api/traderie/status');
+                const status = await statusResp.json();
+                traderieCookiesOk = status.configured;
+            } catch(e) {
+                traderieCookiesOk = false;
+            }
+
+            if (!traderieCookiesOk) {
+                document.getElementById('traderieCookieSetup').style.display = 'block';
+                document.getElementById('traderieListingForm').style.display = 'none';
+                return;
+            }
+
+            showTraderieListingForm();
+        }
+
+        async function saveTraderieAuth() {
+            const token = document.getElementById('traderieTokenInput').value.trim();
+            if (!token) { alert('Wklej JWT token!'); return; }
+            // Strip "Bearer " prefix if user pasted the full header value
+            const cleanToken = token.replace(/^Bearer\s+/i, '');
+            const cfClearance = (document.getElementById('traderieCfInput').value || '').trim();
+
+            try {
+                const resp = await fetch('/api/traderie/cookies', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({token: cleanToken, cfClearance: cfClearance})
+                });
+                const result = await resp.json();
+                if (result.success) {
+                    traderieCookiesOk = true;
+                    document.getElementById('traderieCookieSetup').style.display = 'none';
+                    showTraderieListingForm();
+                }
+            } catch(e) {
+                alert('Nie udało się zapisać: ' + e.message);
+            }
+        }
+
+        async function traderieSearch(query) {
+            const resp = await fetch('/api/traderie/search?q=' + encodeURIComponent(query));
+            const text = await resp.text();
+            try { return JSON.parse(text); } catch(e) { return {error: 'Traderie zwróciło nieprawidłową odpowiedź'}; }
+        }
+
+        // Convert PascalCase d2go name to human-readable
+        function pascalToReadable(name) {
+            if (!name || name.includes(' ')) return name || '';
+            return name.replace(/([a-z])([A-Z])/g, '$1 $2').replace(/([A-Z]+)([A-Z][a-z])/g, '$1 $2');
+        }
+
+        async function showTraderieListingForm() {
+            document.getElementById('traderieListingForm').style.display = 'block';
+            document.getElementById('traderieCookieSetup').style.display = 'none';
+
+            const quality = traderieItemData.quality || '';
+            const isRare = quality.toLowerCase() === 'rare';
+            const isMagic = quality.toLowerCase() === 'magic';
+
+            // For rare/magic items, search by BASE type name (Ring, Amulet, etc.)
+            // For unique/set items, search by identified name
+            let rawName;
+            if (isRare || isMagic) {
+                rawName = traderieItemData.name || '';
+            } else {
+                rawName = traderieItemData.identifiedName || traderieItemData.name || '';
+            }
+            const itemName = pascalToReadable(rawName);
+
+            // Set item display — for rare/magic show identified name too
+            const displayName = (isRare || isMagic) && traderieItemData.identifiedName
+                ? traderieItemData.identifiedName + ' (' + itemName + ')'
+                : itemName;
+            document.getElementById('traderieItemName').textContent = displayName;
+            document.getElementById('traderieItemName').className = 'item-quality-' + quality.toLowerCase();
+            document.getElementById('traderieItemType').textContent = quality;
+
+            if (traderieItemData.imageName) {
+                document.getElementById('traderieItemImg').style.backgroundImage = "url('/items/" + traderieItemData.imageName + "')";
+            }
+
+            // Reset
+            document.getElementById('traderieProperties').innerHTML = '';
+            document.getElementById('traderieSearchStatus').style.display = 'block';
+            document.getElementById('traderieSearchStatus').innerHTML = '<i class="bi bi-hourglass-split"></i> Searching Traderie for "' + itemName + '"...';
+            document.getElementById('traderieSubmitBtn').disabled = true;
+            document.getElementById('traderieResult').style.display = 'none';
+            document.getElementById('traderieAvgPrice').style.display = 'none';
+
+            // Search Traderie for the item - try multiple name variants
+            try {
+                let data = await traderieSearch(itemName);
+
+                // If not found, try adding apostrophes (Rashas → Rasha's, Tyraels → Tyrael's, etc.)
+                if ((!data.items || data.items.length === 0) && !data.error) {
+                    const withApostrophe = itemName.replace(/([a-zA-Z])s\b/g, "$1's");
+                    if (withApostrophe !== itemName) {
+                        document.getElementById('traderieSearchStatus').innerHTML =
+                            '<i class="bi bi-hourglass-split"></i> Szukam "' + withApostrophe + '"...';
+                        data = await traderieSearch(withApostrophe);
+                    }
+                }
+
+                // Still not found? Try just first 2 words (e.g. "Tal Rasha" from "Tal Rashas Guardianship")
+                if ((!data.items || data.items.length === 0) && !data.error) {
+                    const words = itemName.split(' ');
+                    if (words.length >= 2) {
+                        const shortName = words.slice(0, 2).join(' ');
+                        document.getElementById('traderieSearchStatus').innerHTML =
+                            '<i class="bi bi-hourglass-split"></i> Szukam "' + shortName + '"...';
+                        data = await traderieSearch(shortName);
+                    }
+                }
+
+                if (data.error) {
+                    document.getElementById('traderieSearchStatus').innerHTML =
+                        '<i class="bi bi-x-circle" style="color: #ff6b6b;"></i> ' + data.error;
+                    return;
+                }
+
+                if (data.items && data.items.length > 0) {
+                    // Find best match based on quality
+                    let match;
+                    if (isRare || isMagic) {
+                        // For rare/magic, prefer misc/rares/crafted type with exact name
+                        match = data.items.find(i => i.name.toLowerCase() === itemName.toLowerCase() &&
+                            ['misc','rares','crafted','magic','base'].includes(i.type));
+                        if (!match) match = data.items.find(i => i.name.toLowerCase() === itemName.toLowerCase());
+                    } else {
+                        // For unique/set, prefer uniques/sets type
+                        match = data.items.find(i => i.name.toLowerCase() === itemName.toLowerCase() &&
+                            ['uniques','sets'].includes(i.type));
+                        if (!match) match = data.items.find(i => i.name.toLowerCase() === itemName.toLowerCase());
+                    }
+                    traderieSearchResult = match || data.items[0];
+
+                    document.getElementById('traderieSearchStatus').innerHTML =
+                        '<i class="bi bi-check-circle" style="color: #4caf50;"></i> Found: <strong>' + traderieSearchResult.name + '</strong> (' + traderieSearchResult.type + ')';
+
+                    // Build property inputs from Traderie item properties
+                    buildTraderieProperties(traderieSearchResult.properties || []);
+                    document.getElementById('traderieSubmitBtn').disabled = false;
+
+                    // Fetch listings for price info
+                    fetchTraderieListings(traderieSearchResult.id);
+                } else {
+                    document.getElementById('traderieSearchStatus').innerHTML =
+                        '<i class="bi bi-x-circle" style="color: #ff6b6b;"></i> Item not found on Traderie';
+                }
+            } catch(e) {
+                document.getElementById('traderieSearchStatus').innerHTML =
+                    '<i class="bi bi-x-circle" style="color: #ff6b6b;"></i> Search failed: ' + e.message;
+            }
+        }
+
+        function buildTraderieProperties(properties) {
+            const container = document.getElementById('traderieProperties');
+            container.innerHTML = '';
+
+            // Filter out global properties (Platform, Mode, Ladder, Game version) - handled separately
+            const globalProps = ['Platform', 'Mode', 'Ladder', 'Game version'];
+            const itemProps = properties.filter(p => !globalProps.includes(p.property) && !p.property.includes('Unidentified'));
+
+            if (itemProps.length === 0) return;
+
+            const header = document.createElement('div');
+            header.style.cssText = 'font-size: 12px; color: #888; margin-bottom: 8px;';
+            header.textContent = 'Item Properties (auto-filled from armory)';
+            container.appendChild(header);
+
+            const grid = document.createElement('div');
+            grid.style.cssText = 'display: grid; grid-template-columns: 1fr 1fr; gap: 6px;';
+
+            itemProps.forEach(prop => {
+                const div = document.createElement('div');
+                const label = document.createElement('label');
+                label.style.cssText = 'font-size: 11px; color: #888; display: block;';
+                label.textContent = prop.property.replace('{'+'{value}'+'}', '').replace('+', '').trim();
+
+                if (prop.type === 'number') {
+                    const input = document.createElement('input');
+                    input.type = 'number';
+                    input.className = 'traderie-prop-input';
+                    input.dataset.propId = prop.id || prop.property_id;
+                    input.dataset.propName = prop.property;
+                    input.dataset.propType = 'number';
+                    input.style.cssText = 'width: 100%; padding: 4px 6px; background: rgba(0,0,0,0.3); border: 1px solid #444; color: #fff; border-radius: 4px; font-size: 12px;';
+
+                    // Try to auto-fill from armory item stats
+                    const autoVal = matchArmoryStatToTraderieProp(prop);
+                    input.value = autoVal !== null ? autoVal : (prop.default_value || '');
+
+                    div.appendChild(label);
+                    div.appendChild(input);
+                } else if (prop.type === 'bool') {
+                    const checkbox = document.createElement('input');
+                    checkbox.type = 'checkbox';
+                    checkbox.className = 'traderie-prop-input';
+                    checkbox.dataset.propId = prop.id || prop.property_id;
+                    checkbox.dataset.propName = prop.property;
+                    checkbox.dataset.propType = 'bool';
+                    checkbox.style.cssText = 'margin-right: 6px;';
+
+                    // Auto-fill ethereal
+                    if (prop.property === 'Ethereal' && traderieItemData.ethereal) {
+                        checkbox.checked = true;
+                    }
+
+                    const wrapper = document.createElement('div');
+                    wrapper.style.cssText = 'display: flex; align-items: center; padding-top: 4px;';
+                    wrapper.appendChild(checkbox);
+                    wrapper.appendChild(label);
+                    div.appendChild(wrapper);
+                } else if (prop.type === 'array' && prop.property === 'Sockets') {
+                    // Skip sockets for now - complex
+                    return;
+                } else {
+                    return;
+                }
+
+                grid.appendChild(div);
+            });
+
+            container.appendChild(grid);
+        }
+
+        // Map armory item stats (array of {name, value, string, layer}) to Traderie property values
+        function matchArmoryStatToTraderieProp(prop) {
+            if (!traderieItemData) return null;
+            const stats = traderieItemData.stats || [];
+            const propLower = prop.property.toLowerCase();
+
+            // Defense field (direct on item, not in stats array)
+            if (prop.property === 'Defense' || prop.property === '+' + '{'+'{value}'+'}' + ' Defense') {
+                return traderieItemData.defense || null;
+            }
+
+            // Special: All Resistances = common value of fire/cold/light/poison resist
+            if (propLower.includes('all resistances')) {
+                const resists = ['Fire Resist', 'Cold Resist', 'Lightning Resist', 'Poison Resist'];
+                const vals = resists.map(r => {
+                    const s = stats.find(st => st.name === r);
+                    return s ? s.value : null;
+                }).filter(v => v !== null);
+                if (vals.length > 0) return Math.min(...vals);
+            }
+
+            // Special: All Attributes = common value of str/dex/vit/energy
+            if (propLower.includes('all attributes')) {
+                const attrs = ['Strength', 'Dexterity', 'Vitality', 'Energy'];
+                const vals = attrs.map(a => {
+                    const s = stats.find(st => st.name === a);
+                    return s ? s.value : null;
+                }).filter(v => v !== null);
+                if (vals.length > 0) return Math.min(...vals);
+            }
+
+            // Helper: check stat name matches (handles old Stat_83/Stat_107/Stat_188/Stat_97 from cached armory.json)
+            function isClassSkillStat(s) { return s.name === 'Class Skills' || s.name === 'Stat_83'; }
+            function isSingleSkillStat(s) { return s.name === 'Single Skill' || s.name === 'Stat_107' || s.name === 'Non-Class Skill' || s.name === 'Stat_97'; }
+            function isSkillTabStat(s) { return s.name === 'Skill Tab' || s.name === 'Stat_188'; }
+
+            // Class Skills: Traderie prop like "+{value} to Sorceress Skill Levels"
+            // Armory stat: {name: "Class Skills", value: 2, string: "+2 to Sorceress Skill Levels"}
+            const classSkillMatch = propLower.match(/to (\w+) skill/);
+            if (classSkillMatch && (propLower.includes('skill levels') || propLower.includes('skills'))) {
+                const className = classSkillMatch[1].toLowerCase();
+                if (['amazon','sorceress','necromancer','paladin','barbarian','druid','assassin','warlock'].includes(className)) {
+                    const found = stats.find(s =>
+                        isClassSkillStat(s) && s.string && s.string.toLowerCase().includes(className)
+                    );
+                    if (found) return found.value;
+                }
+            }
+
+            // Skill Tab: Traderie prop like "+{value} to Lightning Skills (Sorceress only)"
+            // Armory stat: {name: "Skill Tab"/"Stat_188", value: 3, string: "+3 to Lightning Skills (Sorceress only)"}
+            const skillTabMatch = propLower.match(/to (.+?) skills\s*\(/);
+            if (skillTabMatch) {
+                const tabName = skillTabMatch[1].trim().toLowerCase();
+                const found = stats.find(s =>
+                    isSkillTabStat(s) && s.string && s.string.toLowerCase().includes(tabName)
+                );
+                if (found) return found.value;
+            }
+
+            // Single Skill: Traderie prop like "+{value} to Lightning"
+            // Armory stat: {name: "Single Skill"/"Stat_107", value: 3, string: "+3 to Lightning (Sorceress only)"}
+            const singleSkillMatch = propLower.match(/to ([a-z ]+?)(?:\s*\(|$)/);
+            if (singleSkillMatch && !propLower.includes('skills')) {
+                const skillName = singleSkillMatch[1].trim().toLowerCase();
+                if (skillName.length > 2) {
+                    const found = stats.find(s =>
+                        isSingleSkillStat(s) && s.string && s.string.toLowerCase().includes(skillName)
+                    );
+                    if (found) return found.value;
+                }
+            }
+
+            // Traderie prop name → armory stat name mapping (comprehensive)
+            const propToStat = {
+                // Core attributes
+                'to strength': 'Strength',
+                'to energy': 'Energy',
+                'to dexterity': 'Dexterity',
+                'to vitality': 'Vitality',
+                'to life': 'Max Life',
+                'to mana': 'Max Mana',
+                'maximum stamina': 'Maximum Stamina',
+                'to all attributes': null, // special: check string
+
+                // Defense
+                'enhanced defense': 'Enhanced Defense',
+
+                // Damage
+                'enhanced damage': 'Enhanced Damage',
+                'to minimum damage': 'Min Damage',
+                'to maximum damage': 'Max Damage',
+                'to attack rating': 'Attack Rating',
+                'bonus to attack rating': 'Attack Rating Percent',
+                'chance to block': 'Chance to Block',
+
+                // Elemental damage
+                'minimum fire damage': 'Minimum Fire Damage',
+                'maximum fire damage': 'Maximum Fire Damage',
+                'minimum lightning damage': 'Minimum Lightning Damage',
+                'maximum lightning damage': 'Maximum Lightning Damage',
+                'minimum cold damage': 'Minimum Cold Damage',
+                'maximum cold damage': 'Maximum Cold Damage',
+                'minimum poison damage': 'Minimum Poison Damage',
+                'maximum poison damage': 'Maximum Poison Damage',
+
+                // Resistances
+                'fire resist': 'Fire Resist',
+                'cold resist': 'Cold Resist',
+                'lightning resist': 'Lightning Resist',
+                'poison resist': 'Poison Resist',
+                'all resistances': null, // special: check multiple resist stats
+                'to maximum resistances': null,
+
+                // MF, GF, speeds
+                'better chance of getting magic items': 'Magic Find',
+                'extra gold from monsters': 'Gold Find',
+                'faster cast rate': 'Faster Cast Rate',
+                'faster hit recovery': 'Faster Hit Recovery',
+                'faster run': 'Faster Run/Walk',
+                'faster block rate': 'Faster Block Rate',
+                'increased attack speed': 'Increased Attack Speed',
+
+                // Leech & recovery
+                'life stolen per hit': 'Life Steal',
+                'mana stolen per hit': 'Mana Steal',
+                'replenish life': 'Replenish Life',
+                'regenerate mana': 'Regenerate Mana',
+                'to life after each kill': 'Life After Each Kill',
+                'to mana after each kill': 'Mana After Each Kill',
+
+                // Damage reduction
+                'damage reduced by': 'Damage Reduced',
+                'magic damage reduced by': 'Magic Damage Reduction',
+                'physical damage reduced': 'Physical Damage Reduction',
+
+                // Combat
+                'crushing blow': 'Crushing Blow',
+                'open wounds': 'Open Wounds',
+                'deadly strike': 'Deadly Strike',
+                'slows target': 'Slows Target',
+                'hit blinds target': 'Hit Blinds Target',
+                'hit causes monster to flee': 'Hit Causes Monster to Flee',
+                'prevent monster heal': 'Prevent Monster Heal',
+                'knockback': 'Knockback',
+                'ignore target': "Ignore Target's Defense",
+                'attacker takes damage': 'Attacker Takes Damage',
+                'damage taken goes to mana': 'Damage Taken Goes To Mana',
+                'poison length reduced': 'Poison Length Reduced',
+
+                // Absorb
+                'fire absorb': 'Fire Absorb',
+                'lightning absorb': 'Lightning Absorb',
+                'cold absorb': 'Cold Absorb',
+                'magic absorb': 'Magic Absorb',
+
+                // Damage vs type
+                'damage to demons': 'Damage to Demons',
+                'damage to undead': 'Damage to Undead',
+                'attack rating against demons': 'Attack Rating vs Demons',
+                'attack rating against undead': 'Attack Rating vs Undead',
+
+                // Misc
+                'to light radius': 'Light Radius',
+                'all skills': 'All Skills',
+            };
+
+            // Try mapping first
+            for (const [pattern, statName] of Object.entries(propToStat)) {
+                if (propLower.includes(pattern)) {
+                    const found = stats.find(s => s.name === statName);
+                    if (found) return found.value;
+                }
+            }
+
+            // Fuzzy match via stat.String() — check if the Traderie property text
+            // appears in any stat's display string (handles edge cases)
+            const propClean = propLower.replace(/[{]+value[}]+/g, '').replace(/[+]/g, '').trim();
+            if (propClean.length > 3) {
+                for (const s of stats) {
+                    if (s.string && s.string.toLowerCase().includes(propClean)) {
+                        return s.value;
+                    }
+                }
+            }
+
+            // Fuzzy match by stat name
+            for (const s of stats) {
+                if (s.name && propLower.includes(s.name.toLowerCase())) {
+                    return s.value;
+                }
+            }
+
+            return null;
+        }
+
+        async function fetchTraderieListings(itemId) {
+            try {
+                const resp = await fetch('/api/traderie/listings?item=' + itemId);
+                const text = await resp.text();
+                let data;
+                try { data = JSON.parse(text); } catch(e) { return; }
+                if (data.error || !data.listings || data.listings.length === 0) return;
+
+                // Extract prices from listings
+                const priceCounts = {};
+                let makeOfferCount = 0;
+                let withPriceCount = 0;
+
+                for (const listing of data.listings) {
+                    if (!listing.prices || listing.prices.length === 0) {
+                        if (listing.make_offer) makeOfferCount++;
+                        continue;
+                    }
+                    withPriceCount++;
+                    const priceStr = listing.prices
+                        .map(p => (p.quantity > 1 ? p.quantity + 'x ' : '') + p.name.replace(' Rune', ''))
+                        .join(' + ');
+                    priceCounts[priceStr] = (priceCounts[priceStr] || 0) + 1;
+                }
+
+                // Sort by frequency
+                const sorted = Object.entries(priceCounts).sort((a, b) => b[1] - a[1]);
+
+                const priceDiv = document.getElementById('traderieAvgPrice');
+                priceDiv.style.display = 'block';
+
+                let html = '<i class="bi bi-graph-up"></i> <strong>' + data.listings.length + ' listingów</strong> na Traderie';
+                if (sorted.length > 0) {
+                    html += '<br><span style="color: #4caf50; font-size: 14px; font-weight: bold;">Najczęstsza cena: ' + sorted[0][0] + '</span> (' + sorted[0][1] + 'x)';
+                    if (sorted.length > 1) {
+                        html += '<br><span style="font-size: 12px; color: #aaa;">Inne ceny: ';
+                        html += sorted.slice(1, 5).map(([price, count]) => price + ' (' + count + 'x)').join(', ');
+                        html += '</span>';
+                    }
+                }
+                if (makeOfferCount > 0) {
+                    html += '<br><span style="font-size: 11px; color: #888;">' + makeOfferCount + ' listingów "Make Offer"</span>';
+                }
+
+                document.getElementById('traderieAvgPriceText').innerHTML = html;
+            } catch(e) {
+                console.error('Fetch listings error:', e);
+            }
+        }
+
+        async function submitTraderieListing() {
+            if (!traderieSearchResult) return;
+
+            const btn = document.getElementById('traderieSubmitBtn');
+            btn.disabled = true;
+            btn.innerHTML = '<i class="bi bi-hourglass-split"></i> Creating...';
+
+            // Collect properties
+            const properties = [];
+
+            // Global properties
+            properties.push({
+                id: 798, property: 'Platform',
+                option: document.getElementById('traderiePlatform').value,
+                type: 'string', preferred: true
+            });
+            properties.push({
+                id: 799, property: 'Mode',
+                option: document.getElementById('traderieMode').value,
+                type: 'string', preferred: true
+            });
+            properties.push({
+                id: 800, property: 'Ladder',
+                option: document.getElementById('traderieLadder').value === 'true',
+                type: 'bool', preferred: true
+            });
+            properties.push({
+                id: 1854, property: 'Game version',
+                option: document.getElementById('traderieGameVersion').value,
+                type: 'string', preferred: true
+            });
+
+            // Item-specific properties
+            document.querySelectorAll('.traderie-prop-input').forEach(input => {
+                const propId = parseInt(input.dataset.propId);
+                const propName = input.dataset.propName;
+                const propType = input.dataset.propType;
+
+                if (propType === 'number' && input.value) {
+                    properties.push({
+                        id: propId, property: propName,
+                        option: parseFloat(input.value),
+                        type: 'number'
+                    });
+                } else if (propType === 'bool' && input.checked) {
+                    properties.push({
+                        id: propId, property: propName,
+                        option: true,
+                        type: 'bool'
+                    });
+                }
+            });
+
+            const isOffer = document.querySelector('input[name="traderieListingType"][value="offer"]').checked;
+
+            const body = {
+                item: String(traderieSearchResult.id),
+                itemType: traderieSearchResult.type || 'uniques',
+                makeOffer: isOffer,
+                amount: '1',
+                properties: properties
+            };
+
+            try {
+                const resp = await fetch('/api/traderie/create-listing', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify(body)
+                });
+
+                const result = await resp.json();
+                const resultDiv = document.getElementById('traderieResult');
+                resultDiv.style.display = 'block';
+
+                if (result.success) {
+                    resultDiv.style.background = 'rgba(76, 175, 80, 0.2)';
+                    resultDiv.style.border = '1px solid rgba(76, 175, 80, 0.5)';
+                    resultDiv.innerHTML = '<i class="bi bi-check-circle" style="color: #4caf50;"></i> Listing created successfully! ID: ' + result.listing;
+                    btn.innerHTML = '<i class="bi bi-check"></i> Done';
+                } else {
+                    resultDiv.style.background = 'rgba(255, 107, 107, 0.2)';
+                    resultDiv.style.border = '1px solid rgba(255, 107, 107, 0.5)';
+                    resultDiv.innerHTML = '<i class="bi bi-x-circle" style="color: #ff6b6b;"></i> Failed: ' + (result.error || JSON.stringify(result));
+                    btn.disabled = false;
+                    btn.innerHTML = '<i class="bi bi-shop"></i> Retry';
+                }
+            } catch(e) {
+                const resultDiv = document.getElementById('traderieResult');
+                resultDiv.style.display = 'block';
+                resultDiv.style.background = 'rgba(255, 107, 107, 0.2)';
+                resultDiv.style.border = '1px solid rgba(255, 107, 107, 0.5)';
+                resultDiv.innerHTML = '<i class="bi bi-x-circle" style="color: #ff6b6b;"></i> Error: ' + e.message;
+                btn.disabled = false;
+                btn.innerHTML = '<i class="bi bi-shop"></i> Retry';
+            }
+        }
     </script>
 </body>
 </html>

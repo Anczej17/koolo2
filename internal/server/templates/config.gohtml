@@ -586,6 +586,48 @@
                         FlareSolverr bypasses Cloudflare for live prices. Install: <a href="https://github.com/FlareSolverr/FlareSolverr" target="_blank">github.com/FlareSolverr</a>.
                     </small></p>
                 </div>
+                <h4>Traderie integration</h4>
+                <div class="grid">
+                    <label>
+                        JWT Token (z nagłówka Authorization w DevTools)
+                        <div style="display:flex; gap:8px; align-items:center">
+                            <input
+                                    id="traderie_token_input"
+                                    name="traderie_token"
+                                    placeholder="eyJhbGciOiJIUzI1NiIs..."
+                                    value="{{ .Traderie.Token }}"
+                                    style="flex:1"
+                            />
+                            <button type="button" onclick="document.getElementById('traderie_help').style.display = document.getElementById('traderie_help').style.display === 'none' ? 'block' : 'none'" style="white-space:nowrap; padding:6px 12px">
+                                ? Jak zdobyć
+                            </button>
+                        </div>
+                    </label>
+                </div>
+                <div class="grid">
+                    <label>
+                        cf_clearance cookie (opcjonalne)
+                        <input
+                                name="traderie_cf_clearance"
+                                placeholder="5SzGUzlY..."
+                                value="{{ .Traderie.CfClearance }}"
+                        />
+                    </label>
+                </div>
+                <div id="traderie_help" style="display:none; background:var(--bg-tertiary); border:1px solid var(--border-color); border-radius:8px; padding:12px; margin-bottom:12px">
+                    <p style="margin:0 0 8px 0; font-weight:bold; color:var(--accent-yellow)">Jak zdobyć token Traderie:</p>
+                    <ol style="margin:0; padding-left:20px; line-height:1.8">
+                        <li>Otwórz Chrome i wejdź na <a href="https://traderie.com" target="_blank">traderie.com</a></li>
+                        <li>Zaloguj się</li>
+                        <li>Naciśnij <kbd style="background:#444;padding:2px 6px;border-radius:3px">F12</kbd></li>
+                        <li>Kliknij zakładkę <b>Network</b></li>
+                        <li>Na stronie Traderie zrób cokolwiek (np. otwórz swoje listingi)</li>
+                        <li>W Network kliknij na dowolny request do <code>traderie.com/api/...</code></li>
+                        <li>W <b>Request Headers</b> znajdź <code>authorization: Bearer TOKEN</code></li>
+                        <li>Skopiuj <b>TOKEN</b> (bez "Bearer ") i wklej tutaj</li>
+                    </ol>
+                    <p style="margin:8px 0 0 0"><small style="color:var(--text-secondary)">Token może wygasnąć — jeśli listingi przestaną działać, powtórz proces.</small></p>
+                </div>
                 <h4>Telegram integration</h4>
                 <label>
                     <input

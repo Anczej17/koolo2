@@ -81,6 +81,10 @@ type KooloCfg struct {
 		ClaudeModel                  string   `yaml:"claudeModel"`
 		FlareSolverrURL              string   `yaml:"flareSolverrUrl"`
 	} `yaml:"discord"`
+	Traderie struct {
+		Token       string `yaml:"token"`       // JWT Bearer token for Traderie.com (from browser Authorization header)
+		CfClearance string `yaml:"cfClearance"` // Cloudflare cf_clearance cookie value
+	} `yaml:"traderie"`
 	Telegram struct {
 		Enabled bool   `yaml:"enabled"`
 		ChatID  int64  `yaml:"chatId"`
