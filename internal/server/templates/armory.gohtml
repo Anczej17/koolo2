@@ -3912,6 +3912,13 @@
             grid.style.cssText = 'display: grid; grid-template-columns: 1fr 1fr; gap: 6px;';
 
             itemProps.forEach(prop => {
+                // Only show properties that have a matching armory stat value
+                const autoVal = (prop.type === 'number') ? matchArmoryStatToTraderieProp(prop) : null;
+                const autoBool = (prop.type === 'bool' && prop.property === 'Ethereal' && traderieItemData.ethereal);
+
+                if (prop.type === 'number' && autoVal === null) return;
+                if (prop.type === 'bool' && !autoBool) return;
+
                 const div = document.createElement('div');
                 const label = document.createElement('label');
                 label.style.cssText = 'font-size: 11px; color: #888; display: block;';
@@ -3925,10 +3932,7 @@
                     input.dataset.propName = prop.property;
                     input.dataset.propType = 'number';
                     input.style.cssText = 'width: 100%; padding: 4px 6px; background: rgba(0,0,0,0.3); border: 1px solid #444; color: #fff; border-radius: 4px; font-size: 12px;';
-
-                    // Try to auto-fill from armory item stats
-                    const autoVal = matchArmoryStatToTraderieProp(prop);
-                    input.value = autoVal !== null ? autoVal : '';
+                    input.value = autoVal;
 
                     div.appendChild(label);
                     div.appendChild(input);
