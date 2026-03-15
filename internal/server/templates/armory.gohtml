@@ -3928,7 +3928,7 @@
 
                     // Try to auto-fill from armory item stats
                     const autoVal = matchArmoryStatToTraderieProp(prop);
-                    input.value = autoVal !== null ? autoVal : (prop.default_value || '');
+                    input.value = autoVal !== null ? autoVal : '';
 
                     div.appendChild(label);
                     div.appendChild(input);
@@ -4116,10 +4116,12 @@
             };
 
             // Try ordered mapping first (longer patterns checked first)
+            // IMPORTANT: break on first pattern match even if stat not found,
+            // to prevent shorter patterns from matching wrong stats
             for (const [pattern, statName] of propToStat) {
                 if (propLower.includes(pattern)) {
                     const found = stats.find(s => s.name === statName);
-                    if (found) return found.value;
+                    return found ? found.value : null;
                 }
             }
 
@@ -4129,7 +4131,7 @@
             for (const [pattern, statName] of Object.entries(propExact)) {
                 if (propStripped === pattern || propStripped.endsWith(pattern)) {
                     const found = stats.find(s => s.name === statName);
-                    if (found) return found.value;
+                    return found ? found.value : null;
                 }
             }
 
