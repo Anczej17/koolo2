@@ -1001,7 +1001,8 @@ func (s NovaSorceress) KillMonsterSequence(
 		if ctx.CharacterCfg.Character.NovaSorceress.AggressiveNovaPositioning && !isHeraldMonster {
 			hasNearbyEnemy := false
 			for _, m := range enemies { // OPT: use cached enemies
-				if m.Stats[stat.Life] > 0 && gridDistance(playerPos, m.Position) <= NovaSpellRadius {
+				if m.Stats[stat.Life] > 0 && gridDistance(playerPos, m.Position) <= NovaSpellRadius &&
+					ctx.PathFinder.LineOfSight(playerPos, m.Position) {
 					hasNearbyEnemy = true
 					break
 				}
@@ -1044,7 +1045,17 @@ func (s NovaSorceress) KillMonsterSequence(
 
 		if err := step.SecondaryAttack(skill.Nova, monster.UnitID, 1, novaOpts...); err == nil {
 			completedAttackLoops++
-			attackedThisEngagement = true
+
+			// Only mark as "attacked" if monster is actually in Nova range.
+			// burstAttack returns nil even when no target was in range (nothing happened).
+			// Without this check, attackedThisEngagement blocks repositioning and the bot
+			// stands idle until the 15s no-damage timeout kicks in.
+			ctx.RefreshGameData()
+			if m, ok := ctx.Data.Monsters.FindByID(monster.UnitID); ok {
+				if gridDistance(ctx.Data.PlayerUnit.Position, m.Position) <= NovaSpellRadius {
+					attackedThisEngagement = true
+				}
+			}
 		}
 
 		if completedAttackLoops >= NovaMaxAttacksLoop {
