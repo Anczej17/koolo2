@@ -775,9 +775,9 @@ const UI = {
 
     items.push(...getFormattedItems(filter.selectedRunes));
     items.push(...getFormattedItems(filter.selectedGems));
-    items.push(...getFormattedItems(filter.selectedKeyTokens));
+    items.push(...getFormattedItems(filter.selectedKeyTokens)); 
     items.push(...getFormattedItems(filter.selectedMaterials));
-
+    
     if (filter.allowedQualities?.length) {
         const qualityLabels = {
             base: "White",
@@ -835,9 +835,9 @@ const UI = {
 
     const runes = $.getCheckedValues("dm-card-rune-checkboxes");
     const gems = $.getCheckedValues("dm-card-gem-checkboxes");
-    const keyTokens = $.getCheckedValues("dm-card-keytoken-checkboxes");
+    const keyTokens = $.getCheckedValues("dm-card-keytoken-checkboxes"); 
     const materials = $.getCheckedValues("dm-card-material-checkboxes");
-
+    
     [...runes, ...gems, ...keyTokens, ...materials].forEach(item => {
         hasItems = true;
         const qtyText = item.quantity > 0 ? `(${item.quantity})` : "(All)";

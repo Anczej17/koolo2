@@ -296,7 +296,18 @@ func (d Drop) dropStashItems(ctx *context.Status) (int, error) {
 		maxItemRetries = 2
 		maxTotalTime   = 3 * time.Minute
 	)
-	stashTabs := []int{1, 2, 3, 4}
+	// Build stash tabs array dynamically based on SharedStashPages
+	// Non-DLC: personal (1) + 3 shared (2-4) = [1,2,3,4]
+	// DLC: personal (1) + 5 shared (2-6) = [1,2,3,4,5,6]
+	sharedPages := ctx.Data.Inventory.SharedStashPages
+	if sharedPages == 0 {
+		sharedPages = 3 // Fallback
+	}
+	stashTabs := make([]int, 1+sharedPages)
+	stashTabs[0] = 1 // Personal tab
+	for i := 0; i < sharedPages; i++ {
+		stashTabs[i+1] = i + 2 // Shared tabs start at 2
+	}
 	// Append DLC-only tabs (Gems=100, Materials=101, Runes=102)
 	stashTabs = append(stashTabs, action.StashTabGems, action.StashTabMaterials, action.StashTabRunes)
 
@@ -501,11 +512,14 @@ func (d Drop) moveDLCStackToInventory(ctx *context.Status, it data.Item) (data.I
 				break
 			}
 			ctx.RefreshGameData()
+			// dropInventoryDropperables with reopenTab>0 already reopens stash and switches tab
+			// just verify we're on the right tab
 			if err := d.ensureStashTabReady(ctx, dlcTab); err != nil {
 				ctx.Logger.Warn("Drop: failed to reswitch DLC tab after flush", "error", err)
 				break
 			}
 			ctx.RefreshInventory()
+			// Recompute screen pos in case of UI refresh
 			screenPos = ui.GetScreenCoordsForItem(it)
 		}
 
