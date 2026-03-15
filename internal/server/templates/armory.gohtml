@@ -3779,21 +3779,25 @@
             document.getElementById('traderieCookieSetup').style.display = 'none';
 
             const quality = traderieItemData.quality || '';
-            const isRare = quality.toLowerCase() === 'rare';
-            const isMagic = quality.toLowerCase() === 'magic';
+            const qualityLow = quality.toLowerCase();
+            const isRare = qualityLow === 'rare';
+            const isMagic = qualityLow === 'magic';
+            const isCrafted = qualityLow === 'crafted';
+            const isNormal = qualityLow === 'normal' || qualityLow === 'superior';
+            const isBaseSearch = isRare || isMagic || isCrafted || isNormal;
 
-            // For rare/magic items, search by BASE type name (Ring, Amulet, etc.)
+            // For rare/magic/crafted items, search by BASE type name (Ring, Amulet, etc.)
             // For unique/set items, search by identified name
             let rawName;
-            if (isRare || isMagic) {
+            if (isBaseSearch) {
                 rawName = traderieItemData.name || '';
             } else {
                 rawName = traderieItemData.identifiedName || traderieItemData.name || '';
             }
             const itemName = pascalToReadable(rawName);
 
-            // Set item display — for rare/magic show identified name too
-            const displayName = (isRare || isMagic) && traderieItemData.identifiedName
+            // Set item display — for rare/magic/crafted show identified name too
+            const displayName = isBaseSearch && traderieItemData.identifiedName
                 ? traderieItemData.identifiedName + ' (' + itemName + ')'
                 : itemName;
             document.getElementById('traderieItemName').textContent = displayName;
@@ -3846,10 +3850,21 @@
                 if (data.items && data.items.length > 0) {
                     // Find best match based on quality
                     let match;
-                    if (isRare || isMagic) {
-                        // For rare/magic, prefer misc/rares/crafted type with exact name
+                    if (isCrafted) {
+                        // For crafted, prefer crafted type entries
+                        match = data.items.find(i => i.type === 'crafted' && i.name.toLowerCase().includes(itemName.toLowerCase()));
+                        if (!match) match = data.items.find(i => i.name.toLowerCase() === itemName.toLowerCase() &&
+                            ['misc','crafted'].includes(i.type));
+                        if (!match) match = data.items.find(i => i.name.toLowerCase() === itemName.toLowerCase());
+                    } else if (isNormal) {
+                        // For white/superior, prefer base type
                         match = data.items.find(i => i.name.toLowerCase() === itemName.toLowerCase() &&
-                            ['misc','rares','crafted','magic','base'].includes(i.type));
+                            i.type === 'base');
+                        if (!match) match = data.items.find(i => i.name.toLowerCase() === itemName.toLowerCase());
+                    } else if (isRare || isMagic) {
+                        // For rare/magic, prefer misc type with exact name
+                        match = data.items.find(i => i.name.toLowerCase() === itemName.toLowerCase() &&
+                            ['misc','rares','base'].includes(i.type));
                         if (!match) match = data.items.find(i => i.name.toLowerCase() === itemName.toLowerCase());
                     } else {
                         // For unique/set, prefer uniques/sets type
@@ -4022,123 +4037,99 @@
                 }
             }
 
-            // Traderie prop name → armory stat name mapping (comprehensive)
-            const propToStat = {
-                // Core attributes
+            // Exact Traderie property → armory stat name mapping
+            // IMPORTANT: longer/more-specific patterns MUST come first to avoid
+            // partial matches (e.g. "to mana after each kill" before "to mana")
+            const propToStat = [
+                // Specific patterns first (longer strings)
+                ['life after each kill', 'Life After Each Kill'],
+                ['mana after each kill', 'Mana After Each Kill'],
+                ['life stolen per hit', 'Life Steal'],
+                ['mana stolen per hit', 'Mana Steal'],
+                ['better chance of getting magic items', 'Magic Find'],
+                ['extra gold from monsters', 'Gold Find'],
+                ['magic damage reduced by', 'Magic Damage Reduction'],
+                ['damage reduced by', 'Damage Reduced'],
+                ['hit causes monster to flee', 'Hit Causes Monster to Flee'],
+                ['hit blinds target', 'Hit Blinds Target'],
+                ['damage taken goes to mana', 'Damage Taken Goes To Mana'],
+                ['poison length reduced', 'Poison Length Reduced'],
+                ['attack rating against demons', 'Attack Rating vs Demons'],
+                ['attack rating against undead', 'Attack Rating vs Undead'],
+                ['bonus to attack rating', 'Attack Rating Percent'],
+                ['increased attack speed', 'Increased Attack Speed'],
+                ['faster cast rate', 'Faster Cast Rate'],
+                ['faster hit recovery', 'Faster Hit Recovery'],
+                ['faster block rate', 'Faster Block Rate'],
+                ['faster run', 'Faster Run/Walk'],
+                ['prevent monster heal', 'Prevent Monster Heal'],
+                ['ignore target', "Ignore Target's Defense"],
+                ['attacker takes damage', 'Attacker Takes Damage'],
+                ['enhanced defense', 'Enhanced Defense'],
+                ['enhanced damage', 'Enhanced Damage'],
+                ['crushing blow', 'Crushing Blow'],
+                ['open wounds', 'Open Wounds'],
+                ['deadly strike', 'Deadly Strike'],
+                ['slows target', 'Slows Target'],
+                ['knockback', 'Knockback'],
+                ['replenish life', 'Replenish Life'],
+                ['regenerate mana', 'Regenerate Mana'],
+                ['chance to block', 'Chance to Block'],
+                ['damage to demons', 'Damage to Demons'],
+                ['damage to undead', 'Damage to Undead'],
+                ['half freeze duration', 'Half Freeze Duration'],
+                ['cannot be frozen', 'Cannot Be Frozen'],
+                ['minimum fire damage', 'Minimum Fire Damage'],
+                ['maximum fire damage', 'Maximum Fire Damage'],
+                ['minimum lightning damage', 'Minimum Lightning Damage'],
+                ['maximum lightning damage', 'Maximum Lightning Damage'],
+                ['minimum cold damage', 'Minimum Cold Damage'],
+                ['maximum cold damage', 'Maximum Cold Damage'],
+                ['minimum poison damage', 'Minimum Poison Damage'],
+                ['maximum poison damage', 'Maximum Poison Damage'],
+                ['minimum damage', 'Min Damage'],
+                ['maximum damage', 'Max Damage'],
+                ['maximum stamina', 'Maximum Stamina'],
+                ['fire absorb', 'Fire Absorb'],
+                ['lightning absorb', 'Lightning Absorb'],
+                ['cold absorb', 'Cold Absorb'],
+                ['magic absorb', 'Magic Absorb'],
+                ['fire resist', 'Fire Resist'],
+                ['cold resist', 'Cold Resist'],
+                ['lightning resist', 'Lightning Resist'],
+                ['poison resist', 'Poison Resist'],
+                ['attack rating', 'Attack Rating'],
+                ['light radius', 'Light Radius'],
+                ['all skills', 'All Skills'],
+                // Short patterns last — only match if prop is EXACTLY this
+                // Use endsWith check via special prefix
+            ];
+
+            // Exact-end patterns: "to X" should only match "+{{value}} to X", not "+{{value}} to X after each Kill"
+            const propExact = {
                 'to strength': 'Strength',
                 'to energy': 'Energy',
                 'to dexterity': 'Dexterity',
                 'to vitality': 'Vitality',
                 'to life': 'Max Life',
                 'to mana': 'Max Mana',
-                'maximum stamina': 'Maximum Stamina',
-                'to all attributes': null, // special: check string
-
-                // Defense
-                'enhanced defense': 'Enhanced Defense',
-
-                // Damage
-                'enhanced damage': 'Enhanced Damage',
-                'to minimum damage': 'Min Damage',
-                'to maximum damage': 'Max Damage',
-                'to attack rating': 'Attack Rating',
-                'bonus to attack rating': 'Attack Rating Percent',
-                'chance to block': 'Chance to Block',
-
-                // Elemental damage
-                'minimum fire damage': 'Minimum Fire Damage',
-                'maximum fire damage': 'Maximum Fire Damage',
-                'minimum lightning damage': 'Minimum Lightning Damage',
-                'maximum lightning damage': 'Maximum Lightning Damage',
-                'minimum cold damage': 'Minimum Cold Damage',
-                'maximum cold damage': 'Maximum Cold Damage',
-                'minimum poison damage': 'Minimum Poison Damage',
-                'maximum poison damage': 'Maximum Poison Damage',
-
-                // Resistances
-                'fire resist': 'Fire Resist',
-                'cold resist': 'Cold Resist',
-                'lightning resist': 'Lightning Resist',
-                'poison resist': 'Poison Resist',
-                'all resistances': null, // special: check multiple resist stats
-                'to maximum resistances': null,
-
-                // MF, GF, speeds
-                'better chance of getting magic items': 'Magic Find',
-                'extra gold from monsters': 'Gold Find',
-                'faster cast rate': 'Faster Cast Rate',
-                'faster hit recovery': 'Faster Hit Recovery',
-                'faster run': 'Faster Run/Walk',
-                'faster block rate': 'Faster Block Rate',
-                'increased attack speed': 'Increased Attack Speed',
-
-                // Leech & recovery
-                'life stolen per hit': 'Life Steal',
-                'mana stolen per hit': 'Mana Steal',
-                'replenish life': 'Replenish Life',
-                'regenerate mana': 'Regenerate Mana',
-                'to life after each kill': 'Life After Each Kill',
-                'to mana after each kill': 'Mana After Each Kill',
-
-                // Damage reduction
-                'damage reduced by': 'Damage Reduced',
-                'magic damage reduced by': 'Magic Damage Reduction',
-                'physical damage reduced': 'Physical Damage Reduction',
-
-                // Combat
-                'crushing blow': 'Crushing Blow',
-                'open wounds': 'Open Wounds',
-                'deadly strike': 'Deadly Strike',
-                'slows target': 'Slows Target',
-                'hit blinds target': 'Hit Blinds Target',
-                'hit causes monster to flee': 'Hit Causes Monster to Flee',
-                'prevent monster heal': 'Prevent Monster Heal',
-                'knockback': 'Knockback',
-                'ignore target': "Ignore Target's Defense",
-                'attacker takes damage': 'Attacker Takes Damage',
-                'damage taken goes to mana': 'Damage Taken Goes To Mana',
-                'poison length reduced': 'Poison Length Reduced',
-
-                // Absorb
-                'fire absorb': 'Fire Absorb',
-                'lightning absorb': 'Lightning Absorb',
-                'cold absorb': 'Cold Absorb',
-                'magic absorb': 'Magic Absorb',
-
-                // Damage vs type
-                'damage to demons': 'Damage to Demons',
-                'damage to undead': 'Damage to Undead',
-                'attack rating against demons': 'Attack Rating vs Demons',
-                'attack rating against undead': 'Attack Rating vs Undead',
-
-                // Misc
-                'to light radius': 'Light Radius',
-                'all skills': 'All Skills',
             };
 
-            // Try mapping first
-            for (const [pattern, statName] of Object.entries(propToStat)) {
+            // Try ordered mapping first (longer patterns checked first)
+            for (const [pattern, statName] of propToStat) {
                 if (propLower.includes(pattern)) {
                     const found = stats.find(s => s.name === statName);
                     if (found) return found.value;
                 }
             }
 
-            // Fuzzy match via stat.String() — check if the Traderie property text
-            // appears in any stat's display string (handles edge cases)
-            const propClean = propLower.replace(/[{]+value[}]+/g, '').replace(/[+]/g, '').trim();
-            if (propClean.length > 3) {
-                for (const s of stats) {
-                    if (s.string && s.string.toLowerCase().includes(propClean)) {
-                        return s.value;
-                    }
-                }
-            }
-
-            // Fuzzy match by stat name
-            for (const s of stats) {
-                if (s.name && propLower.includes(s.name.toLowerCase())) {
-                    return s.value;
+            // Exact-end patterns: prop must END with the pattern (no trailing words)
+            // Strip {{value}}/{{level}}/etc. placeholders, then +/% signs
+            const propStripped = propLower.replace(/\{\{[^}]+\}\}/g, '').replace(/[+%]/g, '').trim();
+            for (const [pattern, statName] of Object.entries(propExact)) {
+                if (propStripped === pattern || propStripped.endsWith(pattern)) {
+                    const found = stats.find(s => s.name === statName);
+                    if (found) return found.value;
                 }
             }
 
