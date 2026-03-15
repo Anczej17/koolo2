@@ -334,9 +334,9 @@ func (d *Diablo) killSealElite(sealEliteName string) error {
 			}
 		}
 
-		// If it's Lord De Seis, this is acceptable (he spawns far sometimes)
-		if sealEliteName == "Lord De Seis" {
-			d.ctx.Logger.Debug("Lord De Seis not found but this is acceptable, continuing")
+		// Lord De Seis and Infector can die off-screen in party play (corpse despawns before detection)
+		if sealEliteName == "Lord De Seis" || sealEliteName == "Infector of Souls" {
+			d.ctx.Logger.Debug(fmt.Sprintf("%s not found but this is acceptable (may have died off-screen), continuing", sealEliteName))
 			return nil
 		}
 

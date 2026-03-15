@@ -380,14 +380,14 @@ func probeBestWeaponSlots() {
 		switch itm.Location.BodyLocation {
 		case item.LocLeftArm, item.LocRightArm:
 			primaryWeapons = append(primaryWeapons, itm)
-			ctx.Logger.Info("Probe: primary slot item",
+			ctx.Logger.Debug("Probe: primary slot item",
 				slog.String("name", string(itm.Name)),
 				slog.String("bodyLoc", string(itm.Location.BodyLocation)),
 				slog.Int("totalStats", len(itm.Stats)))
 			logItemSkillStats(itm)
 		case item.LocLeftArmSecondary, item.LocRightArmSecondary:
 			secondaryWeapons = append(secondaryWeapons, itm)
-			ctx.Logger.Info("Probe: secondary slot item",
+			ctx.Logger.Debug("Probe: secondary slot item",
 				slog.String("name", string(itm.Name)),
 				slog.String("bodyLoc", string(itm.Location.BodyLocation)),
 				slog.Int("totalStats", len(itm.Stats)))
@@ -395,19 +395,19 @@ func probeBestWeaponSlots() {
 		}
 	}
 
-	ctx.Logger.Info("Probe weapon items found",
+	ctx.Logger.Debug("Probe weapon items found",
 		slog.Int("primaryWeapons", len(primaryWeapons)),
 		slog.Int("secondaryWeapons", len(secondaryWeapons)))
 
 	// Compare bonuses per skill
 	playerClass := int(ctx.Data.PlayerUnit.Class)
-	ctx.Logger.Info("Probe: player class index", slog.Int("class", playerClass))
+	ctx.Logger.Debug("Probe: player class index", slog.Int("class", playerClass))
 	for _, sk := range probeSkills {
-		ctx.Logger.Info("Probing skill bonuses", slog.String("skill", sk.Desc().Name),
+		ctx.Logger.Debug("Probing skill bonuses", slog.String("skill", sk.Desc().Name),
 			slog.Int("skillID", int(sk)))
-		ctx.Logger.Info("--- Primary weapon set ---")
+		ctx.Logger.Debug("--- Primary weapon set ---")
 		b0 := sumSkillBonusFromItems(primaryWeapons, sk, playerClass)
-		ctx.Logger.Info("--- Secondary weapon set ---")
+		ctx.Logger.Debug("--- Secondary weapon set ---")
 		b1 := sumSkillBonusFromItems(secondaryWeapons, sk, playerClass)
 
 		if b1 > b0 {
@@ -416,7 +416,7 @@ func probeBestWeaponSlots() {
 			bestWeaponSlotCache[sk] = 0
 		}
 
-		ctx.Logger.Info("Buff weapon probe result",
+		ctx.Logger.Debug("Buff weapon probe result",
 			slog.String("skill", sk.Desc().Name),
 			slog.Int("slot0Bonus", b0),
 			slog.Int("slot1Bonus", b1),
@@ -436,7 +436,7 @@ func sumSkillBonusFromItems(items []data.Item, sk skill.ID, playerClass int) int
 		// +X to All Skills (e.g., Hoto, Spirit)
 		if s, found := itm.FindStat(stat.AllSkills, 0); found {
 			itemBonus += s.Value
-			ctx.Logger.Info("  stat AllSkills found",
+			ctx.Logger.Debug("  stat AllSkills found",
 				slog.String("item", string(itm.Name)),
 				slog.Int("value", s.Value))
 		}
@@ -444,7 +444,7 @@ func sumSkillBonusFromItems(items []data.Item, sk skill.ID, playerClass int) int
 		// Layer = class index: Amazon=0, Sorceress=1, Necro=2, Paladin=3, Barb=4, Druid=5, Assassin=6
 		if s, found := itm.FindStat(stat.AddClassSkills, playerClass); found {
 			itemBonus += s.Value
-			ctx.Logger.Info("  stat AddClassSkills found",
+			ctx.Logger.Debug("  stat AddClassSkills found",
 				slog.String("item", string(itm.Name)),
 				slog.Int("value", s.Value),
 				slog.Int("classLayer", playerClass))
@@ -452,7 +452,7 @@ func sumSkillBonusFromItems(items []data.Item, sk skill.ID, playerClass int) int
 		// +X to specific skill from non-class items (e.g., CTA Battle Orders)
 		if s, found := itm.FindStat(stat.NonClassSkill, int(sk)); found {
 			itemBonus += s.Value
-			ctx.Logger.Info("  stat NonClassSkill found",
+			ctx.Logger.Debug("  stat NonClassSkill found",
 				slog.String("item", string(itm.Name)),
 				slog.Int("value", s.Value),
 				slog.String("skill", sk.Desc().Name))
@@ -460,13 +460,13 @@ func sumSkillBonusFromItems(items []data.Item, sk skill.ID, playerClass int) int
 		// +X to specific skill (e.g., +3 Energy Shield on staff)
 		if s, found := itm.FindStat(stat.SingleSkill, int(sk)); found {
 			itemBonus += s.Value
-			ctx.Logger.Info("  stat SingleSkill found",
+			ctx.Logger.Debug("  stat SingleSkill found",
 				slog.String("item", string(itm.Name)),
 				slog.Int("value", s.Value),
 				slog.String("skill", sk.Desc().Name))
 		}
 		if itemBonus > 0 {
-			ctx.Logger.Info("  item total bonus",
+			ctx.Logger.Debug("  item total bonus",
 				slog.String("item", string(itm.Name)),
 				slog.Int("bonus", itemBonus),
 				slog.String("forSkill", sk.Desc().Name))
@@ -483,7 +483,7 @@ func logItemSkillStats(itm data.Item) {
 	for _, s := range itm.Stats {
 		for _, target := range skillStatIDs {
 			if s.ID == target {
-				ctx.Logger.Info(fmt.Sprintf("  -> stat %s (id=%d layer=%d) = %d",
+				ctx.Logger.Debug(fmt.Sprintf("  -> stat %s (id=%d layer=%d) = %d",
 					s.ID.String(), int(s.ID), s.Layer, s.Value),
 					slog.String("item", string(itm.Name)))
 			}
@@ -681,6 +681,15 @@ func ensureWeaponSlot(desired int) {
 			return
 		}
 
+		// Double-check after timeout — swap may have registered late
+		ctx.RefreshGameData()
+		if ctx.Data.ActiveWeaponSlot == desired {
+			return
+		}
+
+		// If slot changed but to wrong value (shouldn't happen with 2-slot toggle),
+		// or didn't change at all, retry. Add extra delay to avoid double-toggle race.
+		utils.Sleep(150)
 		ctx.RefreshGameData()
 		if ctx.Data.ActiveWeaponSlot == desired {
 			return

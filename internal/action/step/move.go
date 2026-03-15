@@ -185,8 +185,10 @@ func MoveTo(dest data.Position, options ...MoveOption) error {
 		// If area changed during movement, the destination is no longer valid
 		// This happens during portal interactions - area transition means objective achieved
 		if ctx.Data.PlayerUnit.Area != startArea {
-			// Wait for collision data to be loaded for the new area before returning
-			deadline := time.Now().Add(2 * time.Second)
+			// Wait for collision data to be loaded for the new area before returning.
+			// Use a longer timeout (5s) because some area transitions (especially
+			// accidental boundary crossings in Arcane Sanctuary) take time to load.
+			deadline := time.Now().Add(5 * time.Second)
 			for time.Now().Before(deadline) {
 				if ctx.Data.AreaData.Grid != nil &&
 					ctx.Data.AreaData.Grid.CollisionGrid != nil &&

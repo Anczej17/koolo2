@@ -834,18 +834,16 @@ func (s NovaSorceress) KillMonsterSequence(
 				slog.Int("heraldDist", cachedHeraldDist),
 				slog.Bool("isTarget", isHerald(monster)))
 		}
-		if ctx.CharacterCfg.Character.NovaSorceress.AggressiveNovaPositioning && !isHerald(monster) && cachedHerald == nil {
+		if ctx.CharacterCfg.Character.NovaSorceress.AggressiveNovaPositioning && !isHerald(monster) && cachedHerald == nil && !attackedThisEngagement {
 			ev := s.evalAggressiveNovaPosition(monster, enemies) // OPT: pass cached enemies
 
 			if ev.engKey != 0 && ev.engKey != lastEngKey {
 				lastEngKey = ev.engKey
 				repositionCount = 0
-				attackedThisEngagement = false
 				lastRepositionAt = time.Time{}
 			}
 
-			// cachedHerald == nil means no Herald on screen — no need to check pack
-			if ev.ok && !attackedThisEngagement {
+			if ev.ok {
 				maxRep := maxRepositionsForPack(ev.packSize)
 
 				// Use ACTUAL hits (NovaSpellRadius) for repositioning decisions,
@@ -1052,6 +1050,7 @@ func (s NovaSorceress) KillMonsterSequence(
 		if completedAttackLoops >= NovaMaxAttacksLoop {
 			completedAttackLoops = 0
 			staticFieldCast = false
+			attackedThisEngagement = false // allow re-eval after full attack cycle
 		}
 	}
 }
