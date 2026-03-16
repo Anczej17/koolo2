@@ -828,6 +828,12 @@ func (s *HttpServer) getStatusData() IndexData {
 			}
 		}
 
+		// Expose game name/password for party and lobby game bots
+		if data := s.manager.GetData(supervisorName); data != nil {
+			stats.GameName = data.Game.LastGameName
+			stats.GamePassword = data.Game.LastGamePassword
+		}
+
 		// Check if this is a companion follower & ensure we always expose class
 		cfg, found := config.GetCharacter(supervisorName)
 		if found {
