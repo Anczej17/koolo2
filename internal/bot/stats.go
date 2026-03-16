@@ -107,8 +107,10 @@ type Stats struct {
 	PartyLeaderName string `json:"partyLeaderName"` // For followers: leader's character name
 	// UI contains lightweight live character info for the dashboard
 	UI               CharacterOverview
-	MuleEnabled      bool `json:"muleEnabled"`
-	ManualModeActive bool `json:"manualModeActive"`
+	GameName         string `json:"gameName"`         // Current game name (for party/lobby bots)
+	GamePassword     string `json:"gamePassword"`     // Current game password (for party/lobby bots)
+	MuleEnabled      bool   `json:"muleEnabled"`
+	ManualModeActive bool   `json:"manualModeActive"`
 }
 
 type GameStats struct {

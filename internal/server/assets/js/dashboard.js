@@ -441,6 +441,8 @@ function createCharacterCard(key) {
                         </div>
                           <span class="co-dot"> • </span>
                           <span class="co-difficulty">Difficulty</span>
+                          <span class="co-dot co-game-dot" style="display:none;"> • </span>
+                          <span class="co-gamename" style="display:none;color:#b0b0b0;font-size:0.85em;"></span>
                       </div>
                     </div>
                   </div>
@@ -882,7 +884,7 @@ function updateCharacterCard(card, key, value, dropCount, schedulerInfo) {
 
   // Enrich with live character overview (support both UI and ui keys)
   const uiPayload = value.UI || value.ui || null;
-  updateCharacterOverview(card, uiPayload, value.SupervisorStatus);
+  updateCharacterOverview(card, uiPayload, value.SupervisorStatus, value);
 
   if (statusDetails) {
     updateStartedTime(statusDetails, value.StartedAt);
@@ -1204,7 +1206,7 @@ function updateStats(card, key, games, dropCount) {
   }
 }
 
-function updateCharacterOverview(card, ui, status) {
+function updateCharacterOverview(card, ui, status, stats) {
   const classLevelEl = card.querySelector(".co-classlevel");
   const diffEl = card.querySelector(".co-difficulty");
   const areaEl = card.querySelector(".co-area");
@@ -1215,6 +1217,8 @@ function updateCharacterOverview(card, ui, status) {
   const gfEl = card.querySelector(".co-gf");
   const goldEl = card.querySelector(".co-gold");
   const resEl = card.querySelector(".co-res");
+  const gameNameEl = card.querySelector(".co-gamename");
+  const gameDotEl = card.querySelector(".co-game-dot");
 
   // If not running, show placeholders
   const isActive =
@@ -1230,6 +1234,8 @@ function updateCharacterOverview(card, ui, status) {
     if (gfEl) gfEl.textContent = "GF: —";
     if (goldEl) goldEl.textContent = "Gold: —";
     if (resEl) resEl.textContent = "Res: —";
+    if (gameNameEl) gameNameEl.style.display = "none";
+    if (gameDotEl) gameDotEl.style.display = "none";
     const xpFill = card.querySelector(".xp-bar-fill");
     const xpPct = card.querySelector(".xp-percent");
     if (xpFill) xpFill.style.width = "0%";
@@ -1457,6 +1463,21 @@ function updateCharacterOverview(card, ui, status) {
   if (goldEl) goldEl.textContent = `Gold: ${gold}`;
   if (resEl)
     resEl.innerHTML = `<span class="res-fr">FR: ${fr}</span> | <span class="res-cr">CR: ${cr}</span> | <span class="res-lr">LR: ${lr}</span> | <span class="res-pr">PR: ${pr}</span>`;
+
+  // Show game name for party/lobby bots
+  const gameName = stats && stats.gameName ? stats.gameName : "";
+  const gamePass = stats && stats.gamePassword ? stats.gamePassword : "";
+  if (gameNameEl && gameDotEl) {
+    if (gameName) {
+      const passText = gamePass ? ` / ${gamePass}` : "";
+      gameNameEl.textContent = `Game: ${gameName}${passText}`;
+      gameNameEl.style.display = "";
+      gameDotEl.style.display = "";
+    } else {
+      gameNameEl.style.display = "none";
+      gameDotEl.style.display = "none";
+    }
+  }
 }
 
 // Helpers to prettify class/difficulty
