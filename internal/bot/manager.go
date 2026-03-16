@@ -150,12 +150,21 @@ func (mng *SupervisorManager) ReloadConfig() error {
 			continue
 		}
 
-		// Preserve runtime data
-		//oldRuntimeData := ctx.CharacterCfg.Runtime
+		// Preserve volatile runtime fields that are set by event handlers at runtime
+		// and would be wiped by a full struct overwrite from disk config.
+		savedGameName := ctx.CharacterCfg.Companion.CompanionGameName
+		savedGamePassword := ctx.CharacterCfg.Companion.CompanionGamePassword
+		savedPublicGameCounter := ctx.CharacterCfg.Game.PublicGameCounter
 
 		// Update the config
 		*ctx.CharacterCfg = *newCfg
-		//ctx.CharacterCfg.Runtime = oldRuntimeData
+
+		// Restore runtime fields
+		if savedGameName != "" {
+			ctx.CharacterCfg.Companion.CompanionGameName = savedGameName
+			ctx.CharacterCfg.Companion.CompanionGamePassword = savedGamePassword
+		}
+		ctx.CharacterCfg.Game.PublicGameCounter = savedPublicGameCounter
 	}
 
 	return nil
@@ -304,11 +313,11 @@ func (mng *SupervisorManager) buildSupervisor(supervisorName string, logger *slo
 	bot := NewBot(ctx.Context, muleManager)
 
 	statsHandler := NewStatsHandler(supervisorName, logger)
-	mng.eventListener.Register(statsHandler.Handle)
 
-	// Register companion event handler so followers receive game join/reset events from leaders
+	// Register per-supervisor handlers keyed by name — replaces any stale handlers
+	// from a previous incarnation of this supervisor, preventing handler accumulation.
 	companionHandler := NewCompanionEventHandler(supervisorName, logger, cfg)
-	mng.eventListener.Register(companionHandler.Handle)
+	mng.eventListener.RegisterKeyed(supervisorName, statsHandler.Handle, companionHandler.Handle)
 
 	supervisor, err := NewSinglePlayerSupervisor(supervisorName, bot, statsHandler)
 

@@ -83,6 +83,11 @@ func (s *baseSupervisor) Stop() {
 	// Unregister from party so others don't wait for a stopped member
 	GetPartyRegistry().UnregisterMember(s.name)
 
+	// Unregister per-supervisor event handlers to prevent handler accumulation
+	if s.bot.ctx.EventListener != nil {
+		s.bot.ctx.EventListener.UnregisterKeyed(s.name)
+	}
+
 	s.bot.ctx.SwitchPriority(ct.PriorityStop)
 	s.bot.ctx.ManualModeActive = false // Clear manual mode flag
 
