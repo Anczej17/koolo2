@@ -320,6 +320,23 @@ func (mng *SupervisorManager) buildSupervisor(supervisorName string, logger *slo
 	companionHandler := NewCompanionEventHandler(supervisorName, logger, cfg)
 	mng.eventListener.RegisterKeyed(supervisorName, statsHandler.Handle, companionHandler.Handle)
 
+	// Seed companion game info from party registry after restart.
+	// Events sent while this supervisor was restarting (handler unregistered) are lost,
+	// so check the registry for the leader's current game as a fallback.
+	if cfg.Companion.Enabled && !cfg.Companion.Leader && cfg.Companion.WaitForParty {
+		if activeGame := GetPartyRegistry().GetActiveGame(); activeGame != nil {
+			leaderOK := cfg.Companion.LeaderName == "" ||
+				cfg.Companion.LeaderName == activeGame.LeaderName
+			if leaderOK && cfg.Companion.CompanionGameName == "" {
+				cfg.Companion.CompanionGameName = activeGame.GameName
+				cfg.Companion.CompanionGamePassword = activeGame.Password
+				logger.Info("Seeded companion game info from party registry after restart",
+					slog.String("game", activeGame.GameName),
+					slog.String("leader", activeGame.LeaderName))
+			}
+		}
+	}
+
 	supervisor, err := NewSinglePlayerSupervisor(supervisorName, bot, statsHandler)
 
 	if err != nil {
