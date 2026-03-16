@@ -249,39 +249,56 @@ func ensureCubeIsOpen() error {
 		return nil
 	}
 
-	cube, found := ctx.Data.Inventory.Find("HoradricCube", item.LocationInventory, item.LocationStash)
-	if !found {
-		return errors.New("horadric cube not found in inventory")
-	}
+	maxAttempts := 3
+	for attempt := 1; attempt <= maxAttempts; attempt++ {
+		if attempt > 1 {
+			ctx.Logger.Info("Retrying to open Horadric Cube", slog.Int("attempt", attempt))
+			ctx.RefreshGameData()
 
-	// If cube is in stash, switch to the correct tab
-	if cube.Location.LocationType == item.LocationStash || cube.Location.LocationType == item.LocationSharedStash {
-		ctx := context.Get()
-
-		// Ensure stash is open
-		if !ctx.Data.OpenMenus.Stash {
-			bank, _ := ctx.Data.Objects.FindOne(object.Bank)
-			err := InteractObject(bank, func() bool {
-				return ctx.Data.OpenMenus.Stash
-			})
-			if err != nil {
-				return err
+			// Check if it opened after the refresh
+			if ctx.Data.OpenMenus.Cube {
+				ctx.Logger.Debug("Horadric Cube window detected after refresh")
+				return nil
 			}
 		}
 
-		SwitchStashTab(cube.Location.Page + 1)
+		cube, found := ctx.Data.Inventory.Find("HoradricCube", item.LocationInventory, item.LocationStash)
+		if !found {
+			return errors.New("horadric cube not found in inventory")
+		}
+
+		// If cube is in stash, switch to the correct tab
+		if cube.Location.LocationType == item.LocationStash || cube.Location.LocationType == item.LocationSharedStash {
+			ctx := context.Get()
+
+			// Ensure stash is open
+			if !ctx.Data.OpenMenus.Stash {
+				bank, _ := ctx.Data.Objects.FindOne(object.Bank)
+				err := InteractObject(bank, func() bool {
+					return ctx.Data.OpenMenus.Stash
+				})
+				if err != nil {
+					return err
+				}
+			}
+
+			SwitchStashTab(cube.Location.Page + 1)
+		}
+
+		screenPos := ui.GetScreenCoordsForItem(cube)
+
+		utils.Sleep(300)
+		ctx.HID.Click(game.RightButton, screenPos.X, screenPos.Y)
+		utils.Sleep(500)
+
+		ctx.RefreshGameData()
+		if ctx.Data.OpenMenus.Cube {
+			ctx.Logger.Debug("Horadric Cube window detected")
+			return nil
+		}
+
+		ctx.Logger.Warn("Horadric Cube window not detected after click", slog.Int("attempt", attempt))
 	}
 
-	screenPos := ui.GetScreenCoordsForItem(cube)
-
-	utils.Sleep(300)
-	ctx.HID.Click(game.RightButton, screenPos.X, screenPos.Y)
-	utils.Sleep(500)
-
-	if ctx.Data.OpenMenus.Cube {
-		ctx.Logger.Debug("Horadric Cube window detected")
-		return nil
-	}
-
-	return errors.New("horadric Cube window not detected")
+	return errors.New("horadric Cube window not detected after 3 attempts")
 }

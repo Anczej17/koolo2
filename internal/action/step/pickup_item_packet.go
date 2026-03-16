@@ -66,7 +66,7 @@ func PickupItemPacket(it data.Item, itemPickupAttempt int) error {
 		return fmt.Errorf("packet pickup failed: %w", err)
 	}
 
-	for i := 0; i < 5; i++ {
+	for i := 0; i < 8; i++ {
 		utils.PingSleep(utils.Light, 150)
 		ctx.RefreshInventory()
 

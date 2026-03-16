@@ -26,7 +26,7 @@ const (
 	stateCheckInterval  = 50 * time.Millisecond   // Poll interval for state check
 	maxCastRetries      = 3                       // Max retries if buff doesn't apply
 	postCastBaseDelay   = 300                     // Base delay after cast (ms)
-	swapDelay           = 250                     // Delay after weapon swap (ms)
+	swapDelay           = 380                     // Delay after weapon swap (ms)
 	weaponWaitTimeout   = 1200 * time.Millisecond // Max time to wait for weapon slot switch
 	weaponCheckInterval = 40 * time.Millisecond   // Poll interval for weapon slot check
 )

@@ -211,6 +211,10 @@ func clearRoom(room data.Room, filter data.MonsterFilter) error {
 	var cachedPathValid bool
 	var cachedPathTime time.Time
 
+	// Track monsters that KillMonsterSequence intentionally skipped (e.g. lone low-HP leftovers).
+	// Prevents re-selecting the same monster every iteration and spamming logs.
+	skippedMonsters := make(map[data.UnitID]struct{})
+
 	// Main clearing loop with safety limits
 	for {
 		ctx.PauseIfNotPriority()
@@ -271,6 +275,9 @@ func clearRoom(room data.Room, filter data.MonsterFilter) error {
 		// Herald > Monster Raisers > Others (by distance)
 		targetMonster := data.Monster{}
 		for _, m := range monsters {
+			if _, wasSkipped := skippedMonsters[m.UnitID]; wasSkipped {
+				continue
+			}
 			if !ctx.Char.ShouldIgnoreMonster(m) {
 				targetMonster = m
 				break // Take first non-ignored monster (already sorted by priority)
@@ -328,6 +335,13 @@ func clearRoom(room data.Room, filter data.MonsterFilter) error {
 			}
 			return 0, false
 		}, nil)
+
+		// If the monster is still alive after KillMonsterSequence returned,
+		// it was intentionally skipped (e.g. lone low-HP leftover). Track it
+		// so we don't re-select it and spam logs in a tight loop.
+		if m, found := ctx.Data.Monsters.FindByID(targetMonster.UnitID); found && m.Stats[stat.Life] > 0 {
+			skippedMonsters[targetMonster.UnitID] = struct{}{}
+		}
 
 		// Reset iteration-based stuck counter after successful kill attempt
 		// (time-based tracking is handled at top of loop)
