@@ -142,13 +142,18 @@ func (l *Listener) WaitForEvent(ctx context.Context) Event {
 }
 
 // Send publishes an event to all registered handlers.
-// Non-blocking: if the event buffer is full, the event is dropped with a warning.
+// Uses a short timeout to avoid blocking supervisor goroutines indefinitely
+// while still delivering events reliably (no silent drops).
 func Send(e Event) {
 	select {
 	case events <- e:
 	default:
-		// Buffer full — drop event to prevent blocking supervisor goroutines.
-		// This should be rare with a buffer of 128.
-		slog.Warn("Event buffer full, dropping event", slog.String("message", e.Message()))
+		// Buffer full — wait up to 5s before dropping. This keeps supervisor
+		// goroutines responsive while avoiding silent event loss.
+		select {
+		case events <- e:
+		case <-time.After(5 * time.Second):
+			slog.Warn("Event buffer full for 5s, dropping event", slog.String("message", e.Message()))
+		}
 	}
 }
