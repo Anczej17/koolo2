@@ -72,11 +72,13 @@ type Context struct {
 	Drop                      *drop.Manager // Drop: Per-supervisor Drop manager
 	IsAllocatingStatsOrSkills atomic.Bool   // Prevents stuck detection during stat/skill allocation
 	WaitingForParty          atomic.Bool   // Prevents stuck detection while waiting for party members
-	CompletedRuns             []string      // Runs completed in current game (survives bot.Run() reset)
-	CompletedGameID           string        // Game name for which CompletedRuns is valid
-	completedRunsMu           sync.Mutex
-	CurrentRunName            string        // Name of the currently executing run (for failed run tracking)
-	AbortBonusRun             atomic.Bool   // Signal long-running actions (gambling) to abort during bonus runs
+	CompletedRuns              []string      // Runs completed in current game (survives bot.Run() reset)
+	CompletedGameID            string        // Game name for which CompletedRuns is valid
+	completedRunsMu            sync.Mutex
+	CurrentRunName             string        // Name of the currently executing run (for failed run tracking)
+	AbortBonusRun              atomic.Bool   // Signal long-running actions (gambling) to abort during bonus runs
+	FailedToCreateGameAttempts int           // Consecutive lobby game creation failures (survives bot.Run() reset)
+	FailedModalDismissAttempts int           // Consecutive modal dismiss failures (survives bot.Run() reset)
 }
 
 type Debug struct {
@@ -93,10 +95,9 @@ type CurrentGameHelper struct {
 		Enabled      bool
 		ExpectedArea area.ID
 	}
-	PickupItems                bool
-	IsPickingItems             bool
-	FailedToCreateGameAttempts int
-	FailedMenuAttempts         int
+	PickupItems        bool
+	IsPickingItems     bool
+	FailedMenuAttempts int
 	// When this is set, the supervisor will stop and the manager will start a new supervisor for the specified character.
 	SwitchToCharacter string
 	// Used to store the original character name when muling, so we can switch back.
@@ -153,7 +154,6 @@ func NewGameHelper() *CurrentGameHelper {
 		PickupItems:                true,
 		PickedUpItems:              make(map[int]int),
 		BlacklistedItems:           []data.Item{},
-		FailedToCreateGameAttempts: 0,
 	}
 }
 
@@ -286,6 +286,5 @@ func (ctx *Context) Cleanup() {
 		ctx.CurrentGame.PickedUpItems = make(map[int]int)
 	}
 	// Reset counters on cleanup for a new session
-	ctx.CurrentGame.FailedToCreateGameAttempts = 0
-	ctx.CurrentGame.FailedMenuAttempts = 0 // Also reset this on cleanup
+	ctx.CurrentGame.FailedMenuAttempts = 0
 }

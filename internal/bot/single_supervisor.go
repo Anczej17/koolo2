@@ -361,7 +361,7 @@ func (s *SinglePlayerSupervisor) Start() error {
 		}
 
 		event.Send(event.GameCreated(event.Text(s.name, "New game created"), s.bot.ctx.GameReader.LastGameName(), s.bot.ctx.GameReader.LastGamePass()))
-		s.bot.ctx.CurrentGame.FailedToCreateGameAttempts = 0
+		s.bot.ctx.FailedToCreateGameAttempts = 0
 		s.bot.ctx.LastBuffAt = time.Time{}
 		s.logGameStart(runs)
 		s.bot.ctx.RefreshGameData()
@@ -1220,18 +1220,18 @@ func (s *SinglePlayerSupervisor) HandleMenuFlow() error {
 		isDismissableModalStillPresent, _ := s.bot.ctx.GameReader.IsDismissableModalPresent()
 		if isDismissableModalStillPresent {
 			s.bot.ctx.Logger.Warn(fmt.Sprintf("[Menu Flow]: Dismissable modal still present after attempt to dismiss: %s", text))
-			s.bot.ctx.CurrentGame.FailedToCreateGameAttempts++
+			s.bot.ctx.FailedModalDismissAttempts++
 			const MAX_MODAL_DISMISS_ATTEMPTS = 3
-			if s.bot.ctx.CurrentGame.FailedToCreateGameAttempts >= MAX_MODAL_DISMISS_ATTEMPTS {
+			if s.bot.ctx.FailedModalDismissAttempts >= MAX_MODAL_DISMISS_ATTEMPTS {
 				s.bot.ctx.Logger.Error(fmt.Sprintf("[Menu Flow]: Failed to dismiss modal '%s' %d times. Assuming unrecoverable state.", text, MAX_MODAL_DISMISS_ATTEMPTS))
-				s.bot.ctx.CurrentGame.FailedToCreateGameAttempts = 0
+				s.bot.ctx.FailedModalDismissAttempts = 0
 				return ErrUnrecoverableClientState
 			}
 			return errors.New("[Menu Flow]: Failed to dismiss popup (still present)")
 		}
 	} else {
-		// If no dismissable modal is present, reset the counter for failed attempts if it's related to modals
-		s.bot.ctx.CurrentGame.FailedToCreateGameAttempts = 0
+		// Reset modal dismiss counter when no modal is present
+		s.bot.ctx.FailedModalDismissAttempts = 0
 	}
 
 	if s.bot.ctx.CharacterCfg.Companion.Enabled && !s.bot.ctx.CharacterCfg.Companion.Leader {
@@ -1395,11 +1395,11 @@ func (s *SinglePlayerSupervisor) createLobbyGame() error {
 
 	if err != nil {
 		s.bot.ctx.CharacterCfg.Game.PublicGameCounter++
-		s.bot.ctx.CurrentGame.FailedToCreateGameAttempts++
+		s.bot.ctx.FailedToCreateGameAttempts++
 		const MAX_GAME_CREATE_ATTEMPTS = 5
-		if s.bot.ctx.CurrentGame.FailedToCreateGameAttempts >= MAX_GAME_CREATE_ATTEMPTS {
+		if s.bot.ctx.FailedToCreateGameAttempts >= MAX_GAME_CREATE_ATTEMPTS {
 			s.bot.ctx.Logger.Error(fmt.Sprintf("[Menu Flow]: Failed to create lobby game %d times. Forcing client restart.", MAX_GAME_CREATE_ATTEMPTS))
-			s.bot.ctx.CurrentGame.FailedToCreateGameAttempts = 0
+			s.bot.ctx.FailedToCreateGameAttempts = 0
 			return ErrUnrecoverableClientState
 		}
 		return fmt.Errorf("[Menu Flow]: Failed to create lobby game: %w", err)
@@ -1411,11 +1411,11 @@ func (s *SinglePlayerSupervisor) createLobbyGame() error {
 		s.bot.ctx.Logger.Warn(fmt.Sprintf("[Menu Flow]: Dismissable modal present after game creation attempt: %s", text))
 
 		if strings.Contains(strings.ToLower(text), "failed to create game") || strings.Contains(strings.ToLower(text), "unable to join") {
-			s.bot.ctx.CurrentGame.FailedToCreateGameAttempts++
+			s.bot.ctx.FailedToCreateGameAttempts++
 			const MAX_GAME_CREATE_ATTEMPTS_MODAL = 3
-			if s.bot.ctx.CurrentGame.FailedToCreateGameAttempts >= MAX_GAME_CREATE_ATTEMPTS_MODAL {
+			if s.bot.ctx.FailedToCreateGameAttempts >= MAX_GAME_CREATE_ATTEMPTS_MODAL {
 				s.bot.ctx.Logger.Error(fmt.Sprintf("[Menu Flow]: 'Failed to create game' modal detected %d times. Forcing client restart.", MAX_GAME_CREATE_ATTEMPTS_MODAL))
-				s.bot.ctx.CurrentGame.FailedToCreateGameAttempts = 0
+				s.bot.ctx.FailedToCreateGameAttempts = 0
 				return ErrUnrecoverableClientState
 			}
 		}
@@ -1424,7 +1424,7 @@ func (s *SinglePlayerSupervisor) createLobbyGame() error {
 
 	s.bot.ctx.Logger.Debug("[Menu Flow]: Lobby game created successfully")
 	s.bot.ctx.CharacterCfg.Game.PublicGameCounter++
-	s.bot.ctx.CurrentGame.FailedToCreateGameAttempts = 0
+	s.bot.ctx.FailedToCreateGameAttempts = 0
 	return nil
 }
 
