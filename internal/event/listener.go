@@ -7,31 +7,57 @@ import (
 	"math"
 	"math/rand"
 	"os"
+	"sync"
 	"time"
 
 	"github.com/hectorgimenez/koolo/internal/config"
 	"github.com/hectorgimenez/koolo/internal/utils"
 )
 
-var events = make(chan Event)
+// Buffered channel prevents event.Send() from blocking supervisor goroutines
+// when the listener is busy processing handlers.
+var events = make(chan Event, 128)
 
 type Listener struct {
-	handlers     []Handler
-	DropHandlers map[int]Handler
-	logger       *slog.Logger
+	mu            sync.RWMutex
+	handlers      []Handler            // global handlers (registered once at startup)
+	keyedHandlers map[string][]Handler // per-supervisor handlers (keyed by supervisor name)
+	DropHandlers  map[int]Handler
+	logger        *slog.Logger
 }
 
 type Handler func(ctx context.Context, e Event) error
 
 func NewListener(logger *slog.Logger) *Listener {
 	return &Listener{
-		logger:       logger,
-		DropHandlers: make(map[int]Handler),
+		logger:        logger,
+		keyedHandlers: make(map[string][]Handler),
+		DropHandlers:  make(map[int]Handler),
 	}
 }
 
+// Register adds a global handler that persists for the lifetime of the application.
+// Use RegisterKeyed for per-supervisor handlers that need cleanup.
 func (l *Listener) Register(h Handler) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
 	l.handlers = append(l.handlers, h)
+}
+
+// RegisterKeyed adds a handler associated with a key (typically supervisor name).
+// Calling RegisterKeyed with the same key replaces all previous handlers for that key,
+// preventing handler accumulation across supervisor restarts.
+func (l *Listener) RegisterKeyed(key string, handlers ...Handler) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.keyedHandlers[key] = handlers
+}
+
+// UnregisterKeyed removes all handlers associated with the given key.
+func (l *Listener) UnregisterKeyed(key string) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	delete(l.keyedHandlers, key)
 }
 
 func (l *Listener) Listen(ctx context.Context) error {
@@ -53,12 +79,31 @@ func (l *Listener) Listen(ctx context.Context) error {
 				}
 			}
 
-			for _, h := range l.handlers {
+			// Snapshot handlers under read lock to minimize lock duration
+			l.mu.RLock()
+			globalHandlers := make([]Handler, len(l.handlers))
+			copy(globalHandlers, l.handlers)
+			var keyedHandlers []Handler
+			for _, hList := range l.keyedHandlers {
+				keyedHandlers = append(keyedHandlers, hList...)
+			}
+			dropHandlers := make([]Handler, 0, len(l.DropHandlers))
+			for _, h := range l.DropHandlers {
+				dropHandlers = append(dropHandlers, h)
+			}
+			l.mu.RUnlock()
+
+			for _, h := range globalHandlers {
 				if err := h(ctx, e); err != nil && e.Message() != "" {
 					l.logger.Error("error running event handler", slog.Any("error", err))
 				}
 			}
-			for _, h := range l.DropHandlers {
+			for _, h := range keyedHandlers {
+				if err := h(ctx, e); err != nil && e.Message() != "" {
+					l.logger.Error("error running event handler", slog.Any("error", err))
+				}
+			}
+			for _, h := range dropHandlers {
 				if err := h(ctx, e); err != nil {
 					l.logger.Error("error running event Drop handler", slog.Any("error", err))
 				}
@@ -73,13 +118,17 @@ func (l *Listener) Listen(ctx context.Context) error {
 func (l *Listener) WaitForEvent(ctx context.Context) Event {
 	evtChan := make(chan Event)
 	idx := rand.Intn(math.MaxInt64)
+	l.mu.Lock()
 	l.DropHandlers[idx] = func(ctx context.Context, e Event) error {
 		evtChan <- e
 		return nil
 	}
+	l.mu.Unlock()
 	// Clean up the handler when we're done
 	defer func() {
+		l.mu.Lock()
 		delete(l.DropHandlers, idx)
+		l.mu.Unlock()
 	}()
 
 	for {
@@ -92,6 +141,14 @@ func (l *Listener) WaitForEvent(ctx context.Context) Event {
 	}
 }
 
+// Send publishes an event to all registered handlers.
+// Non-blocking: if the event buffer is full, the event is dropped with a warning.
 func Send(e Event) {
-	events <- e
+	select {
+	case events <- e:
+	default:
+		// Buffer full — drop event to prevent blocking supervisor goroutines.
+		// This should be rare with a buffer of 128.
+		slog.Warn("Event buffer full, dropping event", slog.String("message", e.Message()))
+	}
 }
