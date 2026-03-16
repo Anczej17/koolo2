@@ -1291,6 +1291,11 @@ func (s *SinglePlayerSupervisor) HandleCompanionMenuFlow() error {
 		return fmt.Errorf("idle")
 	}
 
+	joinGameFunc := func() error {
+		return s.bot.ctx.Manager.JoinOnlineGame(gameName, gamePassword)
+	}
+
+	var joinErr error
 	if s.bot.ctx.GameReader.IsInCharacterSelectionScreen() {
 		err := s.ensureOnline()
 		if err != nil {
@@ -1302,21 +1307,25 @@ func (s *SinglePlayerSupervisor) HandleCompanionMenuFlow() error {
 			return err
 		}
 
-		joinGameFunc := func() error {
-			return s.bot.ctx.Manager.JoinOnlineGame(gameName, gamePassword)
-		}
-		return s.callManagerWithTimeout(joinGameFunc)
-	}
-
-	if s.bot.ctx.GameReader.IsInLobby() {
+		joinErr = s.callManagerWithTimeout(joinGameFunc)
+	} else if s.bot.ctx.GameReader.IsInLobby() {
 		s.bot.ctx.Logger.Debug("[Menu Flow]: We're in lobby, joining game ...")
-		joinGameFunc := func() error {
-			return s.bot.ctx.Manager.JoinOnlineGame(gameName, gamePassword)
-		}
-		return s.callManagerWithTimeout(joinGameFunc)
+		joinErr = s.callManagerWithTimeout(joinGameFunc)
+	} else {
+		return fmt.Errorf("[Menu Flow]: Unhandled Companion menu scenario")
 	}
 
-	return fmt.Errorf("[Menu Flow]: Unhandled Companion menu scenario")
+	// If join failed, clear stale game info so we don't retry the same dead game in a loop.
+	// Return "idle" to reset the out-of-game watchdog and wait for a fresh event or registry update.
+	if joinErr != nil {
+		s.bot.ctx.Logger.Warn("Party: failed to join game, clearing stale game info to avoid retry loop",
+			slog.String("game", gameName),
+			slog.String("error", joinErr.Error()))
+		s.bot.ctx.CharacterCfg.Companion.CompanionGameName = ""
+		s.bot.ctx.CharacterCfg.Companion.CompanionGamePassword = ""
+		return fmt.Errorf("idle")
+	}
+	return nil
 }
 
 func (s *SinglePlayerSupervisor) tryEnterLobby() error {
