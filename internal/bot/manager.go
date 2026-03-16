@@ -305,6 +305,11 @@ func (mng *SupervisorManager) buildSupervisor(supervisorName string, logger *slo
 
 	statsHandler := NewStatsHandler(supervisorName, logger)
 	mng.eventListener.Register(statsHandler.Handle)
+
+	// Register companion event handler so followers receive game join/reset events from leaders
+	companionHandler := NewCompanionEventHandler(supervisorName, logger, cfg)
+	mng.eventListener.Register(companionHandler.Handle)
+
 	supervisor, err := NewSinglePlayerSupervisor(supervisorName, bot, statsHandler)
 
 	if err != nil {
