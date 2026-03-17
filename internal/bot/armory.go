@@ -311,6 +311,38 @@ func getArmoryStatName(id stat.ID) string {
 		stat.SkillOnGetHit:         "Skill On Get Hit",
 		stat.SkillOnKill:           "Skill On Kill",
 
+		// Enemy resistance reduction (passive/skill — e.g. Conviction, Lower Resist)
+		stat.EnemyFireResist:       "Enemy Fire Resist",
+		stat.EnemyLightningResist:  "Enemy Lightning Resist",
+		stat.EnemyColdResist:       "Enemy Cold Resist",
+		stat.EnemyPoisonResist:     "Enemy Poison Resist",
+
+		// Enemy resistance reduction (item — e.g. Griffon's, Facets, Infinity)
+		stat.PierceFire:            "Pierce Fire Resist",
+		stat.PierceLightning:       "Pierce Lightning Resist",
+		stat.PierceCold:            "Pierce Cold Resist",
+		stat.PiercePoison:          "Pierce Poison Resist",
+
+		// Elemental skill damage bonus
+		stat.FireSkillDamage:       "Fire Skill Damage",
+		stat.LightningSkillDamage:  "Lightning Skill Damage",
+		stat.ColdSkillDamage:       "Cold Skill Damage",
+		stat.PoisonSkillDamage:     "Poison Skill Damage",
+		stat.PassiveMagicMastery:   "Magic Skill Damage",
+		stat.PassiveMagicPierce:    "Pierce Magic Resist",
+		stat.PassiveDamagePierce:   "Pierce Physical Resist",
+
+		// Sunder charms
+		stat.Unused187:             "Sunder Cold Immunity",
+		stat.Unused189:             "Sunder Fire Immunity",
+		stat.Unused190:             "Sunder Lightning Immunity",
+		stat.Unused191:             "Sunder Poison Immunity",
+		stat.Unused192:             "Sunder Physical Immunity",
+		stat.Unused193:             "Sunder Magic Immunity",
+
+		// Bonus experience
+		stat.AddExperience:         "Bonus Experience",
+
 		// Fire skills bonus (Sorceress)
 		stat.FireSkills:            "Fire Skills",
 	}

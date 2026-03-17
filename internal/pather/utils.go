@@ -63,6 +63,48 @@ func (pf *PathFinder) RandomTeleport() {
 	pf.RandomMovement()
 }
 
+// DirectionalTeleport tries to teleport toward the given target position,
+// covering 10-14 tiles. Used as escalated stuck recovery when RandomTeleport
+// (which picks random directions) hasn't helped after multiple retries.
+// Falls back to RandomTeleport if no walkable path toward target is found.
+func (pf *PathFinder) DirectionalTeleport(target data.Position) {
+	playerPos := pf.data.PlayerUnit.Position
+
+	// Calculate angle from player toward target
+	dx := float64(target.X - playerPos.X)
+	dy := float64(target.Y - playerPos.Y)
+	baseAngle := math.Atan2(dy, dx)
+
+	// Try the target direction first, then ±30° and ±60° offsets
+	offsets := []float64{0, 30, -30, 60, -60}
+	for _, offsetDeg := range offsets {
+		angleRad := baseAngle + (offsetDeg * math.Pi / 180.0)
+		for dist := 14; dist >= 8; dist -= 2 {
+			destX := playerPos.X + int(float64(dist)*math.Cos(angleRad))
+			destY := playerPos.Y + int(float64(dist)*math.Sin(angleRad))
+			dest := data.Position{X: destX, Y: destY}
+
+			if pf.data.AreaData.IsWalkable(dest) {
+				path, _, found := pf.GetPath(dest)
+				if found && len(path) > 0 {
+					slog.Debug("DirectionalTeleport: escaping toward destination",
+						slog.Any("from", playerPos),
+						slog.Any("to", dest),
+						slog.Any("target", target),
+						slog.Float64("offsetDeg", offsetDeg))
+					pf.moveThroughPathTeleport(path)
+					utils.Sleep(int(pf.data.PlayerCastDuration().Milliseconds()) + 50)
+					return
+				}
+			}
+		}
+	}
+
+	// Fallback to random teleport
+	slog.Debug("DirectionalTeleport: no path toward target, falling back to RandomTeleport")
+	pf.RandomTeleport()
+}
+
 func (pf *PathFinder) DistanceFromMe(p data.Position) int {
 	return DistanceFromPoint(pf.data.PlayerUnit.Position, p)
 }

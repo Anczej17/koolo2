@@ -116,7 +116,7 @@ func (l *Listener) Listen(ctx context.Context) error {
 }
 
 func (l *Listener) WaitForEvent(ctx context.Context) Event {
-	evtChan := make(chan Event)
+	evtChan := make(chan Event, 1)
 	idx := rand.Intn(math.MaxInt64)
 	l.mu.Lock()
 	l.DropHandlers[idx] = func(ctx context.Context, e Event) error {

@@ -145,20 +145,52 @@ func ClearAreaAroundPosition(pos data.Position, radius int, filters ...data.Mons
 func ClearThroughPath(pos data.Position, radius int, filter data.MonsterFilter) error {
 	ctx := context.Get()
 
-	const maxStuckRetries = 3
+	const maxStuckRetries = 5
+
+	// Adaptive timeout based on distance and movement mode.
+	// Teleporters cover ground faster, walkers need more time.
+	distance := pather.DistanceFromPoint(ctx.Data.PlayerUnit.Position, pos)
+	timeout := time.Duration(distance) * time.Second // ~1s per tile as base
+	if timeout < 20*time.Second {
+		timeout = 20 * time.Second
+	}
+	if ctx.Data.CanTeleport() {
+		// Teleporters are ~3x faster, but still need time for clearing
+		if timeout > 30*time.Second {
+			timeout = 30 * time.Second
+		}
+	} else {
+		if timeout > 60*time.Second {
+			timeout = 60 * time.Second
+		}
+	}
 
 	lastMovement := false
 	stuckRetries := 0
 	startTime := time.Now()
+	lastProgressPos := ctx.Data.PlayerUnit.Position
+	lastProgressTime := time.Now()
 	for {
 		ctx.PauseIfNotPriority()
 
-		// Absolute timeout: don't spend forever fighting through to one room
-		if time.Since(startTime) > 30*time.Second {
+		// Absolute timeout
+		if time.Since(startTime) > timeout {
 			ctx.Logger.Warn("ClearThroughPath: timeout reaching destination",
 				slog.Any("destination", pos),
-				slog.Duration("elapsed", time.Since(startTime)))
-			return fmt.Errorf("ClearThroughPath timeout after 30s")
+				slog.Duration("elapsed", time.Since(startTime)),
+				slog.Duration("timeout", timeout))
+			return fmt.Errorf("ClearThroughPath timeout after %v", timeout)
+		}
+
+		// Progress check: if we haven't moved >5 tiles in the last 15s, we're stuck
+		if pather.DistanceFromPoint(ctx.Data.PlayerUnit.Position, lastProgressPos) > 5 {
+			lastProgressPos = ctx.Data.PlayerUnit.Position
+			lastProgressTime = time.Now()
+		} else if time.Since(lastProgressTime) > 15*time.Second {
+			ctx.Logger.Warn("ClearThroughPath: no progress for 15s, giving up",
+				slog.Any("position", ctx.Data.PlayerUnit.Position),
+				slog.Any("destination", pos))
+			return fmt.Errorf("ClearThroughPath no progress for 15s")
 		}
 
 		ClearAreaAroundPosition(ctx.Data.PlayerUnit.Position, radius, filter)
@@ -204,7 +236,7 @@ func ClearThroughPath(pos data.Position, radius int, filter data.MonsterFilter) 
 				}
 			}
 
-			// Stuck recovery: teleport/random move and retry instead of immediately failing
+			// Stuck recovery with escalation: mild → aggressive based on retry count
 			if errors.Is(err, step.ErrPlayerStuck) || errors.Is(err, step.ErrPlayerRoundTrip) {
 				stuckRetries++
 				if stuckRetries > maxStuckRetries {
@@ -216,11 +248,22 @@ func ClearThroughPath(pos data.Position, radius int, filter data.MonsterFilter) 
 				ctx.Logger.Debug("ClearThroughPath: stuck, attempting recovery",
 					slog.Int("retry", stuckRetries),
 					slog.Any("position", ctx.Data.PlayerUnit.Position))
+
 				if ctx.Data.CanTeleport() && !ctx.Data.PlayerUnit.Area.IsTown() {
-					ctx.PathFinder.RandomTeleport()
+					if stuckRetries >= 3 {
+						// Escalated recovery: teleport farther in direction of destination
+						ctx.PathFinder.DirectionalTeleport(pos)
+					} else {
+						ctx.PathFinder.RandomTeleport()
+					}
 				} else {
 					ctx.PathFinder.RandomMovement()
 					time.Sleep(200 * time.Millisecond)
+					if stuckRetries >= 3 {
+						// Extra random moves to break out of tight spots
+						ctx.PathFinder.RandomMovement()
+						time.Sleep(300 * time.Millisecond)
+					}
 				}
 				continue
 			}

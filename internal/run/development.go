@@ -232,7 +232,7 @@ func (t *DevRun) Run(parameters *RunParameters) error {
 	for {
 		t.processHotkeys(hotkeys)
 
-		if t.ctx.ExecutionPriority == context.PriorityStop {
+		if t.ctx.GetPriority() == context.PriorityStop {
 			t.ctx.Logger.Info("Development mode stopped by supervisor")
 			return nil
 		}

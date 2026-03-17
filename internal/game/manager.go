@@ -415,6 +415,8 @@ func StartGame(username string, password string, authmethod string, authToken st
 			}
 			return 1
 		})
+		// Wait for D2R to create a window, with timeout and sleep to avoid CPU spin
+		windowDeadline := time.Now().Add(60 * time.Second)
 		for {
 			windows.EnumWindows(cb, unsafe.Pointer(&cmd.Process.Pid))
 			if foundHwnd != 0 {
@@ -423,18 +425,27 @@ func StartGame(username string, password string, authmethod string, authToken st
 				windows.EnumWindows(cb, unsafe.Pointer(&cmd.Process.Pid))
 				break
 			}
+			if time.Now().After(windowDeadline) {
+				// D2R started but never created a window — kill and retry
+				if cmd.Process != nil {
+					cmd.Process.Kill()
+					cmd.Process.Release()
+				}
+				fmt.Printf("D2R window not found after 60s (attempt %d/%d), retrying...\n", attempt+1, maxGPURetries)
+				time.Sleep(2 * time.Second)
+				continue
+			}
+			time.Sleep(500 * time.Millisecond)
 		}
 
 		// Check if the window is a GPU error dialog
 		if isGPUErrorWindow(foundHwnd) {
-			// Exponential backoff: 3s, 6s, 12s, 24s, ...
-			retryDelay := time.Duration(3<<uint(attempt)) * time.Second
-			if retryDelay > 30*time.Second {
-				retryDelay = 30 * time.Second
-			}
-			fmt.Printf("GPU initialization error detected (attempt %d/%d), retrying in %v...\n", attempt+1, maxGPURetries, retryDelay)
+			// Fixed 3s delay between retries — exponential backoff is too slow for GPU-P VMs
+			// where the GPU just needs a moment to free resources from the previous attempt
+			const gpuRetryDelay = 3 * time.Second
+			fmt.Printf("GPU initialization error detected (attempt %d/%d), retrying in %v...\n", attempt+1, maxGPURetries, gpuRetryDelay)
 			closeWindowAndTerminateProcess(foundHwnd, uint32(cmd.Process.Pid))
-			time.Sleep(retryDelay)
+			time.Sleep(gpuRetryDelay)
 			continue // Retry
 		}
 

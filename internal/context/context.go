@@ -24,16 +24,16 @@ import (
 var mu sync.Mutex
 var botContexts = make(map[uint64]*Status)
 
-type Priority int
+type Priority int32
 
 type StopFunc func()
 
 const (
-	PriorityHigh       = 0
-	PriorityNormal     = 1
-	PriorityBackground = 5
-	PriorityPause      = 10
-	PriorityStop       = 100
+	PriorityHigh       Priority = 0
+	PriorityNormal     Priority = 1
+	PriorityBackground Priority = 5
+	PriorityPause      Priority = 10
+	PriorityStop       Priority = 100
 )
 
 type Status struct {
@@ -43,7 +43,7 @@ type Status struct {
 
 type Context struct {
 	Name                      string
-	ExecutionPriority         Priority
+	executionPriority         atomic.Int32
 	CharacterCfg              *config.CharacterCfg
 	Data                      *game.Data
 	EventListener             *event.Listener
@@ -147,7 +147,7 @@ func NewContext(name string) *Status {
 	ctx := &Context{
 		Name:              name,
 		Data:              &game.Data{},
-		ExecutionPriority: PriorityNormal,
+		// executionPriority defaults to 0 (PriorityHigh); set to Normal after init
 		ContextDebug: map[Priority]*Debug{
 			PriorityBackground: {},
 			PriorityNormal:     {},
@@ -160,6 +160,7 @@ func NewContext(name string) *Status {
 		ForceAttack:      false,
 		ManualModeActive: false, // Explicitly initialize to false
 	}
+	ctx.SwitchPriority(PriorityNormal)
 	ctx.Drop = drop.NewManager(name, ctx.Logger)
 	ctx.AttachRoutine(PriorityNormal)
 
@@ -233,7 +234,11 @@ func (ctx *Context) AttachRoutine(priority Priority) {
 }
 
 func (ctx *Context) SwitchPriority(priority Priority) {
-	ctx.ExecutionPriority = priority
+	ctx.executionPriority.Store(int32(priority))
+}
+
+func (ctx *Context) GetPriority() Priority {
+	return Priority(ctx.executionPriority.Load())
 }
 
 func (ctx *Context) DisableItemPickup() {
@@ -280,8 +285,8 @@ func (s *Status) PauseIfNotPriority() {
 		time.Sleep(time.Millisecond * 5)
 	}
 
-	for s.Priority != s.ExecutionPriority {
-		if s.ExecutionPriority == PriorityStop {
+	for s.Priority != s.GetPriority() {
+		if s.GetPriority() == PriorityStop {
 			panic("Bot is stopped")
 		}
 

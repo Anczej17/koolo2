@@ -2,15 +2,19 @@ package run
 
 import (
 	"errors"
+	"log/slog"
 
 	"github.com/hectorgimenez/d2go/pkg/data"
 	"github.com/hectorgimenez/d2go/pkg/data/area"
+	"github.com/hectorgimenez/d2go/pkg/data/npc"
 	"github.com/hectorgimenez/d2go/pkg/data/object"
 	"github.com/hectorgimenez/d2go/pkg/data/quest"
+	"github.com/hectorgimenez/d2go/pkg/data/stat"
 	"github.com/hectorgimenez/koolo/internal/action"
 	"github.com/hectorgimenez/koolo/internal/character"
 	"github.com/hectorgimenez/koolo/internal/config"
 	"github.com/hectorgimenez/koolo/internal/context"
+	"github.com/hectorgimenez/koolo/internal/game"
 	"github.com/hectorgimenez/koolo/internal/utils"
 )
 
@@ -61,6 +65,11 @@ func (t *Travincal) Run(parameters *RunParameters) error {
 	//TODO This is temporary needed for barb because have no cta; isrebuffrequired not working for him. We have ActiveWeaponSlot in d2go ready for that
 	action.Buff()
 
+	// Blacklist the Durance of Hate entrance to prevent accidental entry during combat
+	if !IsQuestRun(parameters) {
+		t.blacklistDuranceEntrance()
+	}
+
 	councilPosition := t.findCouncilPosition()
 
 	err = action.MoveToCoords(councilPosition)
@@ -68,6 +77,22 @@ func (t *Travincal) Run(parameters *RunParameters) error {
 		t.ctx.Logger.Warn("Error moving to council area", "error", err)
 		return err
 	}
+
+	// If no council members are visible, try moving to Compelling Orb as fallback
+	if !t.anyCouncilAlive() {
+		t.ctx.Logger.Warn("Council not found at initial position, trying Compelling Orb")
+		compellingOrb, found := t.ctx.Data.Objects.FindOne(object.CompellingOrb)
+		if found {
+			if moveErr := action.MoveToCoords(compellingOrb.Position); moveErr != nil {
+				t.ctx.Logger.Warn("Error moving to Compelling Orb fallback", "error", moveErr)
+			}
+		} else {
+			t.ctx.Logger.Warn("Compelling Orb not found for fallback council position")
+		}
+	}
+
+	// Safety check: if we accidentally entered Durance, return to Travincal
+	t.returnToTravIfNeeded()
 
 	if err := t.ctx.Char.KillCouncil(); err != nil {
 		return err
@@ -123,7 +148,7 @@ func (t *Travincal) findCouncilPosition() data.Position {
 		if al.Area == area.DuranceOfHateLevel1 {
 			return data.Position{
 				X: al.Position.X - 1,
-				Y: al.Position.Y + 3,
+				Y: al.Position.Y + 4,
 			}
 		}
 	}
@@ -171,6 +196,70 @@ func (t Travincal) smashOrb() error {
 		utils.Sleep(300)
 		return nil
 	})
+}
+
+// blacklistDuranceEntrance marks a 7x7 area around the Durance of Hate entrance
+// as non-walkable on the collision grid, preventing the bot from accidentally
+// walking into Durance during combat.
+func (t *Travincal) blacklistDuranceEntrance() {
+	for _, al := range t.ctx.Data.AdjacentLevels {
+		if al.Area != area.DuranceOfHateLevel1 {
+			continue
+		}
+
+		relPos := t.ctx.Data.AreaData.Grid.RelativePosition(al.Position)
+
+		// Validate bounds
+		if relPos.X < 0 || relPos.X >= t.ctx.Data.AreaData.Grid.Width ||
+			relPos.Y < 0 || relPos.Y >= t.ctx.Data.AreaData.Grid.Height {
+			t.ctx.Logger.Warn("Durance entrance outside grid bounds",
+				slog.Any("worldPos", al.Position),
+				slog.Any("gridPos", relPos))
+			return
+		}
+
+		const blacklistRadius = 3
+		count := 0
+		for dx := -blacklistRadius; dx <= blacklistRadius; dx++ {
+			for dy := -blacklistRadius; dy <= blacklistRadius; dy++ {
+				x := relPos.X + dx
+				y := relPos.Y + dy
+				if x >= 0 && x < t.ctx.Data.AreaData.Grid.Width &&
+					y >= 0 && y < t.ctx.Data.AreaData.Grid.Height {
+					t.ctx.Data.AreaData.Grid.Set(x, y, game.CollisionTypeNonWalkable)
+					count++
+				}
+			}
+		}
+		t.ctx.Logger.Debug("Blacklisted Durance entrance",
+			slog.Any("worldPos", al.Position),
+			slog.Int("tilesBlocked", count))
+		return
+	}
+	t.ctx.Logger.Warn("Durance of Hate entrance not found in adjacent levels")
+}
+
+// anyCouncilAlive checks if any council member is alive and visible.
+func (t *Travincal) anyCouncilAlive() bool {
+	for _, m := range t.ctx.Data.Monsters.Enemies() {
+		if (m.Name == npc.CouncilMember || m.Name == npc.CouncilMember2 || m.Name == npc.CouncilMember3) && m.Stats[stat.Life] > 0 {
+			return true
+		}
+	}
+	return false
+}
+
+// returnToTravIfNeeded checks if the bot accidentally entered Durance of Hate
+// and moves back to Travincal if so.
+func (t *Travincal) returnToTravIfNeeded() {
+	if t.ctx.Data.PlayerUnit.Area != area.DuranceOfHateLevel1 {
+		return
+	}
+	t.ctx.Logger.Warn("Accidentally entered Durance of Hate, returning to Travincal")
+	if err := action.MoveToArea(area.Travincal); err != nil {
+		t.ctx.Logger.Warn("Failed to return to Travincal from Durance", slog.Any("error", err))
+	}
+	utils.PingSleep(utils.Medium, 300)
 }
 
 func (t Travincal) tryReachDuranceWp() error {

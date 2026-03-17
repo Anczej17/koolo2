@@ -518,7 +518,7 @@ func (s *SinglePlayerSupervisor) Start() error {
 				case <-runCtx.Done(): // Exit when the run is over (either completed, errored, or timed out)
 					return
 				case <-ticker.C:
-					if s.bot.ctx.ExecutionPriority == ct.PriorityPause {
+					if s.bot.ctx.GetPriority() == ct.PriorityPause {
 						continue
 					}
 
@@ -541,7 +541,7 @@ func (s *SinglePlayerSupervisor) Start() error {
 					}
 
 					currentPos := s.bot.ctx.Data.PlayerUnit.Position
-					lastAction := s.bot.ctx.ContextDebug[s.bot.ctx.ExecutionPriority].LastAction
+					lastAction := s.bot.ctx.ContextDebug[s.bot.ctx.GetPriority()].LastAction
 					isAllocating := lastAction == "AutoRespecIfNeeded" ||
 						lastAction == "EnsureStatPoints" ||
 						lastAction == "EnsureSkillPoints" ||

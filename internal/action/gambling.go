@@ -87,6 +87,9 @@ func GambleSingleItem(items []string, desiredQuality item.Quality) error {
 		}
 	}
 
+	const maxRefreshAttempts = 25
+	refreshAttempts := 0
+
 	for {
 		if itemBought.Name != "" {
 			for _, itm := range ctx.Data.Inventory.ByLocation(item.LocationInventory) {
@@ -131,7 +134,17 @@ func GambleSingleItem(items []string, desiredQuality item.Quality) error {
 
 		// If no desired item was found, refresh the gambling window
 		if itemBought.Name == "" {
-			ctx.Logger.Debug("Desired items not found in gambling window, refreshing...", slog.Any("items", items))
+			refreshAttempts++
+			if refreshAttempts >= maxRefreshAttempts {
+				ctx.Logger.Warn("GambleSingleItem: max refresh attempts reached, stopping",
+					slog.Int("attempts", refreshAttempts),
+					slog.Any("items", items))
+				return step.CloseAllMenus()
+			}
+
+			ctx.Logger.Debug("Desired items not found in gambling window, refreshing...",
+				slog.Any("items", items),
+				slog.Int("attempt", refreshAttempts))
 
 			if ctx.Data.LegacyGraphics {
 				ctx.HID.Click(game.LeftButton, ui.GambleRefreshButtonXClassic, ui.GambleRefreshButtonYClassic)
@@ -140,6 +153,8 @@ func GambleSingleItem(items []string, desiredQuality item.Quality) error {
 			}
 
 			utils.Sleep(500)
+		} else {
+			refreshAttempts = 0
 		}
 	}
 }

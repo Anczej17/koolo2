@@ -61,7 +61,7 @@ func (s *baseSupervisor) Stats() Stats {
 }
 
 func (s *baseSupervisor) TogglePause() {
-	if s.bot.ctx.ExecutionPriority == ct.PriorityPause {
+	if s.bot.ctx.GetPriority() == ct.PriorityPause {
 		s.bot.ctx.MemoryInjector.Load()
 		s.bot.ctx.SwitchPriority(ct.PriorityNormal)
 		s.bot.ctx.Logger.Info("Resuming...", slog.String("configuration", s.name))

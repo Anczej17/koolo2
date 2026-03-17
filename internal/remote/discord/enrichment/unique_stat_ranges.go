@@ -41,7 +41,7 @@ var UniqueStatRanges = map[string][]StatRange{
 		{stat.Strength, "Strength", 25, 30},
 		{stat.LifeSteal, "Life Steal", 8, 10},
 	},
-	"Giant Skull": {
+	"Giantskull": {
 		{stat.Defense, "Defense", 350, 477},
 		{stat.Strength, "Strength", 25, 35},
 		{stat.CrushingBlow, "Crushing Blow", 10, 10},
@@ -50,14 +50,14 @@ var UniqueStatRanges = map[string][]StatRange{
 		{stat.Defense, "Defense", 90, 170},
 		{stat.FireResist, "All Resistances", 50, 70},
 	},
-	"Vampire Gaze": {
+	"Vampiregaze": {
 		{stat.Defense, "Defense", 252, 303},
 		{stat.LifeSteal, "Life Steal", 6, 8},
 		{stat.ManaSteal, "Mana Steal", 6, 8},
 		{stat.DamageReduced, "Damage Reduced", 15, 20},
 	},
 
-	"Guillaume's Face (Helm)": {
+	"Guillaume's Face": {
 		{stat.Defense, "Defense", 217, 245},
 		{stat.CrushingBlow, "Crushing Blow", 35, 35},
 	},
@@ -75,10 +75,7 @@ var UniqueStatRanges = map[string][]StatRange{
 		{stat.Strength, "Strength", 20, 30},
 		{stat.FireResist, "All Resistances", 20, 30},
 	},
-	"Tal Rasha's Guardianship": {
-		{stat.Defense, "Defense", 833, 941},
-		{stat.MagicFind, "MF", 65, 100},
-	},
+	// Note: Tal Rasha's armor is "Tal Rasha's Howling Wind" in d2go (see set items section)
 	"The Gladiator's Bane": {
 		{stat.Defense, "Defense", 1255, 1496},
 	},
@@ -131,7 +128,7 @@ var UniqueStatRanges = map[string][]StatRange{
 		{stat.Strength, "Strength", 10, 15},
 		{stat.Vitality, "Vitality", 10, 15},
 	},
-	"Steel Carapace": {
+	"Steel Carapice": {
 		{stat.Defense, "Defense", 1319, 1534},
 		{stat.DamageReduced, "Damage Reduced", 9, 14},
 	},
@@ -147,7 +144,7 @@ var UniqueStatRanges = map[string][]StatRange{
 		{stat.ReplenishLife, "Replenish Life", 10, 13},
 		{stat.DamageReduced, "Damage Reduced", 10, 15},
 	},
-	"Thundergod's Vigor": {
+	"Thudergod's Vigor": {
 		{stat.Defense, "Defense", 137, 159},
 		{stat.Strength, "Strength", 20, 20},
 		{stat.Vitality, "Vitality", 20, 20},
@@ -174,7 +171,7 @@ var UniqueStatRanges = map[string][]StatRange{
 	},
 
 	// --- Boots ---
-	"War Traveler": {
+	"Wartraveler": {
 		{stat.Defense, "Defense", 120, 139},
 		{stat.MagicFind, "MF", 30, 50},
 		{stat.Vitality, "Vitality", 10, 10},
@@ -190,11 +187,11 @@ var UniqueStatRanges = map[string][]StatRange{
 		{stat.Strength, "Strength", 10, 20},
 		{stat.Dexterity, "Dexterity", 17, 17},
 	},
-	"Shadow Dancer": {
+	"Shadowdancer": {
 		{stat.Defense, "Defense", 122, 144},
 		{stat.Dexterity, "Dexterity", 15, 25},
 	},
-	"Gore Rider": {
+	"Gorerider": {
 		{stat.Defense, "Defense", 140, 162},
 	},
 	"Waterwalk": {
@@ -235,7 +232,7 @@ var UniqueStatRanges = map[string][]StatRange{
 	"Laying of Hands": {
 		{stat.Defense, "Defense", 79, 87},
 	},
-	"Soul Drainer": {
+	"Souldrain": {
 		{stat.Defense, "Defense", 129, 149},
 		{stat.ManaSteal, "Mana Steal", 4, 7},
 		{stat.LifeSteal, "Life Steal", 4, 7},
@@ -253,7 +250,7 @@ var UniqueStatRanges = map[string][]StatRange{
 		{stat.Defense, "Defense", 36, 40},
 		{stat.LifeSteal, "Life Steal", 4, 5},
 	},
-	"Lava Gout": {
+	"Lavagout": {
 		{stat.Defense, "Defense", 120, 142},
 	},
 
@@ -276,7 +273,7 @@ var UniqueStatRanges = map[string][]StatRange{
 		{stat.Defense, "Defense", 271, 347},
 		{stat.Mana, "Mana", 10, 10},
 	},
-	"Head Hunter's Glory": {
+	"Headhunter's Glory": {
 		{stat.Defense, "Defense", 320, 420},
 		{stat.FireResist, "Fire Resist", 20, 30},
 	},
@@ -321,8 +318,8 @@ var UniqueStatRanges = map[string][]StatRange{
 	"Nokozan Relic":     {},
 
 	// --- Rings ---
-	"Stone of Jordan": {},
-	"Bul-Kathos' Wedding Band": {
+	"The Stone of Jordan": {},
+	"Bul Katho's Wedding Band": {
 		{stat.Life, "Life", 3, 5},
 		{stat.LifeSteal, "Life Steal", 3, 5},
 	},
@@ -368,14 +365,14 @@ var UniqueStatRanges = map[string][]StatRange{
 		{stat.ColdSkillDamage, "+% Cold Damage", 15, 30},
 		{stat.AllSkills, "All Skills", 3, 3},
 	},
-	"Eschuta's Temper": {
+	"Eschuta's temper": {
 		{stat.AllSkills, "All Skills", 1, 3},
 		{stat.LightningSkillDamage, "+% Lightning Damage", 10, 20},
 		{stat.FireSkillDamage, "+% Fire Damage", 10, 20},
 	},
 	"Heart of the Oak": {}, // runeword
 	"Call to Arms":      {}, // runeword
-	"Death's Web": {
+	"Deaths's Web": {
 		{stat.EnemyPoisonResist, "-% Enemy Poison Res", 40, 50},
 		{stat.AllSkills, "All Skills", 2, 2},
 	},
@@ -421,7 +418,7 @@ var UniqueStatRanges = map[string][]StatRange{
 		{stat.Life, "Life", 50, 50},
 		{stat.AbsorbLightning, "Lightning Absorb", 20, 20},
 	},
-	"Steel Pillar": {
+	"Steelpillar": {
 		{stat.EnhancedDamage, "Enhanced Damage", 210, 260},
 		{stat.Defense, "Enhanced Defense", 50, 80},
 	},
@@ -434,7 +431,7 @@ var UniqueStatRanges = map[string][]StatRange{
 	"Bonehew": {
 		{stat.EnhancedDamage, "Enhanced Damage", 270, 320},
 	},
-	"Reaper's Toll": {
+	"The Reaper's Toll": {
 		{stat.EnhancedDamage, "Enhanced Damage", 190, 240},
 		{stat.LifeSteal, "Life Steal", 11, 15},
 	},
@@ -455,16 +452,16 @@ var UniqueStatRanges = map[string][]StatRange{
 		{stat.CrushingBlow, "Crushing Blow", 40, 40},
 		{stat.TargetDefense, "-% Enemy Def per Hit", 25, 25},
 	},
-	"Jade Talon": {
+	"Jadetalon": {
 		{stat.Defense, "Defense", 495, 580},
 		{stat.ManaSteal, "Mana Steal", 10, 15},
 		{stat.FireResist, "All Resistances", 40, 50},
 	},
-	"Shadow Killer": {
+	"Shadowkiller": {
 		{stat.EnhancedDamage, "Enhanced Damage", 170, 220},
 		{stat.ManaSteal, "Mana Steal", 10, 15},
 	},
-	"Bartuc's Cut-Throat": {
+	"Cutthroat1": {
 		{stat.EnhancedDamage, "Enhanced Damage", 150, 200},
 		{stat.LifeSteal, "Life Steal", 5, 9},
 		{stat.Strength, "Strength", 20, 20},
@@ -494,12 +491,16 @@ var UniqueStatRanges = map[string][]StatRange{
 	"Tal Rasha's Lidless Eye": {
 		{stat.Defense, "Defense", 0, 0},
 	},
-	"IK Maul": {
+	"Immortal King's Stone Crusher": {
 		{stat.EnhancedDamage, "Enhanced Damage", 200, 250},
 	},
-	"Tal Rasha's Fine Spun Cloth": {
+	"Tal Rasha's Fire-Spun Cloth": {
 		{stat.Defense, "Defense", 35, 40},
 		{stat.Dexterity, "Dexterity", 20, 20},
+	},
+	"Tal Rasha's Howling Wind": {
+		{stat.Defense, "Defense", 828, 939},
+		{stat.MagicFind, "MF", 65, 100},
 	},
 	"Tal Rasha's Horadric Crest": {
 		{stat.Defense, "Defense", 99, 131},
@@ -509,9 +510,6 @@ var UniqueStatRanges = map[string][]StatRange{
 	},
 	"Immortal King's Soul Cage": {
 		{stat.Defense, "Defense", 1001, 1100},
-	},
-	"Immortal King's Stone Crusher": {
-		{stat.EnhancedDamage, "Enhanced Damage", 200, 250},
 	},
 	"Immortal King's Will": {
 		{stat.Defense, "Defense", 160, 175},
@@ -525,7 +523,7 @@ var UniqueStatRanges = map[string][]StatRange{
 		{stat.Defense, "Defense", 917, 950},
 		{stat.Strength, "Strength", 20, 20},
 	},
-	"Griswold's Redemption": {
+	"Griswolds's Redemption": {
 		{stat.EnhancedDamage, "Enhanced Damage", 200, 240},
 	},
 	"Griswold's Honor": {
@@ -541,10 +539,7 @@ var UniqueStatRanges = map[string][]StatRange{
 	"Trang-Oul's Scales": {
 		{stat.Defense, "Defense", 857, 1057},
 	},
-	"Aldur's Rhythm": {
-		{stat.EnhancedDamage, "Enhanced Damage", 200, 250},
-		{stat.LifeSteal, "Life Steal", 5, 10},
-	},
+	// Note: Aldur's weapon is "Aldur's Stony Gaze" in d2go — no variable stats
 	"Aldur's Deception": {
 		{stat.Defense, "Defense", 1029, 1109},
 	},
@@ -554,8 +549,185 @@ var UniqueStatRanges = map[string][]StatRange{
 	"Bul-Kathos' Tribal Guardian": {
 		{stat.EnhancedDamage, "Enhanced Damage", 200, 200},
 	},
-	"Mavina's Caster": {
+	"M'avina's Caster": {
 		{stat.EnhancedDamage, "Enhanced Damage", 188, 188},
 	},
-	"Guillaume's Face": {},
+
+	// --- RotW DLC: Sunder Charms ---
+	"Cold Rupture": {
+		{stat.ColdResist, "Cold Resist Penalty", -90, -70},
+	},
+	"Flame Rift": {
+		{stat.FireResist, "Fire Resist Penalty", -90, -70},
+	},
+	"Crack of the Heavens": {
+		{stat.LightningResist, "Lightning Resist Penalty", -90, -70},
+	},
+	"Rotting Fissure": {
+		{stat.PoisonResist, "Poison Resist Penalty", -90, -70},
+	},
+	"Bone Break": {
+		{stat.DamageReduced, "Phys Resist Penalty", -20, -10},
+	},
+	"Black Cleft": {
+		{stat.MagicDamageReduction, "Magic Resist Penalty", -65, -45},
+	},
+
+	// --- RotW DLC: Warlock Items ---
+	"Ars Al'Diablolos": {
+		{stat.EnhancedDefense, "Enhanced Defense", 170, 200},
+		{stat.FireSkillDamage, "+% Fire Damage", 15, 25},
+		{stat.FireResist, "Fire Resist", 20, 30},
+	},
+	"Ars Tor'Baalos": {
+		{stat.EnhancedDefense, "Enhanced Defense", 120, 150},
+		{stat.DamageReduced, "Damage Reduced", 5, 10},
+	},
+	"Ars Dul'Mephistos": {
+		{stat.FasterCastRate, "Faster Cast Rate", 20, 30},
+		{stat.EnhancedDamage, "Enhanced Damage", 70, 115},
+		{stat.AttackRatingPercent, "Attack Rating %", 50, 70},
+		{stat.EnhancedDefense, "Enhanced Defense", 140, 170},
+		{stat.PassiveMagicPierce, "Pierce Magic Resist", 10, 20},
+		{stat.MagicFind, "MF", 10, 25},
+	},
+	"Measured Wrath": {
+		{stat.EnhancedDefense, "Enhanced Defense", 130, 180},
+		{stat.Vitality, "Vitality", 10, 20},
+		{stat.FireResist, "All Resistances", 20, 30},
+	},
+	"Dreadfang": {
+		{stat.EnhancedDamage, "Enhanced Damage", 133, 166},
+		{stat.ManaSteal, "Mana Steal", 3, 6},
+	},
+	"Wraithstep": {
+		{stat.Defense, "Defense", 40, 60},
+		{stat.Dexterity, "Dexterity", 10, 15},
+		{stat.Energy, "Energy", 10, 15},
+	},
+	"Bloodpact Shard": {
+		{stat.Life, "Life %", 10, 15},
+		{stat.MagicFind, "MF", 20, 35},
+	},
+
+	// --- RotW DLC: Rings & Amulets ---
+	"Sling": {
+		{stat.PassiveMagicPierce, "Pierce Magic Resist", 3, 5},
+		{stat.Energy, "Energy", 10, 15},
+		{stat.MagicFind, "MF", 10, 20},
+	},
+	"Opalvein": {
+		{stat.FireResist, "All Resistances", 6, 8},
+		{stat.LifeAfterEachKill, "Life After Kill", 1, 3},
+		{stat.ManaAfterKill, "Mana After Kill", 1, 3},
+	},
+	"Entropy Locket": {
+		{stat.PassiveMagicMastery, "+% Magic Damage", 5, 10},
+		{stat.FasterCastRate, "Faster Cast Rate", 5, 10},
+		{stat.LightningResist, "Lightning Resist", 25, 40},
+		{stat.MaxMana, "Mana %", 10, 15},
+		{stat.MagicDamageReduction, "Magic Damage Reduced", 8, 12},
+	},
+	"Gheed's Wager": {
+		{stat.FasterCastRate, "Faster Cast Rate", 10, 20},
+		{stat.FasterHitRecovery, "Faster Hit Recovery", 10, 20},
+		{stat.FasterRunWalk, "Faster Run/Walk", 10, 20},
+		{stat.EnhancedDefense, "Enhanced Defense", 90, 150},
+		{stat.PassiveMagicPierce, "Pierce Magic Resist", 3, 7},
+		{stat.FireResist, "All Resistances", 5, 15},
+		{stat.GoldFind, "Gold Find", 44, 75},
+	},
+
+	// --- RotW DLC: Unique Warlock Helm (Death Mask) ---
+	"Unique Warlock Helm": {
+		{stat.PierceFire, "Pierce Fire Resist", 5, 8},
+		{stat.PassiveMagicPierce, "Pierce Magic Resist", 5, 8},
+		{stat.EnhancedDefense, "Enhanced Defense", 150, 215},
+		{stat.ManaAfterKill, "Mana After Kill", 4, 6},
+	},
+
+	// --- RotW DLC: Gemstone Jewels ---
+	"Defender's Bile": {
+		{stat.PoisonSkillDamage, "+% Poison Damage", 5, 10},
+		{stat.PiercePoison, "Pierce Poison Resist", 5, 10},
+		{stat.AddExperience, "Bonus Experience", 3, 5},
+		{stat.MagicFind, "MF", 15, 35},
+		{stat.GoldFind, "Gold Find", 25, 50},
+	},
+	"Guardian's Thunder": {
+		{stat.LightningSkillDamage, "+% Lightning Damage", 5, 10},
+		{stat.PierceLightning, "Pierce Lightning Resist", 5, 10},
+		{stat.AddExperience, "Bonus Experience", 3, 5},
+		{stat.MagicFind, "MF", 15, 35},
+		{stat.GoldFind, "Gold Find", 25, 50},
+	},
+	"Protector's Frost": {
+		{stat.ColdSkillDamage, "+% Cold Damage", 5, 10},
+		{stat.PierceCold, "Pierce Cold Resist", 5, 10},
+		{stat.AddExperience, "Bonus Experience", 3, 5},
+		{stat.MagicFind, "MF", 15, 35},
+		{stat.GoldFind, "Gold Find", 25, 50},
+	},
+	"Defender's Fire": {
+		{stat.FireSkillDamage, "+% Fire Damage", 5, 10},
+		{stat.PierceFire, "Pierce Fire Resist", 5, 10},
+		{stat.AddExperience, "Bonus Experience", 3, 5},
+		{stat.MagicFind, "MF", 15, 35},
+		{stat.GoldFind, "Gold Find", 25, 50},
+	},
+	"Protector's Stone": {
+		{stat.EnhancedDamage, "Enhanced Damage", 30, 50},
+		{stat.PassiveDamagePierce, "Pierce Physical Resist", 5, 10},
+		{stat.AddExperience, "Bonus Experience", 3, 5},
+		{stat.MagicFind, "MF", 15, 35},
+		{stat.GoldFind, "Gold Find", 25, 50},
+	},
+	"Guardian's Light": {
+		{stat.PassiveMagicMastery, "+% Magic Damage", 5, 10},
+		{stat.PassiveMagicPierce, "Pierce Magic Resist", 5, 10},
+		{stat.AddExperience, "Bonus Experience", 3, 5},
+		{stat.MagicFind, "MF", 15, 35},
+		{stat.GoldFind, "Gold Find", 25, 50},
+	},
+
+	// --- RotW DLC: Set Items — McAuley's Folly ---
+	"McAuley's Paragon":     {},
+	"McAuley's Riprap":      {},
+	"McAuley's Taboo":       {},
+	"McAuley's Superstition": {},
+
+	// --- RotW DLC: Set Items — Warlord's Glory ---
+	"Warlord's Conquest": {},
+	"Warlord's Lust":     {},
+	"Warlord's Mantle":   {},
+	"Warlord's Crushers": {},
+	"Warlord's Authority": {},
+
+	// --- RotW DLC: Set Items — Bane's Garments ---
+	"Bane's Oathmaker":   {},
+	"Bane's Wraithskin":  {},
+	"Bane's Authority":   {},
+
+	// --- RotW DLC: Set Items — Horazon's Splendor ---
+	"Horazon's Countenance": {
+		{stat.Strength, "Strength", 10, 20},
+		{stat.MagicDamageReduction, "Magic Damage Reduced", 7, 10},
+	},
+	"Horazon's Dominion": {
+		{stat.EnhancedDefense, "Enhanced Defense", 75, 100},
+		{stat.MaxMana, "Mana", 75, 100},
+		{stat.FireResist, "All Resistances", 15, 25},
+	},
+	"Horazon's Hold": {
+		{stat.AttackRating, "Attack Rating", 95, 150},
+		{stat.Dexterity, "Dexterity", 10, 15},
+	},
+	"Horazon's Legacy": {
+		{stat.Strength, "Strength", 10, 15},
+		{stat.Dexterity, "Dexterity", 10, 15},
+	},
+	"Horazon's Secrets": {
+		{stat.Vitality, "Vitality", 20, 30},
+		{stat.Life, "Life", 30, 50},
+	},
 }

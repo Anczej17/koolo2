@@ -4102,6 +4102,16 @@
                 ['lightning absorb', 'Lightning Absorb'],
                 ['cold absorb', 'Cold Absorb'],
                 ['magic absorb', 'Magic Absorb'],
+                ['enemy fire resistance', 'Enemy Fire Resist', 'Pierce Fire Resist'],
+                ['enemy lightning resistance', 'Enemy Lightning Resist', 'Pierce Lightning Resist'],
+                ['enemy cold resistance', 'Enemy Cold Resist', 'Pierce Cold Resist'],
+                ['enemy poison resistance', 'Enemy Poison Resist', 'Pierce Poison Resist'],
+                ['fire skill damage', 'Fire Skill Damage'],
+                ['lightning skill damage', 'Lightning Skill Damage'],
+                ['cold skill damage', 'Cold Skill Damage'],
+                ['poison skill damage', 'Poison Skill Damage'],
+                ['magic skill damage', 'Magic Skill Damage'],
+                ['experience gained', 'Bonus Experience'],
                 ['fire resist', 'Fire Resist'],
                 ['cold resist', 'Cold Resist'],
                 ['lightning resist', 'Lightning Resist'],
@@ -4126,10 +4136,16 @@
             // Try ordered mapping first (longer patterns checked first)
             // IMPORTANT: break on first pattern match even if stat not found,
             // to prevent shorter patterns from matching wrong stats
-            for (const [pattern, statName] of propToStat) {
+            for (const entry of propToStat) {
+                const [pattern, statName, altStatName] = entry;
                 if (propLower.includes(pattern)) {
                     const found = stats.find(s => s.name === statName);
-                    return found ? found.value : null;
+                    if (found) return found.value;
+                    if (altStatName) {
+                        const alt = stats.find(s => s.name === altStatName);
+                        if (alt) return alt.value;
+                    }
+                    return null;
                 }
             }
 

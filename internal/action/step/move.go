@@ -141,8 +141,9 @@ func MoveTo(dest data.Position, options ...MoveOption) error {
 
 	roundTripReferencePosition := ctx.Data.PlayerUnit.Position
 	roundTripCheckStartTime := time.Now()
-	const roundTripThreshold = 10 * time.Second
+	const roundTripThreshold = 7 * time.Second
 	const roundTripMaxRadius = 8
+	roundTripRecoveryAttempted := false
 
 	// Adaptive movement refresh intervals based on ping
 	// Adjust polling frequency based on network latency
@@ -292,13 +293,28 @@ func MoveTo(dest data.Position, options ...MoveOption) error {
 			if timeInRoundtrip > roundTripThreshold {
 				ctx.Logger.Warn("Player is doing round trips. Current area: [" + ctx.Data.PlayerUnit.Area.Area().Name + "]. Trying to path to Destination: [" + fmt.Sprintf("%d,%d", currentDest.X, currentDest.Y) + "]")
 				return ErrPlayerRoundTrip
-			} else if timeInRoundtrip > roundTripThreshold/2.0 {
+			} else if timeInRoundtrip > roundTripThreshold/2 && !roundTripRecoveryAttempted {
+				// Early recovery: try to break out of the loop before hard-failing
+				roundTripRecoveryAttempted = true
+				blocked = true
+				if ctx.Data.CanTeleport() && !ctx.Data.AreaData.Area.IsTown() {
+					ctx.Logger.Debug("Round-trip early recovery: attempting random teleport",
+						fmt.Sprintf("elapsed=%v", timeInRoundtrip))
+					ctx.PathFinder.RandomTeleport()
+				} else {
+					ctx.Logger.Debug("Round-trip early recovery: attempting random movement",
+						fmt.Sprintf("elapsed=%v", timeInRoundtrip))
+					ctx.PathFinder.RandomMovement()
+					time.Sleep(200 * time.Millisecond)
+				}
+			} else if timeInRoundtrip > roundTripThreshold/2 {
 				blocked = true
 			}
 		} else {
 			//Player moved significantly, reset Round Trip detection
 			roundTripReferencePosition = currentPosition
 			roundTripCheckStartTime = time.Now()
+			roundTripRecoveryAttempted = false
 		}
 
 		if currentPosition == previousPosition && !ctx.Data.PlayerUnit.States.HasState(state.Stunned) {

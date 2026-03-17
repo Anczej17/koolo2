@@ -138,7 +138,7 @@ func (b *Bot) Run(ctx context.Context, firstRun bool, runs []run.Run) error {
 				b.Stop()
 				return nil
 			case <-ticker.C:
-				if b.ctx.ExecutionPriority == botCtx.PriorityPause {
+				if b.ctx.GetPriority() == botCtx.PriorityPause {
 					continue
 				}
 				b.ctx.RefreshGameData()
@@ -162,7 +162,7 @@ func (b *Bot) Run(ctx context.Context, firstRun bool, runs []run.Run) error {
 				b.Stop()
 				return nil
 			case <-ticker.C:
-				if b.ctx.ExecutionPriority == botCtx.PriorityPause {
+				if b.ctx.GetPriority() == botCtx.PriorityPause {
 					continue
 				}
 				if b.ctx.Drop != nil && (b.ctx.Drop.Pending() != nil || b.ctx.Drop.Active() != nil) {
@@ -239,7 +239,7 @@ func (b *Bot) Run(ctx context.Context, firstRun bool, runs []run.Run) error {
 			case <-ctx.Done():
 				return nil
 			case <-ticker.C:
-				if b.ctx.ExecutionPriority == botCtx.PriorityPause {
+				if b.ctx.GetPriority() == botCtx.PriorityPause {
 					continue
 				}
 

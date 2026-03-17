@@ -447,6 +447,8 @@ func MoveTo(toFunc func() (data.Position, bool), options ...step.MoveOption) err
 	var pathFound bool
 	var pathErrors int
 	var stuck bool
+	stuckRetries := 0
+	const maxStuckRetries = 7
 	blacklistedInteractions := map[data.UnitID]bool{}
 	adjustMinDist := false
 
@@ -749,13 +751,25 @@ func MoveTo(toFunc func() (data.Position, bool), options ...step.MoveOption) err
 			if errors.Is(moveErr, step.ErrMonstersInPath) {
 				continue
 			} else if errors.Is(moveErr, step.ErrPlayerStuck) || errors.Is(moveErr, step.ErrPlayerRoundTrip) {
+				stuckRetries++
+				if stuckRetries > maxStuckRetries {
+					ctx.Logger.Warn("MoveTo: stuck after max retries, aborting",
+						slog.Int("retries", stuckRetries),
+						slog.Any("position", ctx.Data.PlayerUnit.Position),
+						slog.Any("destination", targetPosition))
+					return fmt.Errorf("MoveTo: stuck after %d retries: %w", stuckRetries, moveErr)
+				}
 				ctx.Logger.Debug("MoveTo: step error, retrying",
 					slog.String("error", moveErr.Error()),
+					slog.Int("stuckRetry", stuckRetries),
 					slog.Any("position", ctx.Data.PlayerUnit.Position),
 					slog.Any("destination", targetPosition))
 				if ctx.Data.CanTeleport() && !ctx.Data.PlayerUnit.Area.IsTown() {
-					// Teleporter stuck in a corner/wall: teleport to a random walkable position
-					ctx.PathFinder.RandomTeleport()
+					if stuckRetries >= 4 {
+						ctx.PathFinder.DirectionalTeleport(targetPosition)
+					} else {
+						ctx.PathFinder.RandomTeleport()
+					}
 				} else {
 					ctx.PathFinder.RandomMovement()
 					time.Sleep(time.Millisecond * 200)

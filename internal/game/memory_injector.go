@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log/slog"
 	"strings"
+	"sync"
 	"syscall"
 
 	"github.com/hectorgimenez/d2go/pkg/memory"
@@ -17,6 +18,7 @@ import (
 const fullAccess = windows.PROCESS_VM_OPERATION | windows.PROCESS_VM_WRITE | windows.PROCESS_VM_READ
 
 type MemoryInjector struct {
+	mu                    sync.Mutex
 	isLoaded              bool
 	pid                   uint32
 	handle                windows.Handle
@@ -125,6 +127,8 @@ func (i *MemoryInjector) RestoreMemory() error {
 }
 
 func (i *MemoryInjector) DisableCursorOverride() error {
+	i.mu.Lock()
+	defer i.mu.Unlock()
 	if !i.isLoaded || !i.cursorOverrideActive {
 		return nil
 	}
@@ -150,6 +154,8 @@ func (i *MemoryInjector) EnableCursorOverride() error {
 }
 
 func (i *MemoryInjector) CursorPos(x, y int) error {
+	i.mu.Lock()
+	defer i.mu.Unlock()
 	if !i.isLoaded {
 		return nil
 	}
@@ -180,6 +186,8 @@ func (i *MemoryInjector) CursorPos(x, y int) error {
 }
 
 func (i *MemoryInjector) OverrideGetKeyState(key byte) error {
+	i.mu.Lock()
+	defer i.mu.Unlock()
 	if !i.isLoaded {
 		return nil
 	}
