@@ -1736,6 +1736,10 @@
                     <input type="checkbox" name="companionBonusRuns" id="companionBonusRuns" {{ if .Config.Companion.BonusRuns }}checked{{ end }}/>
                     Bonus runs while waiting
                 </label>
+                <label>
+                    <input type="checkbox" name="companionLeaderPriorityRuns" {{ if .Config.Companion.LeaderPriorityRuns }}checked{{ end }}/>
+                    Leader Priority Runs
+                </label>
             </fieldset>
             <script>
                 document.getElementById('companionBonusRuns').addEventListener('change', function() {

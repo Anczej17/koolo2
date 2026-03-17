@@ -6,8 +6,9 @@ import "github.com/hectorgimenez/d2go/pkg/data/area"
 type StepKind int
 
 const (
-	StepMove  StepKind = iota // Move to area, do NOT clear
-	StepClear                 // Clear area (after moving there)
+	StepMove   StepKind = iota // Move to area, do NOT clear
+	StepClear                  // Clear area (after moving there)
+	StepPortal                 // Interact with red portal to reach area, then clear it
 )
 
 // Step represents one action in a route.
@@ -26,6 +27,10 @@ func Clear(a area.ID) Step {
 
 func Move(a area.ID) Step {
 	return Step{Kind: StepMove, Area: a}
+}
+
+func Portal(a area.ID) Step {
+	return Step{Kind: StepPortal, Area: a}
 }
 
 // Routes is the central definition of multi-area TZ runs.
@@ -67,11 +72,11 @@ var Routes = map[area.ID][]Route{
 	// Diablo -> terror_zone.go -> NewPit().Run() ect...
 
 	// Act 5
-	area.BloodyFoothills:    {{Move(area.Harrogath), Clear(area.BloodyFoothills), Clear(area.FrigidHighlands)}}, //area.BloodyFoothills:    {{Move(area.Harrogath), Clear(area.BloodyFoothills), Clear(area.FrigidHighlands), Clear(area.Abaddon)}},
+	area.BloodyFoothills:    {{Move(area.Harrogath), Clear(area.BloodyFoothills), Clear(area.FrigidHighlands), Portal(area.Abaddon)}},
 	area.GlacialTrail:       {{Clear(area.GlacialTrail), Clear(area.DrifterCavern)}},
 	area.CrystallinePassage: {{Clear(area.CrystallinePassage), Clear(area.FrozenRiver)}},
-	area.ArreatPlateau:      {{Clear(area.ArreatPlateau), Clear(area.PitOfAcheron)}}, //area.ArreatPlateau:      {{Clear(area.ArreatPlateau), Clear(area.PitOfAcheron)}},
-	area.FrozenTundra:       {{Clear(area.FrozenTundra)}},                            //area.FrozenTundra:       {{Clear(area.FrozenTundra), Clear(area.InfernalPit)}},
+	area.ArreatPlateau:      {{Clear(area.ArreatPlateau), Portal(area.PitOfAcheron)}},
+	area.FrozenTundra:       {{Clear(area.FrozenTundra), Portal(area.InfernalPit)}},
 	area.TheAncientsWay:     {{Clear(area.TheAncientsWay), Clear(area.IcyCellar)}},
 	area.NihlathaksTemple:   {{Clear(area.NihlathaksTemple), Clear(area.HallsOfAnguish), Clear(area.HallsOfPain), Clear(area.HallsOfVaught)}},
 	// Nihlathak, Baal-> terror_zone.go -> NewPit().Run() ect...

@@ -213,19 +213,18 @@ func (s NovaSorceress) repositionFromHerald(herald *data.Monster) bool {
 	ctx := context.Get()
 	playerPos := ctx.Data.PlayerUnit.Position
 
-	// Simple approach: teleport AWAY from Herald using BeyondPosition
-	// This extends the line Herald→Player by HeraldSafeDistance tiles
-	dest := ctx.PathFinder.BeyondPosition(herald.Position, playerPos, HeraldSafeDistance)
-
-	if err := step.MoveTo(dest); err != nil {
-		// Fallback: try the full ring search
-		if targetPos, found := s.findSafePositionFromHerald(herald.Position, playerPos); found {
-			if err := step.MoveTo(targetPos); err != nil {
-				s.Logger.Warn("Herald reposition failed", slog.String("error", err.Error()))
-				return false
-			}
+	// Use findSafePositionFromHerald for precise ring-based positioning.
+	// Fallback: MoveTo herald with WithDistanceToFinish to maintain safe distance.
+	if targetPos, found := s.findSafePositionFromHerald(herald.Position, playerPos); found {
+		if err := step.MoveTo(targetPos); err == nil {
 			return true
 		}
+	}
+
+	// Fallback: move away using distance-to-finish approach
+	dest := herald.Position
+
+	if err := step.MoveTo(dest, step.WithDistanceToFinish(HeraldSafeDistance)); err != nil {
 		s.Logger.Warn("Herald reposition failed", slog.String("error", err.Error()))
 		return false
 	}
@@ -963,7 +962,7 @@ func (s NovaSorceress) KillMonsterSequence(
 			staticMax := StaticMaxDistance
 			staticCasts := 1
 			if isHeraldMonster {
-				staticMin = 0
+				staticMin = HeraldDangerDistance
 				staticCasts = 4
 			}
 			staticOpts := []step.AttackOption{

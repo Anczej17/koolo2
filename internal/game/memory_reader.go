@@ -135,7 +135,9 @@ func (gd *MemoryReader) FetchMapData() error {
 		})
 	}
 
-	_ = g.Wait()
+	if err := g.Wait(); err != nil {
+		gd.logger.Error("error processing map data", slog.Any("error", err))
+	}
 
 	gd.mapDataMu.Lock()
 	gd.cachedMapData = areas
@@ -254,6 +256,11 @@ func (gd *MemoryReader) GetData() Data {
 	gd.mapDataMu.RUnlock()
 
 	currentArea, ok := cachedData[d.PlayerUnit.Area]
+	if !ok && cachedData != nil && d.PlayerUnit.Area != 0 {
+		gd.logger.Warn("Player in unknown area not found in cached map data",
+			slog.Int("areaID", int(d.PlayerUnit.Area)),
+		)
+	}
 	if ok {
 		// This hacky thing is because sometimes if the objects are far away we can not fetch them, basically WP.
 		memObjects := gd.Objects(d.PlayerUnit.Position, d.HoverData)

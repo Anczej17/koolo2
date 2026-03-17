@@ -122,6 +122,7 @@ type RoomTraverser struct {
 	pf      *PathFinder
 	visited map[data.Room]bool
 	filter  []data.MonsterFilter
+	logger  *slog.Logger
 }
 
 // NewRoomTraverser creates a traverser and marks the player's current room as visited.
@@ -131,6 +132,7 @@ func (pf *PathFinder) NewRoomTraverser(filters ...data.MonsterFilter) *RoomTrave
 		pf:      pf,
 		visited: make(map[data.Room]bool),
 		filter:  filters,
+		logger:  slog.Default(),
 	}
 	// Mark current room as visited
 	for _, r := range pf.data.Rooms {
@@ -140,6 +142,13 @@ func (pf *PathFinder) NewRoomTraverser(filters ...data.MonsterFilter) *RoomTrave
 		}
 	}
 	return rt
+}
+
+// SetLogger sets a structured logger for the traverser (defaults to slog.Default).
+func (rt *RoomTraverser) SetLogger(l *slog.Logger) {
+	if l != nil {
+		rt.logger = l
+	}
 }
 
 // roomHasMonsters checks if a room has any living enemies matching the filter.
@@ -251,12 +260,21 @@ func (rt *RoomTraverser) NextRoom() (data.Room, bool) {
 		}
 	}
 
-	// Pre-compute alive enemies matching filter (single Enemies() call, reused for all rooms)
-	enemies := rt.pf.data.Monsters.Enemies(validFilters...)
-	aliveEnemies := make([]data.Monster, 0, len(enemies))
-	for _, m := range enemies {
+	// Pre-compute alive enemies matching filter (for candidate priority — which rooms have killable monsters)
+	filteredEnemies := rt.pf.data.Monsters.Enemies(validFilters...)
+	aliveFilteredEnemies := make([]data.Monster, 0, len(filteredEnemies))
+	for _, m := range filteredEnemies {
 		if m.Stats[stat.Life] > 0 {
-			aliveEnemies = append(aliveEnemies, m)
+			aliveFilteredEnemies = append(aliveFilteredEnemies, m)
+		}
+	}
+
+	// Pre-compute ALL alive enemies (unfiltered — for skip/exit decisions so immune monsters don't cause premature exit)
+	allEnemies := rt.pf.data.Monsters.Enemies()
+	allAliveEnemies := make([]data.Monster, 0, len(allEnemies))
+	for _, m := range allEnemies {
+		if m.Stats[stat.Life] > 0 {
+			allAliveEnemies = append(allAliveEnemies, m)
 		}
 	}
 
@@ -271,9 +289,9 @@ func (rt *RoomTraverser) NextRoom() (data.Room, bool) {
 		}
 	}
 
-	// Helper: check if room has alive matching enemies (uses pre-computed slice)
-	roomHasAliveEnemy := func(room data.Room) bool {
-		for _, m := range aliveEnemies {
+	// Helper: check if room has alive FILTERED enemies (for candidate priority + auto-skip)
+	roomHasFilteredEnemy := func(room data.Room) bool {
+		for _, m := range aliveFilteredEnemies {
 			if room.IsInside(m.Position) {
 				return true
 			}
@@ -296,8 +314,9 @@ func (rt *RoomTraverser) NextRoom() (data.Room, bool) {
 			continue
 		}
 
-		// Check monster state once per room (used for both skip and candidate)
-		hasMonsters := roomHasAliveEnemy(r)
+		// Check monster state: filtered enemies for skip + candidate priority.
+		// (Keeps onlyelites working — rooms with only white mobs are still skipped.)
+		hasMonsters := roomHasFilteredEnemy(r)
 
 		// Auto-skip empty rooms: activated (monsters loaded & killed) or close enough
 		// that D2R would have loaded monsters if any existed (~20 tiles activation radius).
@@ -315,15 +334,17 @@ func (rt *RoomTraverser) NextRoom() (data.Room, bool) {
 	}
 
 	if len(candidates) == 0 {
+		rt.logger.Info("RoomTraverser: no candidates left — all rooms visited",
+			slog.Int("totalRooms", len(rt.pf.data.Rooms)),
+			slog.Int("visited", len(rt.visited)),
+			slog.String("area", rt.pf.data.PlayerUnit.Area.Area().Name))
 		return data.Room{}, false
 	}
 
 	// Early exit: stop traversing when all of these are true:
-	// 1. No candidate room has visible monsters
-	// 2. No alive enemies remain on the map
+	// 1. No candidate room has killable (filtered) monsters
+	// 2. No alive enemies remain on the map AT ALL (including immune — prevents premature exit)
 	// 3. We've visited at least 75% of rooms (prevents quitting before exploring dungeons)
-	// Without condition 3, the bot could exit a dungeon after clearing the first room
-	// when the next room behind a corridor hasn't been activated yet.
 	hasAnyMonsterCandidate := false
 	for _, c := range candidates {
 		if c.hasEnemy {
@@ -339,7 +360,15 @@ func (rt *RoomTraverser) NextRoom() (data.Room, bool) {
 		}
 	}
 	exploredEnough := totalRooms > 0 && visitedCount*100/totalRooms >= 75
-	if !hasAnyMonsterCandidate && len(aliveEnemies) == 0 && exploredEnough {
+	if !hasAnyMonsterCandidate && len(allAliveEnemies) == 0 && exploredEnough {
+		rt.logger.Info("RoomTraverser: early exit — area cleared",
+			slog.Int("totalRooms", totalRooms),
+			slog.Int("visited", visitedCount),
+			slog.Int("pctExplored", visitedCount*100/totalRooms),
+			slog.Int("candidates", len(candidates)),
+			slog.Int("aliveFiltered", len(aliveFilteredEnemies)),
+			slog.Int("aliveAll", len(allAliveEnemies)),
+			slog.String("area", rt.pf.data.PlayerUnit.Area.Area().Name))
 		return data.Room{}, false
 	}
 
@@ -410,7 +439,7 @@ func (rt *RoomTraverser) NextRoom() (data.Room, bool) {
 	chosen := candidates[bestIdx].room
 	rt.visited[chosen] = true
 
-	slog.Debug("NextRoom selected",
+	rt.logger.Debug("NextRoom selected",
 		slog.Int("euclDist", candidates[bestIdx].euclDist),
 		slog.Int("realDist", bestRealDist),
 		slog.Bool("hasMonsters", candidates[bestIdx].hasEnemy),

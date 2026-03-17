@@ -26,7 +26,7 @@ func ReplaceGameSettings(modName string) error {
 		}
 	}
 
-	if _, err := os.Stat(modSettingsPath + ".bkp"); os.IsExist(err) {
+	if _, err := os.Stat(modSettingsPath + ".bkp"); err == nil {
 		err = os.Rename(modSettingsPath, modSettingsPath+".bkp")
 		// File does not exist, no need to back up
 		if err != nil && !os.IsNotExist(err) {

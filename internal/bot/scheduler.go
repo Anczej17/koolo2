@@ -63,6 +63,7 @@ type Scheduler struct {
 	manager       *SupervisorManager
 	logger        *slog.Logger
 	stop          chan struct{}
+	stopOnce      sync.Once
 
 	// Duration mode state (per supervisor)
 	durationState map[string]*DurationState
@@ -100,7 +101,9 @@ func (s *Scheduler) Start() {
 }
 
 func (s *Scheduler) Stop() {
-	close(s.stop)
+	s.stopOnce.Do(func() {
+		close(s.stop)
+	})
 }
 
 func (s *Scheduler) checkSchedules() {
@@ -745,13 +748,18 @@ func (s *Scheduler) saveHistory(supervisorName string, state *DurationState) {
 	os.WriteFile(path, data, 0644)
 }
 
-// GetDurationState returns the current duration state for a supervisor (for UI display)
+// GetDurationState returns a copy of the current duration state for a supervisor (for UI display).
+// Returning a value copy avoids exposing the internal pointer without holding the lock.
 func (s *Scheduler) GetDurationState(supervisorName string) *DurationState {
 	s.stateMux.RLock()
 	defer s.stateMux.RUnlock()
 
 	if state, exists := s.durationState[supervisorName]; exists {
-		return state
+		cp := *state
+		// Deep-copy the slice to prevent caller from mutating internal state
+		cp.ScheduledBreaks = make([]ScheduledBreak, len(state.ScheduledBreaks))
+		copy(cp.ScheduledBreaks, state.ScheduledBreaks)
+		return &cp
 	}
 	return nil
 }

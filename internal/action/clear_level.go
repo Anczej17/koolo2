@@ -3,6 +3,7 @@ package action
 import (
 	"fmt"
 	"log/slog"
+	"runtime/debug"
 	"time"
 
 	"github.com/hectorgimenez/d2go/pkg/data"
@@ -48,18 +49,34 @@ func ClearCurrentLevelEx(openChests bool, filter data.MonsterFilter, shouldInter
 		}()
 	}
 
+	// Global settings take priority. Per-run openChests only enables chests
+	// if at least one global chest setting is on. This prevents runs like
+	// TalRashaTombs (hardcoded openChests=true) from overriding the player's
+	// explicit decision to disable all chest interaction.
 	openAllChests := ctx.CharacterCfg.Game.InteractWithChests
 	openSuperOnly := ctx.CharacterCfg.Game.InteractWithSuperChests && !openAllChests
+	if openChests && !openAllChests && !openSuperOnly {
+		// Per-run wants chests, but player disabled all chest interaction globally.
+		// Respect the player's setting.
+		openChests = false
+	}
 
 	// We can make this configurable later, but 20 is a good starting radius.
 	const pickupRadius = 20
 
 	traverser := ctx.PathFinder.NewRoomTraverser(filter)
+	traverser.SetLogger(ctx.Logger)
+	roomCount := 0
 	for {
 		r, hasMore := traverser.NextRoom()
 		if !hasMore {
+			ctx.Logger.Info("ClearCurrentLevel: traversal done",
+				slog.String("area", ctx.Data.PlayerUnit.Area.Area().Name),
+				slog.Int("roomsCleared", roomCount),
+				slog.Int("totalRooms", len(ctx.Data.Rooms)))
 			break
 		}
+		roomCount++
 
 		if errDeath := checkPlayerDeath(ctx); errDeath != nil {
 			return errDeath
@@ -106,38 +123,51 @@ func ClearCurrentLevelEx(openChests bool, filter data.MonsterFilter, shouldInter
 				}
 
 				if shouldOpen {
-					ctx.Logger.Debug(fmt.Sprintf(
-						"Found chest. attempting to interact. Name=%s.\nID=%v UnitID=%v Pos=%v,%v Area='%s' InteractType=%v",
-						o.Desc().Name,
-						o.Name,
-						o.ID,
-						o.Position.X,
-						o.Position.Y,
-						ctx.Data.PlayerUnit.Area.Area().Name,
-						o.InteractType,
-					))
+					// Wrap chest interaction in recover to prevent panics from killing the entire run
+					func() {
+						defer func() {
+							if r := recover(); r != nil {
+								ctx.Logger.Error("Panic during chest interaction (recovered, continuing run)",
+									slog.String("panic", fmt.Sprintf("%v", r)),
+									slog.String("stack", string(debug.Stack())),
+									slog.Int("objectID", int(o.Name)),
+									slog.Any("position", o.Position))
+							}
+						}()
 
-					err = MoveToCoords(o.Position)
-					if err != nil {
-						ctx.Logger.Warn("Failed moving to chest", slog.Any("error", err))
-						continue
-					}
+						ctx.Logger.Debug(fmt.Sprintf(
+							"Found chest. attempting to interact. Name=%s.\nID=%v UnitID=%v Pos=%v,%v Area='%s' InteractType=%v",
+							o.Desc().Name,
+							o.Name,
+							o.ID,
+							o.Position.X,
+							o.Position.Y,
+							ctx.Data.PlayerUnit.Area.Area().Name,
+							o.InteractType,
+						))
 
-					// Clear nearby monsters before opening (prevents stuck when filter skipped white mobs)
-					if enemyFound, _ := IsAnyEnemyAroundPlayer(10); enemyFound {
-						ClearAreaAroundPlayer(10, nil)
-					}
+						moveErr := MoveToCoords(o.Position)
+						if moveErr != nil {
+							ctx.Logger.Warn("Failed moving to chest", slog.Any("error", moveErr))
+							return
+						}
 
-					err = InteractObject(o, func() bool {
-						chest, _ := ctx.Data.Objects.FindByID(o.ID)
-						return !chest.Selectable
-					})
-					if err != nil {
-						ctx.Logger.Warn("Failed interacting with chest", slog.Any("error", err))
-					}
+						// Clear nearby monsters before opening (prevents stuck when filter skipped white mobs)
+						if enemyFound, _ := IsAnyEnemyAroundPlayer(10); enemyFound {
+							ClearAreaAroundPlayer(10, data.MonsterAnyFilter())
+						}
 
-					// Add small delay to allow the game to open the chest and drop the content
-					utils.Sleep(500)
+						interactErr := InteractObject(o, func() bool {
+							chest, found := ctx.Data.Objects.FindByID(o.ID)
+							return found && !chest.Selectable
+						})
+						if interactErr != nil {
+							ctx.Logger.Warn("Failed interacting with chest", slog.Any("error", interactErr))
+						}
+
+						// Add small delay to allow the game to open the chest and drop the content
+						utils.Sleep(500)
+					}()
 				}
 			}
 		}

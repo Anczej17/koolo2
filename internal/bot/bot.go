@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"runtime/debug"
 	"sync"
 	"time"
 
@@ -21,6 +22,13 @@ import (
 	"github.com/hectorgimenez/koolo/internal/run"
 	"github.com/hectorgimenez/koolo/internal/utils"
 	"golang.org/x/sync/errgroup"
+)
+
+// Sentinel errors for run finish reasons
+var (
+	errPlayerIdle   = errors.New("player idle for too long, quitting game")
+	errGlobalIdle   = errors.New("bot globally idle for too long (no movement), quitting game")
+	errPlayerStuck  = errors.New("player stuck in an unrecoverable movement loop, quitting")
 )
 
 type Bot struct {
@@ -92,7 +100,7 @@ func (b *Bot) Run(ctx context.Context, firstRun bool, runs []run.Run) error {
 
 	gameStartedAt := time.Now()
 	b.ctx.SwitchPriority(botCtx.PriorityNormal) // Restore priority to normal, in case it was stopped in previous game
-	b.ctx.CurrentGame = botCtx.NewGameHelper()  // Reset current game helper structure
+	b.ctx.CurrentGame.ResetForNewGame()         // Reset per-game fields without wiping bonus run state
 	// Drop: Initialize Drop manager and start watch context
 	if b.ctx.Drop == nil {
 		b.ctx.Drop = drop.NewManager(b.ctx.Name, b.ctx.Logger)
@@ -401,6 +409,10 @@ func (b *Bot) Run(ctx context.Context, firstRun bool, runs []run.Run) error {
 			if r := recover(); r != nil {
 				if e, ok := r.(error); ok && errors.Is(e, health.ErrChicken) {
 					returnErr = e
+				} else if fmt.Sprintf("%v", r) != "Bot is stopped" {
+					b.ctx.Logger.Error("Run goroutine panic (recovered)",
+						slog.String("panic", fmt.Sprintf("%v", r)),
+						slog.String("stack", string(debug.Stack())))
 				}
 			}
 		}()
@@ -450,11 +462,11 @@ func (b *Bot) Run(ctx context.Context, firstRun bool, runs []run.Run) error {
 						runFinishReason = event.FinishedMercChicken
 					case errors.Is(err, health.ErrDied):
 						runFinishReason = event.FinishedDied
-					case errors.Is(err, errors.New("player idle for too long, quitting game")): // Match the specific error
+					case errors.Is(err, errPlayerIdle):
 						runFinishReason = event.FinishedError
-					case errors.Is(err, errors.New("bot globally idle for too long (no movement), quitting game")): // Match the specific error for movement-based idle
+					case errors.Is(err, errGlobalIdle):
 						runFinishReason = event.FinishedError
-					case errors.Is(err, errors.New("player stuck in an unrecoverable movement loop, quitting")): // Match the specific error for movement-based idle
+					case errors.Is(err, errPlayerStuck):
 						runFinishReason = event.FinishedError
 					case errors.Is(err, action.ErrFailedToEquip): // This is the new line
 						runFinishReason = event.FinishedError

@@ -6,6 +6,7 @@ import (
 	"math/rand"
 	"os/exec"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 	"unsafe"
@@ -19,6 +20,11 @@ import (
 	"golang.org/x/sys/windows"
 	"golang.org/x/sys/windows/registry"
 )
+
+// startGameMu serializes D2R launches across all supervisors.
+// On GPU-P (Hyper-V GPU partitioning) setups, concurrent D2R launches
+// fight for the same GPU resources and fail with "Failed to initialize graphics device".
+var startGameMu sync.Mutex
 
 type Manager struct {
 	gr             *MemoryReader
@@ -285,7 +291,7 @@ func closeWindowAndTerminateProcess(hwnd windows.HWND, pid uint32) {
 }
 
 func StartGame(username string, password string, authmethod string, authToken string, realm string, arguments string, useCustomSettings bool) (uint32, win.HWND, error) {
-	const maxGPURetries = 5
+	const maxGPURetries = 8
 
 	// First check for other instances of the game and kill the handles, otherwise we will not be able to start the game
 	err := KillAllClientHandles()
@@ -386,6 +392,11 @@ func StartGame(username string, password string, authmethod string, authToken st
 		// If we got to here we've successfully updated the auth token :)
 	}
 
+	// Serialize D2R launches across all supervisors.
+	// On GPU-P / Hyper-V setups, concurrent GPU init causes "Failed to initialize graphics device".
+	startGameMu.Lock()
+	defer startGameMu.Unlock()
+
 	// Start the game with retry logic for GPU initialization errors
 	for attempt := 0; attempt < maxGPURetries; attempt++ {
 		cmd := exec.Command(config.Koolo.D2RPath+"\\D2R.exe", fullArgs...)
@@ -416,17 +427,25 @@ func StartGame(username string, password string, authmethod string, authToken st
 
 		// Check if the window is a GPU error dialog
 		if isGPUErrorWindow(foundHwnd) {
-			fmt.Printf("GPU initialization error detected (attempt %d/%d), retrying...\n", attempt+1, maxGPURetries)
+			// Exponential backoff: 3s, 6s, 12s, 24s, ...
+			retryDelay := time.Duration(3<<uint(attempt)) * time.Second
+			if retryDelay > 30*time.Second {
+				retryDelay = 30 * time.Second
+			}
+			fmt.Printf("GPU initialization error detected (attempt %d/%d), retrying in %v...\n", attempt+1, maxGPURetries, retryDelay)
 			closeWindowAndTerminateProcess(foundHwnd, uint32(cmd.Process.Pid))
-			time.Sleep(2 * time.Second)
+			time.Sleep(retryDelay)
 			continue // Retry
 		}
 
-		// Close the handle for the new process, it will allow the user to open another instance of the game
+		// Success — close the handle for the new process so the user can open another instance
 		err = KillAllClientHandles()
 		if err != nil {
 			return 0, 0, err
 		}
+
+		// Hold the mutex a little longer to let GPU settle before the next supervisor starts
+		time.Sleep(3 * time.Second)
 
 		return uint32(cmd.Process.Pid), win.HWND(foundHwnd), nil
 	}

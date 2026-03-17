@@ -138,10 +138,10 @@ func Buff() {
 	// Ensure we start on primary weapon
 	ensurePrimaryWeapon()
 
-	// --- Phase 0: Probe weapon sets (once per game session) ---
+	// --- Phase 0: Probe weapon sets (once per game session, per character) ---
 	// Swaps to each weapon set, refreshes data, reads bonuses, caches results.
 	// Must run BEFORE any buff casting so the cache is ready.
-	if !weaponCacheReady {
+	if !ctx.WeaponCacheReady {
 		ctx.Logger.Info("Probing weapon sets for buff skill bonuses...")
 		probeBestWeaponSlots()
 	}
@@ -255,7 +255,7 @@ func castBarbarianWarcries() {
 
 		_, found := ctx.Data.KeyBindings.KeyBindingForSkill(warcry)
 		if !found {
-			ctx.Logger.Debug("Keybinding not found for warcry", slog.String("skill", warcry.Desc().Name))
+			ctx.Logger.Debug("Keybinding not found for warcry", slog.String("skill", skill.SkillNames[warcry]))
 			continue
 		}
 
@@ -338,20 +338,15 @@ func castPostCTABuffs(isBarbarian bool) {
 // INTERNAL: BUFF CASTING WITH WEAPON SELECTION
 // ============================================================================
 
-// bestWeaponSlotCache stores the probed best weapon slot (0=primary, 1=secondary) per skill.
-// Populated once on first Buff() call via probeBestWeaponSlots().
-var (
-	bestWeaponSlotCache map[skill.ID]int
-	weaponCacheReady    bool
-)
+// Weapon slot cache is stored per-character in context.Context.BestWeaponSlotCache
+// and context.Context.WeaponCacheReady to avoid cross-character contamination.
 
-// probeBestWeaponSlots reads +skill bonuses directly from weapon/shield items in each
-// weapon set. ByLocation(LocationEquipped) returns items from BOTH sets simultaneously,
-// so we filter by BodyLocation (LocLeftArm/LocRightArm vs LocLeftArmSecondary/LocRightArmSecondary).
-// Non-weapon items (armor, helm, etc.) are the same for both sets and cancel out.
+// probeBestWeaponSlots physically swaps to each weapon set and reads +skill bonuses
+// from equipped weapon/shield items. D2R memory only has complete stats for the ACTIVE
+// weapon set, so we must swap to each slot before reading.
 func probeBestWeaponSlots() {
 	ctx := context.Get()
-	bestWeaponSlotCache = make(map[skill.ID]int)
+	ctx.BestWeaponSlotCache = make(map[skill.ID]int)
 
 	// Collect all buff skills that need weapon selection
 	allBuffs := make([]skill.ID, 0)
@@ -367,15 +362,20 @@ func probeBestWeaponSlots() {
 	}
 
 	if len(probeSkills) == 0 {
-		weaponCacheReady = true
+		ctx.WeaponCacheReady = true
 		return
 	}
 
-	// Refresh once — both weapon sets are visible simultaneously
+	playerClass := int(ctx.Data.PlayerUnit.Class)
+
+	// ByLocation(LocationEquipped) returns ALL equipped items at once.
+	// BodyLocation is permanent — primary = LocLeftArm/LocRightArm,
+	// secondary = LocLeftArmSecondary/LocRightArmSecondary.
+	// No need to swap — both slots' items are always visible.
 	ctx.RefreshGameData()
 
-	// Split equipped items into primary weapons vs secondary weapons
-	var primaryWeapons, secondaryWeapons []data.Item
+	var primaryWeapons []data.Item
+	var secondaryWeapons []data.Item
 	for _, itm := range ctx.Data.Inventory.ByLocation(item.LocationEquipped) {
 		switch itm.Location.BodyLocation {
 		case item.LocLeftArm, item.LocRightArm:
@@ -399,31 +399,31 @@ func probeBestWeaponSlots() {
 		slog.Int("primaryWeapons", len(primaryWeapons)),
 		slog.Int("secondaryWeapons", len(secondaryWeapons)))
 
-	// Compare bonuses per skill
-	playerClass := int(ctx.Data.PlayerUnit.Class)
-	ctx.Logger.Debug("Probe: player class index", slog.Int("class", playerClass))
+	slot0Bonuses := make(map[skill.ID]int)
+	slot1Bonuses := make(map[skill.ID]int)
 	for _, sk := range probeSkills {
-		ctx.Logger.Debug("Probing skill bonuses", slog.String("skill", sk.Desc().Name),
-			slog.Int("skillID", int(sk)))
-		ctx.Logger.Debug("--- Primary weapon set ---")
-		b0 := sumSkillBonusFromItems(primaryWeapons, sk, playerClass)
-		ctx.Logger.Debug("--- Secondary weapon set ---")
-		b1 := sumSkillBonusFromItems(secondaryWeapons, sk, playerClass)
+		slot0Bonuses[sk] = sumSkillBonusFromItems(primaryWeapons, sk, playerClass)
+		slot1Bonuses[sk] = sumSkillBonusFromItems(secondaryWeapons, sk, playerClass)
+	}
+
+	for _, sk := range probeSkills {
+		b0 := slot0Bonuses[sk]
+		b1 := slot1Bonuses[sk]
 
 		if b1 > b0 {
-			bestWeaponSlotCache[sk] = 1
+			ctx.BestWeaponSlotCache[sk] = 1
 		} else {
-			bestWeaponSlotCache[sk] = 0
+			ctx.BestWeaponSlotCache[sk] = 0
 		}
 
 		ctx.Logger.Debug("Buff weapon probe result",
-			slog.String("skill", sk.Desc().Name),
+			slog.String("skill", skill.SkillNames[sk]),
 			slog.Int("slot0Bonus", b0),
 			slog.Int("slot1Bonus", b1),
-			slog.Int("bestSlot", bestWeaponSlotCache[sk]))
+			slog.Int("bestSlot", ctx.BestWeaponSlotCache[sk]))
 	}
 
-	weaponCacheReady = true
+	ctx.WeaponCacheReady = true
 }
 
 // sumSkillBonusFromItems sums +skill bonuses from a specific set of items for a given skill.
@@ -455,7 +455,7 @@ func sumSkillBonusFromItems(items []data.Item, sk skill.ID, playerClass int) int
 			ctx.Logger.Debug("  stat NonClassSkill found",
 				slog.String("item", string(itm.Name)),
 				slog.Int("value", s.Value),
-				slog.String("skill", sk.Desc().Name))
+				slog.String("skill", skill.SkillNames[sk]))
 		}
 		// +X to specific skill (e.g., +3 Energy Shield on staff)
 		if s, found := itm.FindStat(stat.SingleSkill, int(sk)); found {
@@ -463,13 +463,13 @@ func sumSkillBonusFromItems(items []data.Item, sk skill.ID, playerClass int) int
 			ctx.Logger.Debug("  stat SingleSkill found",
 				slog.String("item", string(itm.Name)),
 				slog.Int("value", s.Value),
-				slog.String("skill", sk.Desc().Name))
+				slog.String("skill", skill.SkillNames[sk]))
 		}
 		if itemBonus > 0 {
 			ctx.Logger.Debug("  item total bonus",
 				slog.String("item", string(itm.Name)),
 				slog.Int("bonus", itemBonus),
-				slog.String("forSkill", sk.Desc().Name))
+				slog.String("forSkill", skill.SkillNames[sk]))
 		}
 		bonus += itemBonus
 	}
@@ -496,10 +496,10 @@ func logItemSkillStats(itm data.Item) {
 func castBuffWithBestWeapon(buffSkill skill.ID, expectedState state.State) {
 	ctx := context.Get()
 
-	// Use cached probe result
+	// Use cached probe result (per-character cache)
 	bestSlot := 0
-	if weaponCacheReady {
-		if slot, ok := bestWeaponSlotCache[buffSkill]; ok {
+	if ctx.WeaponCacheReady {
+		if slot, ok := ctx.BestWeaponSlotCache[buffSkill]; ok {
 			bestSlot = slot
 		}
 	}
@@ -507,7 +507,7 @@ func castBuffWithBestWeapon(buffSkill skill.ID, expectedState state.State) {
 	useSwap := bestSlot == 1
 
 	ctx.Logger.Debug("Buff weapon selection (cached)",
-		slog.String("skill", buffSkill.Desc().Name),
+		slog.String("skill", skill.SkillNames[buffSkill]),
 		slog.Int("bestSlot", bestSlot),
 		slog.Bool("useSwap", useSwap))
 
@@ -529,7 +529,7 @@ func castBuffWithBestWeapon(buffSkill skill.ID, expectedState state.State) {
 // then casts and verifies the state appeared. Retries up to maxCastRetries times.
 func castBuffWithRetry(buffSkill skill.ID, expectedState state.State) {
 	ctx := context.Get()
-	skillName := buffSkill.Desc().Name
+	skillName := skill.SkillNames[buffSkill]
 
 	for attempt := 0; attempt <= maxCastRetries; attempt++ {
 		if attempt > 0 {
@@ -619,14 +619,14 @@ func restoreRightSkill(sk skill.ID) {
 	kb, found := ctx.Data.KeyBindings.KeyBindingForSkill(sk)
 	if !found {
 		ctx.Logger.Debug("Cannot restore right skill - no keybinding",
-			slog.String("skill", sk.Desc().Name))
+			slog.String("skill", skill.SkillNames[sk]))
 		return
 	}
 
 	ctx.HID.PressKeyBinding(kb)
 	utils.Sleep(150)
 
-	ctx.Logger.Debug("Restored right skill", slog.String("skill", sk.Desc().Name))
+	ctx.Logger.Debug("Restored right skill", slog.String("skill", skill.SkillNames[sk]))
 }
 
 // ============================================================================

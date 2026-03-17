@@ -173,8 +173,23 @@ func MoveToArea(dst area.ID) error {
 	}
 
 	if lvl.Position.X == 0 && lvl.Position.Y == 0 {
+		// Log all adjacent levels for debugging
+		adjNames := make([]string, 0, len(ctx.Data.AdjacentLevels))
+		for _, a := range ctx.Data.AdjacentLevels {
+			adjNames = append(adjNames, a.Area.Area().Name)
+		}
+		ctx.Logger.Warn("MoveToArea: destination not found in adjacent levels",
+			slog.String("destination", dst.Area().Name),
+			slog.String("currentArea", ctx.Data.PlayerUnit.Area.Area().Name),
+			slog.Any("adjacentLevels", adjNames))
 		return fmt.Errorf("destination area not found: %s", dst.Area().Name)
 	}
+
+	ctx.Logger.Info("MoveToArea: navigating",
+		slog.String("from", ctx.Data.PlayerUnit.Area.Area().Name),
+		slog.String("to", dst.Area().Name),
+		slog.Bool("isEntrance", lvl.IsEntrance),
+		slog.Any("position", lvl.Position))
 
 	cachedPos := data.Position{}
 	if !lvl.IsEntrance && ctx.Data.PlayerUnit.Area != dst {
@@ -574,7 +589,8 @@ func MoveTo(toFunc func() (data.Position, bool), options ...step.MoveOption) err
 				}
 			} else if ctx.Data.PlayerUnit.Area == area.ArcaneSanctuary {
 				//try to go to the end of the tp lane to find target position
-				tpPad, err := getArcaneNextTeleportPadPosition(blacklistedPads)
+				var err error
+				tpPad, err = getArcaneNextTeleportPadPosition(blacklistedPads)
 				if err != nil {
 					return err
 				}
@@ -645,7 +661,7 @@ func MoveTo(toFunc func() (data.Position, bool), options ...step.MoveOption) err
 				// Clear nearby monsters before opening chest (prevents getting stuck
 				// when "only elites" filter skipped white mobs surrounding the chest)
 				if enemyFound, _ := IsAnyEnemyAroundPlayer(10); enemyFound {
-					ClearAreaAroundPlayer(10, nil)
+					ClearAreaAroundPlayer(10, data.MonsterAnyFilter())
 				}
 				//Handle chest if any
 				if err := InteractObject(chest, func() bool {

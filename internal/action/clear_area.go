@@ -1,9 +1,12 @@
 package action
 
 import (
+	"errors"
 	"fmt"
+	"log/slog"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/hectorgimenez/d2go/pkg/data"
 	"github.com/hectorgimenez/d2go/pkg/data/npc"
@@ -15,6 +18,9 @@ import (
 )
 
 func ClearAreaAroundPlayer(radius int, filter data.MonsterFilter) error {
+	if filter == nil {
+		return ClearAreaAroundPosition(context.Get().Data.PlayerUnit.Position, radius)
+	}
 	return ClearAreaAroundPosition(context.Get().Data.PlayerUnit.Position, radius, filter)
 }
 
@@ -139,9 +145,21 @@ func ClearAreaAroundPosition(pos data.Position, radius int, filters ...data.Mons
 func ClearThroughPath(pos data.Position, radius int, filter data.MonsterFilter) error {
 	ctx := context.Get()
 
+	const maxStuckRetries = 3
+
 	lastMovement := false
+	stuckRetries := 0
+	startTime := time.Now()
 	for {
 		ctx.PauseIfNotPriority()
+
+		// Absolute timeout: don't spend forever fighting through to one room
+		if time.Since(startTime) > 30*time.Second {
+			ctx.Logger.Warn("ClearThroughPath: timeout reaching destination",
+				slog.Any("destination", pos),
+				slog.Duration("elapsed", time.Since(startTime)))
+			return fmt.Errorf("ClearThroughPath timeout after 30s")
+		}
 
 		ClearAreaAroundPosition(ctx.Data.PlayerUnit.Position, radius, filter)
 
@@ -185,7 +203,31 @@ func ClearThroughPath(pos data.Position, radius int, filter data.MonsterFilter) 
 					continue
 				}
 			}
+
+			// Stuck recovery: teleport/random move and retry instead of immediately failing
+			if errors.Is(err, step.ErrPlayerStuck) || errors.Is(err, step.ErrPlayerRoundTrip) {
+				stuckRetries++
+				if stuckRetries > maxStuckRetries {
+					ctx.Logger.Warn("ClearThroughPath: stuck after max retries, giving up",
+						slog.Int("retries", stuckRetries),
+						slog.Any("destination", pos))
+					return err
+				}
+				ctx.Logger.Debug("ClearThroughPath: stuck, attempting recovery",
+					slog.Int("retry", stuckRetries),
+					slog.Any("position", ctx.Data.PlayerUnit.Position))
+				if ctx.Data.CanTeleport() && !ctx.Data.PlayerUnit.Area.IsTown() {
+					ctx.PathFinder.RandomTeleport()
+				} else {
+					ctx.PathFinder.RandomMovement()
+					time.Sleep(200 * time.Millisecond)
+				}
+				continue
+			}
+
 			return err
 		}
+		// Successful step — reset stuck counter
+		stuckRetries = 0
 	}
 }

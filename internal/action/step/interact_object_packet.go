@@ -48,6 +48,12 @@ func InteractObjectPacket(obj data.Object, isCompletedFn func() bool) error {
 			expectedArea = area.MooMooFarm
 		case obj.Name == object.PermanentTownPortal && ctx.Data.PlayerUnit.Area == area.Harrogath:
 			expectedArea = area.NihlathaksTemple
+		case obj.Name == object.PermanentTownPortal && ctx.Data.PlayerUnit.Area == area.FrigidHighlands:
+			expectedArea = area.Abaddon
+		case obj.Name == object.PermanentTownPortal && ctx.Data.PlayerUnit.Area == area.ArreatPlateau:
+			expectedArea = area.PitOfAcheron
+		case obj.Name == object.PermanentTownPortal && ctx.Data.PlayerUnit.Area == area.FrozenTundra:
+			expectedArea = area.InfernalPit
 		case obj.Name == object.PermanentTownPortal && ctx.Data.PlayerUnit.Area == area.ArcaneSanctuary:
 			expectedArea = area.CanyonOfTheMagi
 		case obj.Name == object.BaalsPortal && ctx.Data.PlayerUnit.Area == area.ThroneOfDestruction:

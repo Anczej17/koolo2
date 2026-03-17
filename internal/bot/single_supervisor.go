@@ -254,7 +254,9 @@ func (s *SinglePlayerSupervisor) Start() error {
 			}
 
 			// We execute the menu handling in a goroutine so we can timeout the whole process
-			// if it gets stuck reading game state.
+			// if it gets stuck reading game state. Use a context so the goroutine can observe
+			// cancellation on timeout instead of being leaked.
+			menuCtx, menuCancel := context.WithTimeout(ctx, maxTimeNotInGame)
 			errChan := make(chan error, 1)
 			go func() {
 				errChan <- s.HandleMenuFlow()
@@ -262,6 +264,7 @@ func (s *SinglePlayerSupervisor) Start() error {
 
 			select {
 			case err := <-errChan:
+				menuCancel()
 				// Menu flow finished (or returned an error) before the timeout.
 				if err != nil {
 					if errors.Is(err, ErrUnrecoverableClientState) {
@@ -281,7 +284,8 @@ func (s *SinglePlayerSupervisor) Start() error {
 					utils.Sleep(1000)
 					continue
 				}
-			case <-time.After(maxTimeNotInGame):
+			case <-menuCtx.Done():
+				menuCancel()
 				// The entire HandleMenuFlow function took too long. This means a game state read is likely frozen.
 				s.bot.ctx.Logger.Error(fmt.Sprintf("Menu flow frozen for more than %s. Forcing client restart.", maxTimeNotInGame))
 				if killErr := s.KillClient(); killErr != nil {
@@ -362,11 +366,14 @@ func (s *SinglePlayerSupervisor) Start() error {
 		event.Send(event.GameCreated(event.Text(s.name, "New game created"), s.bot.ctx.GameReader.LastGameName(), s.bot.ctx.GameReader.LastGamePass()))
 		s.bot.ctx.FailedToCreateGameAttempts = 0
 		s.bot.ctx.LastBuffAt = time.Time{}
+		s.bot.ctx.WeaponCacheReady = false // Force re-probe of weapon sets each new game
 		s.logGameStart(runs)
 		s.bot.ctx.RefreshGameData()
 
-		// Register in party registry if WaitForParty is enabled
-		if s.bot.ctx.CharacterCfg.Companion.Enabled && s.bot.ctx.CharacterCfg.Companion.WaitForParty {
+		// Register in party registry if WaitForParty or LeaderPriorityRuns is enabled
+		partyRegistryEnabled := s.bot.ctx.CharacterCfg.Companion.Enabled &&
+			(s.bot.ctx.CharacterCfg.Companion.WaitForParty || s.bot.ctx.CharacterCfg.Companion.LeaderPriorityRuns)
+		if partyRegistryEnabled {
 			gameID := s.bot.ctx.GameReader.LastGameName()
 			GetPartyRegistry().RegisterMember(s.name, gameID)
 			runNames := make([]string, len(s.bot.ctx.CharacterCfg.Game.Runs))
@@ -395,7 +402,7 @@ func (s *SinglePlayerSupervisor) Start() error {
 		if s.bot.ctx.CharacterCfg.Companion.Enabled && s.bot.ctx.CharacterCfg.Companion.Leader {
 			event.Send(event.RequestCompanionJoinGame(event.Text(s.name, "New Game Started "+s.bot.ctx.Data.Game.LastGameName), s.bot.ctx.CharacterCfg.CharacterName, s.bot.ctx.Data.Game.LastGameName, s.bot.ctx.Data.Game.LastGamePassword))
 			// Store game info in party registry so companions can rejoin after crash/chicken
-			if s.bot.ctx.CharacterCfg.Companion.WaitForParty {
+			if s.bot.ctx.CharacterCfg.Companion.WaitForParty || s.bot.ctx.CharacterCfg.Companion.LeaderPriorityRuns {
 				GetPartyRegistry().SetActiveGame(
 					s.bot.ctx.Data.Game.LastGameName,
 					s.bot.ctx.Data.Game.LastGamePassword,
@@ -430,7 +437,8 @@ func (s *SinglePlayerSupervisor) Start() error {
 		} else {
 			runCtx, runCancel = context.WithCancel(ctx)
 		}
-		defer runCancel()
+		// NOTE: runCancel() is called explicitly at each loop exit point
+		// instead of using defer, which would leak contexts in a loop.
 
 		// Initialize ping monitor for this game session
 		// Configuration from koolo.yaml (default: quit after 30s of ping > 500ms)
@@ -460,6 +468,37 @@ func (s *SinglePlayerSupervisor) Start() error {
 				slog.Duration("duration", sustainedDuration))
 			runCancel()
 		})
+
+		// Fast party monitor — checks leader signals every 2s for quick follower response
+		if s.bot.ctx.CharacterCfg.Companion.Enabled && !s.bot.ctx.CharacterCfg.Companion.Leader {
+			go func() {
+				partyTicker := time.NewTicker(2 * time.Second)
+				defer partyTicker.Stop()
+				for {
+					select {
+					case <-runCtx.Done():
+						return
+					case <-partyTicker.C:
+						if !s.bot.ctx.GameReader.InGame() || s.bot.ctx.Data.PlayerUnit.ID == 0 {
+							continue
+						}
+						if s.bot.ctx.WaitingForParty.Load() {
+							continue
+						}
+						if s.bot.ctx.CharacterCfg.Companion.WaitForParty && GetPartyRegistry().GameAborted() {
+							s.bot.ctx.Logger.Info("Party: leader aborted game, cancelling current run to resync")
+							runCancel()
+							return
+						}
+						if GetPartyRegistry().IsLeaderDone() {
+							s.bot.ctx.Logger.Info("Party: leader priority mode — leader finished runs, aborting current run to rejoin")
+							runCancel()
+							return
+						}
+					}
+				}
+			}()
+		}
 
 		// In-Game Activity Monitor
 		go func() {
@@ -493,16 +532,6 @@ func (s *SinglePlayerSupervisor) Start() error {
 						droppedMouseItem = false
 						lastPosition = s.bot.ctx.Data.PlayerUnit.Position
 						continue
-					}
-
-					// Party: leader aborted the game (chicken/error) — cancel our run so we exit too
-					if s.bot.ctx.CharacterCfg.Companion.Enabled &&
-						!s.bot.ctx.CharacterCfg.Companion.Leader &&
-						s.bot.ctx.CharacterCfg.Companion.WaitForParty &&
-						GetPartyRegistry().GameAborted() {
-						s.bot.ctx.Logger.Info("Party: leader aborted game, cancelling current run to resync")
-						runCancel()
-						return
 					}
 
 					// Check for sustained high ping
@@ -587,6 +616,7 @@ func (s *SinglePlayerSupervisor) Start() error {
 				s.bot.ctx.Logger.Info("Drop interrupt received. Exiting game and restarting loop.")
 				s.bot.ctx.Manager.ExitGame()
 				utils.Sleep(2000)
+				runCancel()
 				continue
 			}
 
@@ -624,10 +654,17 @@ func (s *SinglePlayerSupervisor) Start() error {
 						GetPartyRegistry().AbortGame()
 					}
 				}
+				// Leader priority: also signal followers to abort on error/chicken/timeout
+				if s.bot.ctx.CharacterCfg.Companion.Enabled &&
+					s.bot.ctx.CharacterCfg.Companion.Leader &&
+					s.bot.ctx.CharacterCfg.Companion.LeaderPriorityRuns {
+					GetPartyRegistry().MarkLeaderDone()
+				}
 			}
 
 			if exitErr := s.bot.ctx.Manager.ExitGame(); exitErr != nil {
 				s.bot.ctx.Logger.Error(fmt.Sprintf("Error trying to exit game: %s", exitErr.Error()))
+				runCancel()
 				return ErrUnrecoverableClientState
 			}
 
@@ -638,12 +675,14 @@ func (s *SinglePlayerSupervisor) Start() error {
 			for s.bot.ctx.Manager.InGame() {
 				select {
 				case <-ctx.Done():
+					runCancel()
 					return nil
 				case <-timeout:
 					s.bot.ctx.Logger.Error("Timeout waiting for game to report 'not in game' after exit attempt. Forcing client kill.")
 					if killErr := s.KillClient(); killErr != nil {
 						s.bot.ctx.Logger.Error(fmt.Sprintf("Failed to kill client after timeout and InGame() check: %s", killErr.Error()))
 					}
+					runCancel()
 					return ErrUnrecoverableClientState
 				default:
 					s.bot.ctx.Logger.Debug("Still detected as in game, waiting for RefreshGameData to update...")
@@ -679,6 +718,7 @@ func (s *SinglePlayerSupervisor) Start() error {
 				slog.Uint64("mapSeed", uint64(s.bot.ctx.GameReader.MapSeed())),
 			)
 
+			runCancel()
 			continue
 		}
 
@@ -694,11 +734,20 @@ func (s *SinglePlayerSupervisor) Start() error {
 		s.lastPlayedGame = s.bot.ctx.GameReader.LastGameName()
 
 		// Party wait: idle in game until all party members finish their runs
-		s.waitForPartyMembers(ctx)
+		// LeaderPriorityRuns: leader skips waiting and immediately exits to create new game
+		if s.bot.ctx.CharacterCfg.Companion.Enabled &&
+			s.bot.ctx.CharacterCfg.Companion.Leader &&
+			s.bot.ctx.CharacterCfg.Companion.LeaderPriorityRuns {
+			s.bot.ctx.Logger.Info("Party: leader priority mode — signalling followers and exiting immediately")
+			GetPartyRegistry().MarkDone(s.name)
+			GetPartyRegistry().MarkLeaderDone()
+		} else {
+			s.waitForPartyMembers(ctx)
+		}
 
 		if s.bot.ctx.CharacterCfg.Companion.Enabled && s.bot.ctx.CharacterCfg.Companion.Leader {
 			// Clear active game from registry so companions don't try to rejoin a closing game
-			if s.bot.ctx.CharacterCfg.Companion.WaitForParty {
+			if s.bot.ctx.CharacterCfg.Companion.WaitForParty || s.bot.ctx.CharacterCfg.Companion.LeaderPriorityRuns {
 				GetPartyRegistry().ClearActiveGame()
 			}
 			event.Send(event.ResetCompanionGameInfo(event.Text(s.name, "Game "+s.bot.ctx.Data.Game.LastGameName+" finished"), s.bot.ctx.CharacterCfg.CharacterName))
@@ -706,6 +755,7 @@ func (s *SinglePlayerSupervisor) Start() error {
 		if exitErr := s.bot.ctx.Manager.ExitGame(); exitErr != nil {
 			errMsg := fmt.Sprintf("Error exiting game %s", exitErr.Error())
 			event.Send(event.GameFinished(event.WithScreenshot(s.name, errMsg, s.bot.ctx.GameReader.Screenshot()), event.FinishedError))
+			runCancel()
 			return errors.New(errMsg)
 		}
 		s.bot.ctx.Logger.Info("Game finished successfully. Waiting 3 seconds for client to close.")
@@ -714,6 +764,7 @@ func (s *SinglePlayerSupervisor) Start() error {
 		s.bot.ctx.Data.Areas = nil          // Clear context's map reference to allow GC
 		s.bot.ctx.Data.AreaData = game.AreaData{}
 		timeSpentNotInGameStart = time.Now()
+		runCancel()
 	}
 }
 
@@ -841,6 +892,10 @@ func (s *SinglePlayerSupervisor) waitForPartyMembers(ctx context.Context) {
 			}
 			if !isLeader && pr.GameAborted() {
 				s.bot.ctx.Logger.Info("Party: game aborted by leader, exiting to resync")
+				return
+			}
+			if !isLeader && pr.IsLeaderDone() {
+				s.bot.ctx.Logger.Info("Party: leader priority mode — leader done, exiting to rejoin new game")
 				return
 			}
 			if s.leaderStartedNewGame() {
@@ -1261,7 +1316,7 @@ func (s *SinglePlayerSupervisor) HandleCompanionMenuFlow() error {
 	gamePassword := s.bot.ctx.CharacterCfg.Companion.CompanionGamePassword
 
 	// If no game info from event, check party registry for active game (rejoin after crash/chicken)
-	if gameName == "" && s.bot.ctx.CharacterCfg.Companion.WaitForParty {
+	if gameName == "" && (s.bot.ctx.CharacterCfg.Companion.WaitForParty || s.bot.ctx.CharacterCfg.Companion.LeaderPriorityRuns) {
 		if activeGame := GetPartyRegistry().GetActiveGame(); activeGame != nil {
 			// Only rejoin if the leader matches our config (or no leader configured)
 			leaderOK := s.bot.ctx.CharacterCfg.Companion.LeaderName == "" ||

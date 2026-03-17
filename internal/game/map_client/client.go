@@ -1,11 +1,13 @@
 package map_client
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"os/exec"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/hectorgimenez/d2go/pkg/data"
 	"github.com/hectorgimenez/d2go/pkg/data/area"
@@ -16,7 +18,9 @@ import (
 )
 
 func GetMapData(seed string, difficulty difficulty.Difficulty) (MapData, error) {
-	cmd := exec.Command("./tools/koolo-map.exe", config.Koolo.D2LoDPath, "-s", seed, "-d", getDifficultyAsNum(difficulty))
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "./tools/koolo-map.exe", config.Koolo.D2LoDPath, "-s", seed, "-d", getDifficultyAsNum(difficulty))
 	cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
 	stdout, err := cmd.Output()
 	if err != nil {

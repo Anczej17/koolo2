@@ -252,9 +252,7 @@ func main() {
 						// Check if size is valid and has changed
 						if curW > 100 && curH > 100 {
 							if curW != config.Koolo.WindowWidth || curH != config.Koolo.WindowHeight {
-								config.Koolo.WindowWidth = curW
-								config.Koolo.WindowHeight = curH
-								config.ValidateAndSaveConfig(*config.Koolo)
+								config.UpdateWindowSize(curW, curH)
 							}
 						}
 					}

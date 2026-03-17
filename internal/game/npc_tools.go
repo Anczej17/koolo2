@@ -7,11 +7,7 @@ import (
 
 func IsActBoss(m data.Monster) bool {
 	switch m.Name {
-	case npc.Andariel:
-	case npc.Duriel:
-	case npc.Mephisto:
-	case npc.Diablo:
-	case npc.BaalCrab:
+	case npc.Andariel, npc.Duriel, npc.Mephisto, npc.Diablo, npc.BaalCrab:
 		return true
 	}
 	return false
@@ -29,10 +25,7 @@ func IsQuestEnemy(m data.Monster) bool {
 		return true
 	}
 	switch m.Name {
-	case npc.Summoner:
-	case npc.CouncilMember:
-	case npc.CouncilMember2:
-	case npc.CouncilMember3:
+	case npc.Summoner, npc.CouncilMember, npc.CouncilMember2, npc.CouncilMember3:
 		return true
 	}
 	return false

@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"time"
 
 	"github.com/hectorgimenez/d2go/pkg/data"
 	"github.com/hectorgimenez/d2go/pkg/data/stat"
@@ -24,6 +25,7 @@ func ClearCurrentLevelCows(openChests bool, filter data.MonsterFilter) error {
 	)
 
 	traverser := ctx.PathFinder.NewRoomTraverser(filter)
+	traverser.SetLogger(ctx.Logger)
 	roomCount := 0
 	for {
 		r, hasMore := traverser.NextRoom()
@@ -38,6 +40,14 @@ func ClearCurrentLevelCows(openChests bool, filter data.MonsterFilter) error {
 		// Aggressive "fight-through" movement to room center (no monster filter path-avoidance)
 		if err := clearRoomCows(r, filter, moveClearRadius); err != nil {
 			ctx.Logger.Warn("Failed to clear room (cows)", slog.Any("error", err))
+			// Skip nearby rooms in the same unreachable cluster (like normal clearRoom does)
+			if errors.Is(err, errRoomUnreachable) {
+				const skipRadius = 30
+				skipped := traverser.SkipNearbyRooms(r.GetCenter(), skipRadius)
+				ctx.Logger.Warn("Cow room unreachable, skipping nearby cluster",
+					slog.Any("roomCenter", r.GetCenter()),
+					slog.Int("skippedRooms", skipped))
+			}
 		}
 
 		roomCount++
@@ -79,9 +89,16 @@ func clearRoomCows(room data.Room, filter data.MonsterFilter, moveClearRadius in
 	ctx := context.Get()
 	ctx.SetLastAction("clearRoomCows")
 
+	const (
+		maxRoomTotalSeconds = 90 // Absolute max time per cow room
+		maxClearIterations  = 40 // Safety limit on kill loop
+	)
+
+	roomStartTime := time.Now()
+
 	path, _, found := ctx.PathFinder.GetClosestWalkablePath(room.GetCenter())
 	if !found {
-		return errors.New("failed to find a path to the room center")
+		return fmt.Errorf("%w: no path to cow room center", errRoomUnreachable)
 	}
 
 	to := data.Position{
@@ -94,11 +111,26 @@ func clearRoomCows(room data.Room, filter data.MonsterFilter, moveClearRadius in
 		return fmt.Errorf("failed moving/clearing to room center: %w", err)
 	}
 
+	iterationCount := 0
 	for {
 		ctx.PauseIfNotPriority()
 
 		if err := checkPlayerDeath(ctx); err != nil {
 			return err
+		}
+
+		// Absolute room timeout
+		if time.Since(roomStartTime) > maxRoomTotalSeconds*time.Second {
+			ctx.Logger.Warn("Cow room timeout reached, moving on",
+				slog.Duration("elapsed", time.Since(roomStartTime)))
+			return nil
+		}
+
+		iterationCount++
+		if iterationCount > maxClearIterations {
+			ctx.Logger.Warn("Cow room iteration limit reached, moving on",
+				slog.Int("iterations", iterationCount))
+			return nil
 		}
 
 		monsters := getMonstersInRoomCows(room, filter)

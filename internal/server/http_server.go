@@ -50,6 +50,27 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
+// isValidSupervisorName rejects names that could cause path traversal or are otherwise invalid for use in file paths.
+func isValidSupervisorName(name string) bool {
+	if name == "" {
+		return false
+	}
+	if strings.ContainsAny(name, `<>:"/\|?*`) {
+		return false
+	}
+	if name == "." || name == ".." || strings.Contains(name, "..") {
+		return false
+	}
+	if strings.HasPrefix(name, ".") || strings.HasSuffix(name, ".") {
+		return false
+	}
+	// Reject if cleaned path differs from the name (catches sneaky traversal)
+	if filepath.Base(name) != name {
+		return false
+	}
+	return true
+}
+
 type HttpServer struct {
 	logger              *slog.Logger
 	server              *http.Server
@@ -77,7 +98,16 @@ var (
 
 	upgrader = websocket.Upgrader{
 		CheckOrigin: func(r *http.Request) bool {
-			return true
+			origin := r.Header.Get("Origin")
+			if origin == "" {
+				return true
+			}
+			u, err := url.Parse(origin)
+			if err != nil {
+				return false
+			}
+			host := u.Hostname()
+			return host == "localhost" || host == "127.0.0.1"
 		},
 	}
 )
@@ -1033,7 +1063,7 @@ func (s *HttpServer) Listen(port int) error {
 	http.Handle("/items/", http.StripPrefix("/items/", http.FileServer(http.Dir("../assets/items"))))
 
 	s.server = &http.Server{
-		Addr: fmt.Sprintf(":%d", port),
+		Addr: fmt.Sprintf("127.0.0.1:%d", port),
 	}
 
 	if err := s.server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
@@ -1078,6 +1108,10 @@ func (s *HttpServer) schedulerHistory(w http.ResponseWriter, r *http.Request) {
 	supervisor := r.URL.Query().Get("supervisor")
 	if supervisor == "" {
 		http.Error(w, "supervisor parameter required", http.StatusBadRequest)
+		return
+	}
+	if !isValidSupervisorName(supervisor) {
+		http.Error(w, "Invalid supervisor name", http.StatusBadRequest)
 		return
 	}
 
@@ -1326,6 +1360,10 @@ func (s *HttpServer) deleteSupervisorConfig(w http.ResponseWriter, r *http.Reque
 		http.Error(w, "Missing supervisor", http.StatusBadRequest)
 		return
 	}
+	if !isValidSupervisorName(supervisor) {
+		http.Error(w, "Invalid supervisor name", http.StatusBadRequest)
+		return
+	}
 	if supervisor == "template" {
 		http.Error(w, "Template cannot be deleted", http.StatusBadRequest)
 		return
@@ -1393,6 +1431,10 @@ func (s *HttpServer) copySupervisorConfig(w http.ResponseWriter, r *http.Request
 	supervisor := strings.TrimSpace(req.Supervisor)
 	if supervisor == "" {
 		http.Error(w, "Missing supervisor", http.StatusBadRequest)
+		return
+	}
+	if !isValidSupervisorName(supervisor) {
+		http.Error(w, "Invalid supervisor name", http.StatusBadRequest)
 		return
 	}
 	if supervisor == "template" {
@@ -1498,6 +1540,10 @@ func (s *HttpServer) renameSupervisorConfig(w http.ResponseWriter, r *http.Reque
 		http.Error(w, "Missing supervisor name", http.StatusBadRequest)
 		return
 	}
+	if !isValidSupervisorName(supervisor) || !isValidSupervisorName(newName) {
+		http.Error(w, "Invalid supervisor name", http.StatusBadRequest)
+		return
+	}
 	if supervisor == "template" || newName == "template" {
 		http.Error(w, "Template cannot be renamed", http.StatusBadRequest)
 		return
@@ -1505,10 +1551,6 @@ func (s *HttpServer) renameSupervisorConfig(w http.ResponseWriter, r *http.Reque
 	if supervisor == newName {
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]string{"supervisor": supervisor})
-		return
-	}
-	if strings.ContainsAny(newName, `<>:"/\|?*`) || strings.HasSuffix(newName, ".") {
-		http.Error(w, "Invalid supervisor name", http.StatusBadRequest)
 		return
 	}
 
@@ -2526,6 +2568,7 @@ func (s *HttpServer) updateConfigFromForm(values url.Values, cfg *config.Charact
 				cfg.Companion.BonusRunsList = bonusRunsList
 			}
 			cfg.Companion.RandomGameNames = values.Has("companionRandomGameNames")
+			cfg.Companion.LeaderPriorityRuns = values.Has("companionLeaderPriorityRuns")
 
 			// Gambling
 			cfg.Gambling.Enabled = values.Has("gamblingEnabled")
@@ -3541,6 +3584,7 @@ func (s *HttpServer) characterSettings(w http.ResponseWriter, r *http.Request) {
 		cfg.Companion.BonusRuns = r.Form.Has("companionBonusRuns")
 		cfg.Companion.BonusRunsList = r.Form["companionBonusRunsList"]
 		cfg.Companion.RandomGameNames = r.Form.Has("companionRandomGameNames")
+		cfg.Companion.LeaderPriorityRuns = r.Form.Has("companionLeaderPriorityRuns")
 
 		// Back to town config
 		cfg.BackToTown.NoHpPotions = r.Form.Has("noHpPotions")

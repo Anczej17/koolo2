@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"log/slog"
 	"strconv"
+	"sync"
 	"syscall"
 	"time"
 	"unsafe"
@@ -24,6 +25,7 @@ import (
 )
 
 type SupervisorManager struct {
+	mu             sync.RWMutex
 	logger         *slog.Logger
 	supervisors    map[string]Supervisor
 	crashDetectors map[string]*game.CrashDetector
@@ -57,7 +59,10 @@ func (mng *SupervisorManager) AvailableSupervisors() []string {
 
 func (mng *SupervisorManager) Start(supervisorName string, attachToExisting bool, manualMode bool, pidHwnd ...uint32) error {
 	// Avoid multiple instances of the supervisor - shitstorm prevention
-	if _, exists := mng.supervisors[supervisorName]; exists {
+	mng.mu.RLock()
+	_, exists := mng.supervisors[supervisorName]
+	mng.mu.RUnlock()
+	if exists {
 		return fmt.Errorf("supervisor %s is already running", supervisorName)
 	}
 
@@ -102,12 +107,13 @@ func (mng *SupervisorManager) Start(supervisorName string, attachToExisting bool
 		}
 	}
 
+	mng.mu.Lock()
 	if oldCrashDetector, exists := mng.crashDetectors[supervisorName]; exists {
 		oldCrashDetector.Stop() // Stop the old crash detector if it exists
 	}
-
 	mng.supervisors[supervisorName] = supervisor
 	mng.crashDetectors[supervisorName] = crashDetector
+	mng.mu.Unlock()
 
 	if config.Koolo.GameWindowArrangement {
 		go func() {
@@ -139,7 +145,13 @@ func (mng *SupervisorManager) ReloadConfig() error {
 	}
 
 	// Apply new configs to running supervisors
-	for name, sup := range mng.supervisors {
+	mng.mu.RLock()
+	supervisorsCopy := make(map[string]Supervisor, len(mng.supervisors))
+	for k, v := range mng.supervisors {
+		supervisorsCopy[k] = v
+	}
+	mng.mu.RUnlock()
+	for name, sup := range supervisorsCopy {
 		newCfg, exists := config.GetCharacter(name)
 		if !exists {
 			continue
@@ -171,13 +183,23 @@ func (mng *SupervisorManager) ReloadConfig() error {
 }
 
 func (mng *SupervisorManager) StopAll() {
-	for _, s := range mng.supervisors {
-		s.Stop()
+	mng.mu.RLock()
+	names := make([]string, 0, len(mng.supervisors))
+	for name := range mng.supervisors {
+		names = append(names, name)
+	}
+	mng.mu.RUnlock()
+	for _, name := range names {
+		mng.Stop(name)
 	}
 }
 
 func (mng *SupervisorManager) Stop(supervisor string) {
+	mng.mu.RLock()
 	s, found := mng.supervisors[supervisor]
+	cd := mng.crashDetectors[supervisor]
+	mng.mu.RUnlock()
+
 	if found {
 		// Log the stop sequence
 		mng.logger.Info("Stopping supervisor instance", slog.String("supervisor", supervisor))
@@ -185,14 +207,16 @@ func (mng *SupervisorManager) Stop(supervisor string) {
 		// Stop the Supervisor's internal loops and kill the client if configured
 		s.Stop()
 
-		// Delete from the list of active Supervisors
-		delete(mng.supervisors, supervisor)
-
 		// Stop the crash detector associated with it
-		if cd, ok := mng.crashDetectors[supervisor]; ok {
+		if cd != nil {
 			cd.Stop()
-			delete(mng.crashDetectors, supervisor)
 		}
+
+		// Delete from the list of active Supervisors
+		mng.mu.Lock()
+		delete(mng.supervisors, supervisor)
+		delete(mng.crashDetectors, supervisor)
+		mng.mu.Unlock()
 
 		// The logic to start the next character has been removed from here.
 		// The restartFunc is now the single source of truth for this,
@@ -201,43 +225,47 @@ func (mng *SupervisorManager) Stop(supervisor string) {
 }
 
 func (mng *SupervisorManager) TogglePause(supervisor string) {
+	mng.mu.RLock()
 	s, found := mng.supervisors[supervisor]
+	mng.mu.RUnlock()
 	if found {
 		s.TogglePause()
 	}
 }
 
 func (mng *SupervisorManager) Status(characterName string) Stats {
-	for name, supervisor := range mng.supervisors {
-		if name == characterName {
-			return supervisor.Stats()
-		}
+	mng.mu.RLock()
+	sup, found := mng.supervisors[characterName]
+	mng.mu.RUnlock()
+	if found {
+		return sup.Stats()
 	}
-
 	return Stats{}
 }
 
 func (mng *SupervisorManager) GetData(characterName string) *game.Data {
-	for name, supervisor := range mng.supervisors {
-		if name == characterName {
-			return supervisor.GetData()
-		}
+	mng.mu.RLock()
+	sup, found := mng.supervisors[characterName]
+	mng.mu.RUnlock()
+	if found {
+		return sup.GetData()
 	}
-
 	return nil
 }
 
 func (mng *SupervisorManager) GetContext(characterName string) *context.Context {
-	for name, supervisor := range mng.supervisors {
-		if name == characterName {
-			return supervisor.GetContext()
-		}
+	mng.mu.RLock()
+	sup, found := mng.supervisors[characterName]
+	mng.mu.RUnlock()
+	if found {
+		return sup.GetContext()
 	}
-
 	return nil
 }
 
 func (mng *SupervisorManager) GetSupervisor(supervisor string) Supervisor {
+	mng.mu.RLock()
+	defer mng.mu.RUnlock()
 	if sup, ok := mng.supervisors[supervisor]; ok {
 		return sup
 	}
@@ -456,10 +484,13 @@ func (mng *SupervisorManager) DropService() *drop.Service {
 }
 
 func (mng *SupervisorManager) GetSupervisorStats(supervisor string) Stats {
-	if mng.supervisors[supervisor] == nil {
+	mng.mu.RLock()
+	sup := mng.supervisors[supervisor]
+	mng.mu.RUnlock()
+	if sup == nil {
 		return Stats{}
 	}
-	return mng.supervisors[supervisor].Stats()
+	return sup.Stats()
 }
 
 func (mng *SupervisorManager) rearrangeWindows() {
@@ -479,8 +510,15 @@ func (mng *SupervisorManager) rearrangeWindows() {
 		slog.String("max rows", strconv.FormatInt(int64(maxRows+1), 10)),
 	)
 
+	mng.mu.RLock()
+	supsCopy := make(map[string]Supervisor, len(mng.supervisors))
+	for k, v := range mng.supervisors {
+		supsCopy[k] = v
+	}
+	mng.mu.RUnlock()
+
 	var column, row int32
-	for _, sp := range mng.supervisors {
+	for _, sp := range supsCopy {
 		// reminder that columns are vertical (they go up and down) and rows are horizontal (they go left and right)
 		if column > maxColumns {
 			column = 0

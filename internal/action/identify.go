@@ -75,9 +75,15 @@ func IdentifyAll(skipIdentify bool) error {
 
 	// Close all menus to prevent issues
 	step.CloseAllMenus()
-	for !ctx.Data.OpenMenus.Inventory {
+	const maxInventoryAttempts = 5
+	for attempt := 0; !ctx.Data.OpenMenus.Inventory && attempt < maxInventoryAttempts; attempt++ {
 		ctx.HID.PressKeyBinding(ctx.Data.KeyBindings.Inventory)
 		utils.PingSleep(utils.Critical, 1000) // Critical operation: Wait for inventory to open
+		ctx.RefreshGameData()
+	}
+	if !ctx.Data.OpenMenus.Inventory {
+		ctx.Logger.Warn("Failed to open inventory after max attempts, skipping identification")
+		return nil
 	}
 
 	for _, i := range items {

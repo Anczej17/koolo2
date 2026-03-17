@@ -18,9 +18,10 @@ type PartyRegistry struct {
 	mu       sync.Mutex
 	logger   *slog.Logger
 	members  map[string]*partyMember // key = supervisor name
-	gameID   string                  // current game identifier (prevents cross-game confusion)
-	gameInfo *ActiveGameInfo         // current active game connection info
-	aborted  bool                    // true when leader forces all members to exit current game
+	gameID     string                  // current game identifier (prevents cross-game confusion)
+	gameInfo   *ActiveGameInfo         // current active game connection info
+	aborted    bool                    // true when leader forces all members to exit current game
+	leaderDone bool                    // true when leader has finished all runs (for LeaderPriorityRuns)
 }
 
 type partyMember struct {
@@ -108,6 +109,22 @@ func (pr *PartyRegistry) GetActiveGame() *ActiveGameInfo {
 	return &info
 }
 
+// MarkLeaderDone signals that the leader has finished all runs.
+// Used by LeaderPriorityRuns: followers abort their current run when they see this.
+func (pr *PartyRegistry) MarkLeaderDone() {
+	pr.mu.Lock()
+	defer pr.mu.Unlock()
+	pr.leaderDone = true
+	pr.log().Info("Party registry: leader marked done (priority mode)")
+}
+
+// IsLeaderDone returns true if the leader has signalled it finished all runs.
+func (pr *PartyRegistry) IsLeaderDone() bool {
+	pr.mu.Lock()
+	defer pr.mu.Unlock()
+	return pr.leaderDone
+}
+
 // AbortGame signals all party members to abandon the current game immediately.
 // Called by the leader when it errors out (chicken/timeout) so companions don't
 // continue running alone in a stale game.
@@ -145,7 +162,8 @@ func (pr *PartyRegistry) RegisterMember(name string, gameID string) {
 			m.registedAt = time.Time{} // zero = stale until re-registered
 		}
 		pr.gameID = gameID
-		pr.aborted = false // clear abort flag for new game
+		pr.aborted = false    // clear abort flag for new game
+		pr.leaderDone = false // clear leader done flag for new game
 	}
 
 	pr.members[name] = &partyMember{
@@ -159,23 +177,17 @@ func (pr *PartyRegistry) RegisterMember(name string, gameID string) {
 		slog.Int("totalMembers", len(pr.members)))
 }
 
-// PurgeStaleMembers removes members that:
-// 1. Were preserved from a previous game but haven't re-registered (registedAt is zero)
-// 2. Registered but haven't marked done and registration is older than staleTimeout
-//    (likely crashed/disconnected)
-// Called after the grace period and periodically during wait loop.
+// PurgeStaleMembers removes members that have been registered but not marked done
+// for longer than crashTimeout (likely crashed/disconnected).
+// Called periodically during wait loop.
 func (pr *PartyRegistry) PurgeStaleMembers() {
 	pr.mu.Lock()
 	defer pr.mu.Unlock()
 
-	const crashTimeout = 20 * time.Minute // if not done after 20 min, assume crashed (must be longer than longest possible run)
+	const crashTimeout = 20 * time.Minute // if not done after 20 min, assume crashed
 
 	for name, m := range pr.members {
-		if m.registedAt.IsZero() {
-			pr.log().Info("Party registry: purging stale member (did not rejoin)",
-				slog.String("member", name))
-			delete(pr.members, name)
-		} else if !m.done && time.Since(m.registedAt) > crashTimeout {
+		if !m.done && !m.registedAt.IsZero() && time.Since(m.registedAt) > crashTimeout {
 			pr.log().Warn("Party registry: purging member (assumed crashed, no done signal)",
 				slog.String("member", name),
 				slog.Duration("age", time.Since(m.registedAt)))
@@ -261,6 +273,7 @@ func (pr *PartyRegistry) Reset() {
 	pr.members = make(map[string]*partyMember)
 	pr.gameID = ""
 	pr.gameInfo = nil
+	pr.leaderDone = false
 	pr.log().Info("Party registry: reset")
 }
 

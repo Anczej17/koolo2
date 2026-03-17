@@ -8,7 +8,6 @@ import (
 	"github.com/hectorgimenez/d2go/pkg/data"
 	"github.com/hectorgimenez/d2go/pkg/data/item"
 	"github.com/hectorgimenez/d2go/pkg/data/npc"
-	"github.com/hectorgimenez/d2go/pkg/data/stat"
 	"github.com/hectorgimenez/d2go/pkg/nip"
 	"github.com/hectorgimenez/koolo/internal/action/step"
 	"github.com/hectorgimenez/koolo/internal/context"
@@ -23,8 +22,7 @@ func Gamble() error {
 	ctx := context.Get()
 	ctx.SetLastAction("Gamble")
 
-	stashedGold, _ := ctx.Data.PlayerUnit.FindStat(stat.StashGold, 0)
-	if ctx.CharacterCfg.Gambling.Enabled && stashedGold.Value >= 2480000 {
+	if ctx.CharacterCfg.Gambling.Enabled && ctx.Data.PlayerUnit.TotalPlayerGold() >= 2480000 {
 		ctx.Logger.Info("Time to gamble! Visiting vendor...")
 
 		vendorNPC := town.GetTownByArea(ctx.Data.PlayerUnit.Area).GamblingNPC()
@@ -214,6 +212,7 @@ func gambleItems() error {
 
 			if _, result := ctx.Data.CharacterCfg.Runtime.Rules.EvaluateAll(itemBought); result == nip.RuleResultFullMatch {
 				ctx.Logger.Info("Found item matching NIP rules, keeping", slog.Any("item", itemBought))
+				return step.CloseAllMenus()
 			} else {
 				ctx.Logger.Debug("Item doesn't match NIP rules, selling", slog.Any("item", itemBought))
 				town.SellItem(itemBought)

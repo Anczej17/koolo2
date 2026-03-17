@@ -61,7 +61,11 @@ func Stash(forceStash bool) error {
 		MoveToCoords(data.Position{X: 5130, Y: 5086})
 	}
 
-	bank, _ := ctx.Data.Objects.FindOne(object.Bank)
+	bank, found := ctx.Data.Objects.FindOne(object.Bank)
+	if !found {
+		ctx.Logger.Warn("Bank object not found in current area, skipping stash")
+		return nil
+	}
 	InteractObject(bank,
 		func() bool {
 			return ctx.Data.OpenMenus.Stash
@@ -293,23 +297,19 @@ func shouldStashIt(i data.Item, firstRun bool) (bool, bool, string, string) {
 	}
 
 	// These items should NEVER be stashed, regardless of quest status, pickit rules, or first run.
-	fmt.Printf("DEBUG: Evaluating item '%s' for *absolute* exclusion from stash.\n", i.Name)
 	if i.Name == "horadricstaff" { // This is the simplest way given your logs
-		fmt.Printf("DEBUG: ABSOLUTELY PREVENTING stash for '%s' (Horadric Staff exclusion).\n", i.Name)
 		return false, false, "", "" // Explicitly do NOT stash the Horadric Staff
 	}
 
 	if i.Name == "TomeOfTownPortal" || i.Name == "TomeOfIdentify" || i.Name == "Key" || i.Name == "WirtsLeg" {
-		fmt.Printf("DEBUG: ABSOLUTELY PREVENTING stash for '%s' (Quest/Special item exclusion).\n", i.Name)
 		return false, false, "", ""
 	}
 
-	if _, isLevelingChar := ctx.Char.(context.LevelingCharacter); isLevelingChar && i.IsFromQuest() && i.Name != "HoradricCube" || i.Name == "HoradricStaff" {
+	if _, isLevelingChar := ctx.Char.(context.LevelingCharacter); (isLevelingChar && i.IsFromQuest() && i.Name != "HoradricCube") || strings.EqualFold(string(i.Name), "horadricstaff") {
 		return false, false, "", ""
 	}
 
 	if firstRun {
-		fmt.Printf("DEBUG: Allowing stash for '%s' (first run).\n", i.Name)
 		return true, false, "FirstRun", ""
 	}
 
@@ -330,11 +330,11 @@ func shouldStashIt(i data.Item, firstRun bool) (bool, bool, string, string) {
 	// NOW, evaluate pickit rules.
 	tierRule, mercTierRule := ctx.CharacterCfg.Runtime.Rules.EvaluateTiers(i, ctx.CharacterCfg.Runtime.TierRules)
 	if tierRule.Tier() > 0.0 && IsBetterThanEquipped(i, false, PlayerScore) {
-		return true, true, tierRule.RawLine, tierRule.Filename + ":" + strconv.Itoa(tierRule.LineNumber)
+		return true, false, tierRule.RawLine, tierRule.Filename + ":" + strconv.Itoa(tierRule.LineNumber)
 	}
 
 	if mercTierRule.Tier() > 0.0 && IsBetterThanEquipped(i, true, MercScore) {
-		return true, true, mercTierRule.RawLine, mercTierRule.Filename + ":" + strconv.Itoa(mercTierRule.LineNumber)
+		return true, false, mercTierRule.RawLine, mercTierRule.Filename + ":" + strconv.Itoa(mercTierRule.LineNumber)
 	}
 
 	// NOW, evaluate pickit rules.
@@ -343,11 +343,9 @@ func shouldStashIt(i data.Item, firstRun bool) (bool, bool, string, string) {
 	if res == nip.RuleResultFullMatch {
 		if doesExceedQuantity(rule) {
 			// If it matches a rule but exceeds quantity, we want to drop it, not stash.
-			fmt.Printf("DEBUG: Dropping '%s' because MaxQuantity is exceeded.\n", i.Name)
 			return false, true, rule.RawLine, rule.Filename + ":" + strconv.Itoa(rule.LineNumber)
 		} else {
 			// If it matches a rule and quantity is fine, stash it.
-			fmt.Printf("DEBUG: Allowing stash for '%s' (pickit rule match: %s).\n", i.Name, rule.RawLine)
 			return true, false, rule.RawLine, rule.Filename + ":" + strconv.Itoa(rule.LineNumber)
 		}
 	}
@@ -356,7 +354,6 @@ func shouldStashIt(i data.Item, firstRun bool) (bool, bool, string, string) {
 		return true, false, "Runeword", ""
 	}
 
-	fmt.Printf("DEBUG: Disallowing stash for '%s' (no rule match and not explicitly kept, and not exceeding quantity).\n", i.Name)
 	return false, false, "", "" // Default if no other rule matches
 }
 

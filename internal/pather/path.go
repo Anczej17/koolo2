@@ -31,7 +31,7 @@ func (p Path) Intersects(d game.Data, position data.Position, padding int) bool 
 	for _, point := range p {
 		xMatch := false
 		yMatch := false
-		for i := range padding {
+		for i := 0; i <= padding; i++ {
 			if point.X == position.X+i || point.X == position.X-i {
 				xMatch = true
 			}

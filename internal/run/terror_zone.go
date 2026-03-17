@@ -5,6 +5,7 @@ import (
 
 	"github.com/hectorgimenez/d2go/pkg/data"
 	"github.com/hectorgimenez/d2go/pkg/data/area"
+	"github.com/hectorgimenez/d2go/pkg/data/object"
 	"github.com/hectorgimenez/koolo/internal/action"
 	"github.com/hectorgimenez/koolo/internal/context"
 	terrorzones "github.com/hectorgimenez/koolo/internal/terrorzone"
@@ -88,31 +89,86 @@ func (tz TerrorZone) Run(parameters *RunParameters) error {
 
 	for _, route := range routes {
 		for idx, step := range route {
-			// Navigation: first step via waypoint, rest via MoveToArea
-			if idx == 0 {
-				if err := action.WayPoint(step.Area); err != nil {
-					return err
-				}
-			} else {
-				if err := action.MoveToArea(step.Area); err != nil {
-					return err
-				}
-			}
+			tz.ctx.Logger.Info("TZ route step",
+				"idx", idx,
+				"area", step.Area.Area().Name,
+				"kind", step.Kind,
+				"currentArea", tz.ctx.Data.PlayerUnit.Area.Area().Name)
 
-			// Clearing: only if the route explicitly says so.
-			// We trust routes.go + terrorzones.go to define the correct group.
-			if step.Kind == terrorzones.StepClear {
+			// Navigation depends on step kind
+			switch step.Kind {
+			case terrorzones.StepPortal:
+				// Find and interact with red portal to reach the target area
+				if err := tz.enterRedPortal(step.Area); err != nil {
+					tz.ctx.Logger.Warn("TZ route: red portal failed", "area", step.Area.Area().Name, "error", err)
+					return err
+				}
+				// Clear after entering
 				if err := action.ClearCurrentLevel(
 					tz.ctx.CharacterCfg.Game.TerrorZone.OpenChests,
 					tz.customTZEnemyFilter(),
 				); err != nil {
+					tz.ctx.Logger.Warn("TZ route: ClearCurrentLevel failed", "area", step.Area.Area().Name, "error", err)
 					return err
 				}
+			default:
+				// StepMove and StepClear: first step via waypoint, rest via MoveToArea
+				if idx == 0 {
+					if err := action.WayPoint(step.Area); err != nil {
+						tz.ctx.Logger.Warn("TZ route: WayPoint failed", "area", step.Area.Area().Name, "error", err)
+						return err
+					}
+				} else {
+					if err := action.MoveToArea(step.Area); err != nil {
+						tz.ctx.Logger.Warn("TZ route: MoveToArea failed", "area", step.Area.Area().Name, "error", err)
+						return err
+					}
+				}
+
+				// Clearing: only if the route explicitly says so.
+				if step.Kind == terrorzones.StepClear {
+					if err := action.ClearCurrentLevel(
+						tz.ctx.CharacterCfg.Game.TerrorZone.OpenChests,
+						tz.customTZEnemyFilter(),
+					); err != nil {
+						tz.ctx.Logger.Warn("TZ route: ClearCurrentLevel failed", "area", step.Area.Area().Name, "error", err)
+						return err
+					}
+				}
 			}
+
+			tz.ctx.Logger.Info("TZ route step completed", "idx", idx, "area", step.Area.Area().Name)
 		}
 	}
 
 	return nil
+}
+
+// enterRedPortal finds a red portal (PermanentTownPortal) on the current map,
+// moves to it, and interacts with it to enter the target area (e.g. Pit of Acheron).
+func (tz TerrorZone) enterRedPortal(targetArea area.ID) error {
+	ctx := tz.ctx
+	ctx.RefreshGameData()
+
+	// Find the red portal on the current map
+	portal, found := ctx.Data.Objects.FindOne(object.PermanentTownPortal)
+	if !found {
+		return fmt.Errorf("red portal not found for %s", targetArea.Area().Name)
+	}
+
+	ctx.Logger.Info("Found red portal, moving to interact",
+		"targetArea", targetArea.Area().Name,
+		"portalPos", portal.Position)
+
+	// Move to the portal
+	if err := action.MoveToCoords(portal.Position); err != nil {
+		return fmt.Errorf("failed to move to red portal: %w", err)
+	}
+
+	// Interact with the portal
+	return action.InteractObject(portal, func() bool {
+		return ctx.Data.PlayerUnit.Area == targetArea
+	})
 }
 
 func (tz TerrorZone) AvailableTZs() []area.ID {

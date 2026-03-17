@@ -11,6 +11,7 @@ import (
 
 	"github.com/hectorgimenez/d2go/pkg/data"
 	"github.com/hectorgimenez/d2go/pkg/data/area"
+	"github.com/hectorgimenez/d2go/pkg/data/skill"
 	"github.com/hectorgimenez/koolo/internal/config"
 	"github.com/hectorgimenez/koolo/internal/drop"
 	"github.com/hectorgimenez/koolo/internal/event"
@@ -58,6 +59,8 @@ type Context struct {
 	LastBuffAt                time.Time
 	WasInTown                 bool      // Track if we were in town (to detect leaving town)
 	BuffInProgress            bool      // Prevent concurrent buff execution for this character
+	BestWeaponSlotCache       map[skill.ID]int // Per-character cache: best weapon slot (0=primary, 1=secondary) per buff skill
+	WeaponCacheReady          bool             // Per-character flag: true after weapon probe has run
 	LastCastAt                time.Time
 	ContextDebug              map[Priority]*Debug
 	CurrentGame               *CurrentGameHelper
@@ -109,6 +112,25 @@ type CurrentGameHelper struct {
 	ShouldCheckStash  bool
 	StashFull         bool
 	mutex sync.Mutex
+}
+
+// ResetForNewGame resets per-game fields without replacing the entire struct,
+// preserving state that must survive across bot.Run() calls (e.g. bonus run flags).
+func (h *CurrentGameHelper) ResetForNewGame() {
+	h.mutex.Lock()
+	defer h.mutex.Unlock()
+	h.PickupItems = true
+	h.IsPickingItems = false
+	h.PickedUpItems = make(map[int]int)
+	h.BlacklistedItems = []data.Item{}
+	h.UnstashableItems = make(map[data.UnitID]bool)
+	h.CurrentStashTab = 0
+	h.HasOpenedStash = false
+	h.AreaCorrection.Enabled = false
+	h.AreaCorrection.ExpectedArea = 0
+	h.FailedMenuAttempts = 0
+	h.ShouldCheckStash = false
+	h.StashFull = false
 }
 
 func (ctx *Context) StopSupervisor() {

@@ -77,8 +77,8 @@ func (pf *PathFinder) GetPathFrom(from, to data.Position) (Path, int, bool) {
 	}
 	// Lut Gholein map is a bit bugged, we should close this fake path to avoid pathing issues
 	if a.Area == area.LutGholein {
-		if 210 < a.Grid.Width && 13 < a.Grid.Height {
-			a.Grid.Set(210, 13, game.CollisionTypeNonWalkable)
+		if 210 < grid.Width && 13 < grid.Height {
+			grid.Set(210, 13, game.CollisionTypeNonWalkable)
 		}
 	}
 
@@ -234,7 +234,7 @@ func (pf *PathFinder) GetClosestWalkablePath(dest data.Position) (Path, int, boo
 func (pf *PathFinder) GetClosestWalkablePathFrom(from, dest data.Position) (Path, int, bool) {
 	a := pf.data.AreaData
 	if a.IsWalkable(dest) || !a.IsInside(dest) {
-		path, distance, found := pf.GetPath(dest)
+		path, distance, found := pf.GetPathFrom(from, dest)
 		if found {
 			return path, distance, found
 		}

