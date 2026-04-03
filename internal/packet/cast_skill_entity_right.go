@@ -3,7 +3,7 @@ package packet
 import (
 	"encoding/binary"
 
-	"github.com/hectorgimenez/d2go/pkg/data"
+	"local/internal/svc/internal/gamelib/data"
 )
 
 // CastSkillEntityRight represents packet 0x0D for casting right-click skill on entity

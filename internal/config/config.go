@@ -9,25 +9,25 @@ import (
 	"sync"
 	"time"
 
-	"github.com/hectorgimenez/d2go/pkg/data"
-	"github.com/hectorgimenez/koolo/internal/utils"
+	"local/internal/svc/internal/gamelib/data"
+	"local/internal/svc/internal/utils"
 
 	"os"
 	"strings"
 
-	"github.com/hectorgimenez/d2go/pkg/data/area"
-	"github.com/hectorgimenez/d2go/pkg/data/difficulty"
-	"github.com/hectorgimenez/d2go/pkg/data/stat"
+	"local/internal/svc/internal/gamelib/data/area"
+	"local/internal/svc/internal/gamelib/data/difficulty"
+	"local/internal/svc/internal/gamelib/data/stat"
 	cp "github.com/otiai10/copy"
 
-	"github.com/hectorgimenez/d2go/pkg/nip"
+	"local/internal/svc/internal/gamelib/nip"
 
 	"gopkg.in/yaml.v3"
 )
 
 var (
 	cfgMux     sync.RWMutex
-	Koolo      *KooloCfg
+	App *AppCfg
 	Characters map[string]*CharacterCfg
 	Version    = "dev"
 
@@ -41,7 +41,7 @@ const (
 	GameVersionExpansion         = "expansion"
 )
 
-type KooloCfg struct {
+type AppCfg struct {
 	Debug struct {
 		Log                       bool `yaml:"log"`
 		Screenshots               bool `yaml:"screenshots"`
@@ -132,7 +132,7 @@ type RunewordOverrideConfig struct {
 
 // RunewordTargetStatOverride captures the desired min/max for a stat (and optional layer) when rerolling.
 type RunewordTargetStatOverride struct {
-	StatID stat.ID  `yaml:"statId"`          // numeric stat ID from d2go
+	StatID stat.ID  `yaml:"statId"`          // numeric stat ID from gamelib
 	Layer  int      `yaml:"layer,omitempty"` // optional layer (e.g. skill/aura)
 	Min    float64  `yaml:"min"`             // desired minimum value for this stat
 	Max    *float64 `yaml:"max,omitempty"`   // optional maximum value for this stat
@@ -641,70 +641,70 @@ func OrderedSupervisors() []string {
 	supervisors := availableSupervisorsLocked()
 	slices.Sort(supervisors)
 
-	if Koolo == nil {
+	if App == nil {
 		return supervisors
 	}
 
-	return normalizeSupervisorOrderLocked(Koolo.Dashboard.SupervisorOrder, supervisors)
+	return normalizeSupervisorOrderLocked(App.Dashboard.SupervisorOrder, supervisors)
 }
 
 func HiddenSupervisors() []string {
 	cfgMux.RLock()
 	defer cfgMux.RUnlock()
 
-	if Koolo == nil {
+	if App == nil {
 		return nil
 	}
 
 	supervisors := availableSupervisorsLocked()
 	slices.Sort(supervisors)
 
-	return append([]string(nil), normalizeSupervisorListLocked(Koolo.Dashboard.HiddenSupervisors, supervisors)...)
+	return append([]string(nil), normalizeSupervisorListLocked(App.Dashboard.HiddenSupervisors, supervisors)...)
 }
 
 func SetSupervisorOrder(order []string) error {
 	cfgMux.Lock()
 	defer cfgMux.Unlock()
 
-	if Koolo == nil {
-		return errors.New("koolo config is nil")
+	if App == nil {
+		return errors.New("config is nil")
 	}
 
 	supervisors := availableSupervisorsLocked()
 	slices.Sort(supervisors)
-	Koolo.Dashboard.SupervisorOrder = normalizeSupervisorOrderLocked(order, supervisors)
+	App.Dashboard.SupervisorOrder = normalizeSupervisorOrderLocked(order, supervisors)
 
-	return saveKooloLocked()
+	return saveAppLocked()
 }
 
 func SetHiddenSupervisors(hidden []string) error {
 	cfgMux.Lock()
 	defer cfgMux.Unlock()
 
-	if Koolo == nil {
-		return errors.New("koolo config is nil")
+	if App == nil {
+		return errors.New("config is nil")
 	}
 
 	supervisors := availableSupervisorsLocked()
 	slices.Sort(supervisors)
-	Koolo.Dashboard.HiddenSupervisors = normalizeSupervisorListLocked(hidden, supervisors)
+	App.Dashboard.HiddenSupervisors = normalizeSupervisorListLocked(hidden, supervisors)
 
-	return saveKooloLocked()
+	return saveAppLocked()
 }
 
 func RenameSupervisorInDashboard(oldName, newName string) error {
 	cfgMux.Lock()
 	defer cfgMux.Unlock()
 
-	if Koolo == nil {
-		return errors.New("koolo config is nil")
+	if App == nil {
+		return errors.New("config is nil")
 	}
 
 	supervisors := availableSupervisorsLocked()
 	slices.Sort(supervisors)
 
-	updatedOrder := make([]string, 0, len(Koolo.Dashboard.SupervisorOrder))
-	for _, name := range Koolo.Dashboard.SupervisorOrder {
+	updatedOrder := make([]string, 0, len(App.Dashboard.SupervisorOrder))
+	for _, name := range App.Dashboard.SupervisorOrder {
 		if name == oldName {
 			updatedOrder = append(updatedOrder, newName)
 			continue
@@ -712,8 +712,8 @@ func RenameSupervisorInDashboard(oldName, newName string) error {
 		updatedOrder = append(updatedOrder, name)
 	}
 
-	updatedHidden := make([]string, 0, len(Koolo.Dashboard.HiddenSupervisors))
-	for _, name := range Koolo.Dashboard.HiddenSupervisors {
+	updatedHidden := make([]string, 0, len(App.Dashboard.HiddenSupervisors))
+	for _, name := range App.Dashboard.HiddenSupervisors {
 		if name == oldName {
 			updatedHidden = append(updatedHidden, newName)
 			continue
@@ -721,52 +721,52 @@ func RenameSupervisorInDashboard(oldName, newName string) error {
 		updatedHidden = append(updatedHidden, name)
 	}
 
-	Koolo.Dashboard.SupervisorOrder = normalizeSupervisorOrderLocked(updatedOrder, supervisors)
-	Koolo.Dashboard.HiddenSupervisors = normalizeSupervisorListLocked(updatedHidden, supervisors)
+	App.Dashboard.SupervisorOrder = normalizeSupervisorOrderLocked(updatedOrder, supervisors)
+	App.Dashboard.HiddenSupervisors = normalizeSupervisorListLocked(updatedHidden, supervisors)
 
-	return saveKooloLocked()
+	return saveAppLocked()
 }
 
 func RemoveSupervisorFromDashboard(name string) error {
 	cfgMux.Lock()
 	defer cfgMux.Unlock()
 
-	if Koolo == nil {
-		return errors.New("koolo config is nil")
+	if App == nil {
+		return errors.New("config is nil")
 	}
 
 	supervisors := availableSupervisorsLocked()
 	slices.Sort(supervisors)
 
-	filteredOrder := make([]string, 0, len(Koolo.Dashboard.SupervisorOrder))
-	for _, current := range Koolo.Dashboard.SupervisorOrder {
+	filteredOrder := make([]string, 0, len(App.Dashboard.SupervisorOrder))
+	for _, current := range App.Dashboard.SupervisorOrder {
 		if current == name {
 			continue
 		}
 		filteredOrder = append(filteredOrder, current)
 	}
 
-	filteredHidden := make([]string, 0, len(Koolo.Dashboard.HiddenSupervisors))
-	for _, current := range Koolo.Dashboard.HiddenSupervisors {
+	filteredHidden := make([]string, 0, len(App.Dashboard.HiddenSupervisors))
+	for _, current := range App.Dashboard.HiddenSupervisors {
 		if current == name {
 			continue
 		}
 		filteredHidden = append(filteredHidden, current)
 	}
 
-	Koolo.Dashboard.SupervisorOrder = normalizeSupervisorOrderLocked(filteredOrder, supervisors)
-	Koolo.Dashboard.HiddenSupervisors = normalizeSupervisorListLocked(filteredHidden, supervisors)
+	App.Dashboard.SupervisorOrder = normalizeSupervisorOrderLocked(filteredOrder, supervisors)
+	App.Dashboard.HiddenSupervisors = normalizeSupervisorListLocked(filteredHidden, supervisors)
 
-	return saveKooloLocked()
+	return saveAppLocked()
 }
 
-func saveKooloLocked() error {
-	text, err := yaml.Marshal(Koolo)
+func saveAppLocked() error {
+	text, err := yaml.Marshal(App)
 	if err != nil {
-		return fmt.Errorf("error parsing koolo config: %w", err)
+		return fmt.Errorf("error parsing config: %w", err)
 	}
-	if err := os.WriteFile("config/koolo.yaml", text, 0644); err != nil {
-		return fmt.Errorf("error writing koolo config: %w", err)
+	if err := os.WriteFile("config/settings.yaml", text, 0644); err != nil {
+		return fmt.Errorf("error writing config: %w", err)
 	}
 
 	return nil
@@ -873,19 +873,19 @@ func Load() error {
 		return fmt.Errorf("error getting current working directory: %w", err)
 	}
 
-	kooloPath := getAbsPath("config/koolo.yaml")
-	r, err := os.Open(kooloPath)
+	cfgPath := getAbsPath("config/settings.yaml")
+	r, err := os.Open(cfgPath)
 	if err != nil {
-		return fmt.Errorf("error loading koolo.yaml: %w", err)
+		return fmt.Errorf("error loading settings.yaml: %w", err)
 	}
 	defer r.Close()
 
 	d := yaml.NewDecoder(r)
-	if err = d.Decode(&Koolo); err != nil {
-		return fmt.Errorf("error reading config %s: %w", kooloPath, err)
+	if err = d.Decode(&App); err != nil {
+		return fmt.Errorf("error reading config %s: %w", cfgPath, err)
 	}
-	if Koolo != nil {
-		sanitizeDiscordConfig(Koolo)
+	if App != nil {
+		sanitizeDiscordConfig(App)
 	}
 
 	configDir := getAbsPath("config")
@@ -932,12 +932,12 @@ func Load() error {
 		}
 
 		var pickitPath string
-		if Koolo.CentralizedPickitPath != "" && charCfg.UseCentralizedPickit {
-			if _, err := os.Stat(Koolo.CentralizedPickitPath); os.IsNotExist(err) {
-				utils.ShowDialog("Error loading pickit rules for "+entry.Name(), "The centralized pickit path does not exist: "+Koolo.CentralizedPickitPath+"\nPlease check your Koolo settings.\nFalling back to local pickit.")
+		if App.CentralizedPickitPath != "" && charCfg.UseCentralizedPickit {
+			if _, err := os.Stat(App.CentralizedPickitPath); os.IsNotExist(err) {
+				utils.ShowDialog("Error loading pickit rules for "+entry.Name(), "The centralized pickit path does not exist: "+App.CentralizedPickitPath+"\nPlease check your App settings.\nFalling back to local pickit.")
 				pickitPath = getAbsPath(filepath.Join("config", entry.Name(), "pickit")) + "\\"
 			} else {
-				pickitPath = Koolo.CentralizedPickitPath + "\\"
+				pickitPath = App.CentralizedPickitPath + "\\"
 			}
 		} else {
 			pickitPath = getAbsPath(filepath.Join("config", entry.Name(), "pickit")) + "\\"
@@ -990,7 +990,7 @@ func NormalizeGameVersion(version string) string {
 	}
 }
 
-func sanitizeDiscordConfig(cfg *KooloCfg) {
+func sanitizeDiscordConfig(cfg *AppCfg) {
 	if !cfg.Discord.Enabled {
 		return
 	}
@@ -1107,14 +1107,14 @@ func CreateFromTemplate(name string) error {
 // UpdateWindowSize safely updates the window dimensions under cfgMux and persists the config.
 func UpdateWindowSize(width, height int) {
 	cfgMux.Lock()
-	Koolo.WindowWidth = width
-	Koolo.WindowHeight = height
-	cfg := *Koolo // snapshot under lock
+	App.WindowWidth = width
+	App.WindowHeight = height
+	cfg := *App // snapshot under lock
 	cfgMux.Unlock()
 	_ = ValidateAndSaveConfig(cfg)
 }
 
-func ValidateAndSaveConfig(config KooloCfg) error {
+func ValidateAndSaveConfig(config AppCfg) error {
 	config.D2LoDPath = strings.ReplaceAll(strings.ToLower(config.D2LoDPath), "game.exe", "")
 	config.D2RPath = strings.ReplaceAll(strings.ToLower(config.D2RPath), "d2r.exe", "")
 
@@ -1132,12 +1132,12 @@ func ValidateAndSaveConfig(config KooloCfg) error {
 
 	text, err := yaml.Marshal(config)
 	if err != nil {
-		return fmt.Errorf("error parsing koolo config: %w", err)
+		return fmt.Errorf("error parsing config: %w", err)
 	}
 
-	err = os.WriteFile("config/koolo.yaml", text, 0644)
+	err = os.WriteFile("config/settings.yaml", text, 0644)
 	if err != nil {
-		return fmt.Errorf("error writing koolo config: %w", err)
+		return fmt.Errorf("error writing config: %w", err)
 	}
 
 	// Preserve Runtime state across Load() — Load() rebuilds Characters from disk
@@ -1175,16 +1175,16 @@ func ValidateAndSaveConfig(config KooloCfg) error {
 	return nil
 }
 
-func SaveKooloConfig(config *KooloCfg) error {
+func SaveAppConfig(config *AppCfg) error {
 	if config == nil {
-		return errors.New("koolo config is nil")
+		return errors.New("config is nil")
 	}
 	text, err := yaml.Marshal(config)
 	if err != nil {
-		return fmt.Errorf("error parsing koolo config: %w", err)
+		return fmt.Errorf("error parsing config: %w", err)
 	}
-	if err := os.WriteFile("config/koolo.yaml", text, 0644); err != nil {
-		return fmt.Errorf("error writing koolo config: %w", err)
+	if err := os.WriteFile("config/settings.yaml", text, 0644); err != nil {
+		return fmt.Errorf("error writing config: %w", err)
 	}
 	return nil
 }

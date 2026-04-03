@@ -1,7 +1,7 @@
 package event
 
 import (
-	"github.com/hectorgimenez/d2go/pkg/data"
+	"local/internal/svc/internal/gamelib/data"
 )
 
 const (

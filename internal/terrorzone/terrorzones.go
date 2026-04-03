@@ -4,7 +4,7 @@ import (
 	"slices"
 	"strings"
 
-	"github.com/hectorgimenez/d2go/pkg/data/area"
+	"local/internal/svc/internal/gamelib/data/area"
 )
 
 // Tier is just a string alias for clarity.

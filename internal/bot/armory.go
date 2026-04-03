@@ -7,10 +7,10 @@ import (
 	"path/filepath"
 	"time"
 
-	"github.com/hectorgimenez/d2go/pkg/data"
-	"github.com/hectorgimenez/d2go/pkg/data/item"
-	"github.com/hectorgimenez/d2go/pkg/data/stat"
-	"github.com/hectorgimenez/koolo/internal/game"
+	"local/internal/svc/internal/gamelib/data"
+	"local/internal/svc/internal/gamelib/data/item"
+	"local/internal/svc/internal/gamelib/data/stat"
+	"local/internal/svc/internal/game"
 )
 
 // ArmoryItem represents an item with all its properties for display

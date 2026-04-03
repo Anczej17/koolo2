@@ -9,12 +9,12 @@ import (
 	"strings"
 	"time"
 
-	"github.com/hectorgimenez/koolo/internal/config"
-	ct "github.com/hectorgimenez/koolo/internal/context"
-	"github.com/hectorgimenez/koolo/internal/event"
-	"github.com/hectorgimenez/koolo/internal/game"
-	"github.com/hectorgimenez/koolo/internal/run"
-	"github.com/hectorgimenez/koolo/internal/utils/winproc"
+	"local/internal/svc/internal/config"
+	ct "local/internal/svc/internal/context"
+	"local/internal/svc/internal/event"
+	"local/internal/svc/internal/game"
+	"local/internal/svc/internal/run"
+	"local/internal/svc/internal/utils/winproc"
 	"github.com/lxn/win"
 )
 

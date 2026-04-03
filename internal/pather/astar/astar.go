@@ -4,8 +4,8 @@ import (
 	"container/heap"
 	"math"
 
-	"github.com/hectorgimenez/d2go/pkg/data"
-	"github.com/hectorgimenez/koolo/internal/game"
+	"local/internal/svc/internal/gamelib/data"
+	"local/internal/svc/internal/game"
 )
 
 var directions = []data.Position{

@@ -1,4 +1,4 @@
-module github.com/hectorgimenez/koolo
+module local/internal/svc
 
 go 1.24
 
@@ -9,7 +9,6 @@ require (
 	github.com/bwmarrin/discordgo v0.28.1
 	github.com/go-telegram-bot-api/telegram-bot-api/v5 v5.5.1
 	github.com/gorilla/websocket v1.5.3
-	github.com/hectorgimenez/d2go v0.0.0-20250314185000-169a76515285
 	github.com/inkeliz/gowebview v1.0.1
 	github.com/lxn/win v0.0.0-20210218163916-a377121e959e
 	github.com/otiai10/copy v1.14.0
@@ -19,7 +18,11 @@ require (
 	gopkg.in/yaml.v3 v3.0.1
 )
 
+require github.com/stretchr/testify v1.8.4
+
 require (
+	github.com/davecgh/go-spew v1.1.1 // indirect
+	github.com/pmezard/go-difflib v1.0.0 // indirect
 	github.com/ysmood/fetchup v0.2.3 // indirect
 	github.com/ysmood/goob v0.4.0 // indirect
 	github.com/ysmood/got v0.40.0 // indirect
@@ -29,7 +32,7 @@ require (
 
 require (
 	git.wow.st/gmp/jni v0.0.0-20210610011705-34026c7e22d0 // indirect
-	github.com/expr-lang/expr v1.16.9 // indirect
+	github.com/expr-lang/expr v1.16.9
 	github.com/go-rod/rod v0.116.2
 	github.com/go-stack/stack v1.8.1 // indirect
 	github.com/google/uuid v1.6.0
@@ -48,5 +51,3 @@ require (
 	google.golang.org/protobuf v1.35.1 // indirect
 	gopkg.in/yaml.v2 v2.4.0 // indirect
 )
-
-replace github.com/hectorgimenez/d2go => github.com/kwader2k/d2go v0.0.0-20260317194452-28062d1c042e

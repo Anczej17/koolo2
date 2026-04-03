@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"net/http"
 
-	"github.com/hectorgimenez/koolo/internal/bot"
+	"local/internal/svc/internal/bot"
 )
 
 // armoryPage serves the armory HTML page

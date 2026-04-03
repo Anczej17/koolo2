@@ -1,7 +1,7 @@
 package run
 
 import (
-	"github.com/hectorgimenez/koolo/internal/config"
+	"local/internal/svc/internal/config"
 )
 
 type SequencerResult int8

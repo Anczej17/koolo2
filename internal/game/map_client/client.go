@@ -9,18 +9,18 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/hectorgimenez/d2go/pkg/data"
-	"github.com/hectorgimenez/d2go/pkg/data/area"
-	"github.com/hectorgimenez/d2go/pkg/data/difficulty"
-	"github.com/hectorgimenez/d2go/pkg/data/npc"
-	"github.com/hectorgimenez/d2go/pkg/data/object"
-	"github.com/hectorgimenez/koolo/internal/config"
+	"local/internal/svc/internal/gamelib/data"
+	"local/internal/svc/internal/gamelib/data/area"
+	"local/internal/svc/internal/gamelib/data/difficulty"
+	"local/internal/svc/internal/gamelib/data/npc"
+	"local/internal/svc/internal/gamelib/data/object"
+	"local/internal/svc/internal/config"
 )
 
 func GetMapData(seed string, difficulty difficulty.Difficulty) (MapData, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, "./tools/koolo-map.exe", config.Koolo.D2LoDPath, "-s", seed, "-d", getDifficultyAsNum(difficulty))
+	cmd := exec.CommandContext(ctx, "./tools/mapsvc.exe", config.App.D2LoDPath, "-s", seed, "-d", getDifficultyAsNum(difficulty))
 	cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
 	stdout, err := cmd.Output()
 	if err != nil {

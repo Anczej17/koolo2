@@ -1,6 +1,6 @@
 package utils
 
-import "github.com/hectorgimenez/koolo/internal/utils/winproc"
+import "local/internal/svc/internal/utils/winproc"
 
 func init() {
     winproc.SetProcessDpiAware.Call()

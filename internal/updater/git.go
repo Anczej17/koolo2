@@ -234,7 +234,7 @@ func PerformUpdate(ctx repoContext, progressCallback func(step, message string))
 	stashCreated := false
 	if dirty {
 		progressCallback("stash", "Stashing local changes...")
-		stashCmd := gitCmd(ctx.RepoDir, "stash", "push", "-u", "-m", "koolo-updater")
+		stashCmd := gitCmd(ctx.RepoDir, "stash", "push", "-u", "-m", "app-updater")
 		if output, err := stashCmd.CombinedOutput(); err != nil {
 			return fmt.Errorf("git stash failed: %w\n%s", err, output)
 		}
@@ -336,7 +336,7 @@ func ensureUpstreamRemote(repoDir string) error {
 
 	if err != nil {
 		// upstream doesn't exist, add it
-		upstreamURL := "https://github.com/kwader2k/koolo.git"
+		upstreamURL := "https://github.com/user/app.git"
 		addCmd := gitCmd(repoDir, "remote", "add", "upstream", upstreamURL)
 		if output, err := addCmd.CombinedOutput(); err != nil {
 			return fmt.Errorf("failed to add upstream remote: %w\nOutput: %s", err, string(output))
@@ -346,9 +346,9 @@ func ensureUpstreamRemote(repoDir string) error {
 
 	// Verify it's pointing to the correct URL
 	currentURL := strings.TrimSpace(string(output))
-	expectedURL := "https://github.com/kwader2k/koolo.git"
+	expectedURL := "https://github.com/user/app.git"
 
-	if !strings.Contains(currentURL, "kwader2k/koolo") {
+	if !strings.Contains(currentURL, "user/app") {
 		// Update to correct URL
 		setCmd := gitCmd(repoDir, "remote", "set-url", "upstream", expectedURL)
 		if output, err := setCmd.CombinedOutput(); err != nil {

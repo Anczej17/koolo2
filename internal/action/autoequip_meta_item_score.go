@@ -1,10 +1,10 @@
 package action
 
 import (
-	"github.com/hectorgimenez/d2go/pkg/data"
-	"github.com/hectorgimenez/d2go/pkg/data/item"
-	"github.com/hectorgimenez/d2go/pkg/data/stat"
-	"github.com/hectorgimenez/koolo/internal/context"
+	"local/internal/svc/internal/gamelib/data"
+	"local/internal/svc/internal/gamelib/data/item"
+	"local/internal/svc/internal/gamelib/data/stat"
+	"local/internal/svc/internal/context"
 )
 
 func getMercenaryMetaItemScore(it data.Item) (float64, bool) {

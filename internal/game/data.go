@@ -6,16 +6,16 @@ import (
 	"strings"
 	"time"
 
-	"github.com/hectorgimenez/d2go/pkg/data"
-	"github.com/hectorgimenez/d2go/pkg/data/area"
-	"github.com/hectorgimenez/d2go/pkg/data/difficulty"
-	"github.com/hectorgimenez/d2go/pkg/data/item"
-	"github.com/hectorgimenez/d2go/pkg/data/npc"
-	"github.com/hectorgimenez/d2go/pkg/data/quest"
-	"github.com/hectorgimenez/d2go/pkg/data/skill"
-	"github.com/hectorgimenez/d2go/pkg/data/stat"
-	"github.com/hectorgimenez/d2go/pkg/data/state"
-	"github.com/hectorgimenez/koolo/internal/config"
+	"local/internal/svc/internal/gamelib/data"
+	"local/internal/svc/internal/gamelib/data/area"
+	"local/internal/svc/internal/gamelib/data/difficulty"
+	"local/internal/svc/internal/gamelib/data/item"
+	"local/internal/svc/internal/gamelib/data/npc"
+	"local/internal/svc/internal/gamelib/data/quest"
+	"local/internal/svc/internal/gamelib/data/skill"
+	"local/internal/svc/internal/gamelib/data/stat"
+	"local/internal/svc/internal/gamelib/data/state"
+	"local/internal/svc/internal/config"
 )
 
 type Data struct {

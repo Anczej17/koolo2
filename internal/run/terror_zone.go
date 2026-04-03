@@ -3,12 +3,12 @@ package run
 import (
 	"fmt"
 
-	"github.com/hectorgimenez/d2go/pkg/data"
-	"github.com/hectorgimenez/d2go/pkg/data/area"
-	"github.com/hectorgimenez/d2go/pkg/data/object"
-	"github.com/hectorgimenez/koolo/internal/action"
-	"github.com/hectorgimenez/koolo/internal/context"
-	terrorzones "github.com/hectorgimenez/koolo/internal/terrorzone"
+	"local/internal/svc/internal/gamelib/data"
+	"local/internal/svc/internal/gamelib/data/area"
+	"local/internal/svc/internal/gamelib/data/object"
+	"local/internal/svc/internal/action"
+	"local/internal/svc/internal/context"
+	terrorzones "local/internal/svc/internal/terrorzone"
 )
 
 type TerrorZone struct {

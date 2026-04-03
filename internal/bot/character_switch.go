@@ -3,7 +3,7 @@ package bot
 import (
 	"time"
 
-	"github.com/hectorgimenez/koolo/internal/event"
+	"local/internal/svc/internal/event"
 )
 
 // handleCharacterSwitch is a specialized event handler for character switching

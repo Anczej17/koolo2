@@ -4,10 +4,10 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/hectorgimenez/d2go/pkg/data/item"
+	"local/internal/svc/internal/gamelib/data/item"
 )
 
-// ItemDatabaseV2 holds all item definitions from d2go
+// ItemDatabaseV2 holds all item definitions from gamelib
 var ItemDatabaseV2 = initializeItemDatabaseV2()
 
 func initializeItemDatabaseV2() map[string]ItemDefinition {
@@ -43,33 +43,33 @@ func GetItemsByCategory(category string) []ItemDefinition {
 	return results
 }
 
-// getAllItemsV2 returns all item definitions from d2go data
+// getAllItemsV2 returns all item definitions from gamelib data
 func getAllItemsV2() []ItemDefinition {
 	items := []ItemDefinition{}
 
-	// Add unique items from d2go
-	items = append(items, getD2GOUniqueItems()...)
+	// Add unique items from gamelib
+	items = append(items, getDBUniqueItems()...)
 
 	// Add set items
-	items = append(items, getD2GOSetItems()...)
+	items = append(items, getDBSetItems()...)
 
 	// Add runes
-	items = append(items, getD2GORuneItems()...)
+	items = append(items, getDBRuneItems()...)
 
 	// Add gems
-	items = append(items, getD2GOGemItems()...)
+	items = append(items, getDBGemItems()...)
 
 	// Add charms
-	items = append(items, getD2GOCharmItems()...)
+	items = append(items, getDBCharmItems()...)
 
 	// Add popular base items
-	items = append(items, getD2GOBaseItems()...)
+	items = append(items, getDBBaseItems()...)
 
 	return items
 }
 
-// getD2GOUniqueItems returns all unique items from d2go library
-func getD2GOUniqueItems() []ItemDefinition {
+// getDBUniqueItems returns all unique items from gamelib library
+func getDBUniqueItems() []ItemDefinition {
 	// Map of unique items to their base items (from unique bases.txt)
 	uniqueBases := map[string]string{
 		"Harlequin Crest": "Shako", "Stone of Jordan": "Ring", "War Traveler": "Battle Boots",
@@ -168,7 +168,7 @@ func getD2GOUniqueItems() []ItemDefinition {
 		"Demonlimb": "Tyrant Club",
 	}
 
-	// Popular uniques from d2go UniqueItems map
+	// Popular uniques from gamelib UniqueItems map
 	popularUniques := []string{
 		"Harlequin Crest", "Stone of Jordan", "War Traveler", "Arachnid Mesh",
 		"Mara's Kaleidoscope", "Skin of the Vipermagi", "Shako", "Oculus",
@@ -272,8 +272,8 @@ func getD2GOUniqueItems() []ItemDefinition {
 	return items
 }
 
-// getD2GOSetItems returns popular set items
-func getD2GOSetItems() []ItemDefinition {
+// getDBSetItems returns popular set items
+func getDBSetItems() []ItemDefinition {
 	sets := []string{
 		// Tal Rasha's Wrappings
 		"Tal Rasha's Guardianship", "Tal Rasha's Adjudication", "Tal Rasha's Lidless Eye",
@@ -334,8 +334,8 @@ func getD2GOSetItems() []ItemDefinition {
 	return items
 }
 
-// getD2GORuneItems returns all 33 runes
-func getD2GORuneItems() []ItemDefinition {
+// getDBRuneItems returns all 33 runes
+func getDBRuneItems() []ItemDefinition {
 	runes := []struct {
 		name     string
 		code     string
@@ -399,8 +399,8 @@ func getD2GORuneItems() []ItemDefinition {
 	return items
 }
 
-// getD2GOGemItems returns all gem types and qualities
-func getD2GOGemItems() []ItemDefinition {
+// getDBGemItems returns all gem types and qualities
+func getDBGemItems() []ItemDefinition {
 	gemTypes := []string{"Amethyst", "Diamond", "Emerald", "Ruby", "Sapphire", "Topaz", "Skull"}
 	gemQualities := []string{"Chipped", "Flawed", "Normal", "Flawless", "Perfect"}
 
@@ -433,8 +433,8 @@ func getD2GOGemItems() []ItemDefinition {
 	return items
 }
 
-// getD2GOCharmItems returns charm types
-func getD2GOCharmItems() []ItemDefinition {
+// getDBCharmItems returns charm types
+func getDBCharmItems() []ItemDefinition {
 	charms := []struct {
 		name  string
 		code  string
@@ -476,8 +476,8 @@ func getD2GOCharmItems() []ItemDefinition {
 	return items
 }
 
-// getD2GOBaseItems returns popular base items for runewords
-func getD2GOBaseItems() []ItemDefinition {
+// getDBBaseItems returns popular base items for runewords
+func getDBBaseItems() []ItemDefinition {
 	bases := []struct {
 		name        string
 		itemType    string

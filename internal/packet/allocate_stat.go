@@ -3,7 +3,7 @@ package packet
 import (
 	"encoding/binary"
 
-	"github.com/hectorgimenez/d2go/pkg/data/stat"
+	"local/internal/svc/internal/gamelib/data/stat"
 )
 
 // AllocateStat represents packet 0x3A for allocating stat points
@@ -21,7 +21,7 @@ type AllocateStat struct {
 	Padding  uint16
 }
 
-// statToPacketID maps d2go stat.ID to packet stat ID
+// statToPacketID maps gamelib stat.ID to packet stat ID
 func statToPacketID(s stat.ID) uint16 {
 	switch s {
 	case stat.Strength:

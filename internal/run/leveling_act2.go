@@ -3,24 +3,24 @@ package run
 import (
 	"fmt"
 
-	"github.com/hectorgimenez/d2go/pkg/data"
-	"github.com/hectorgimenez/d2go/pkg/data/area"
-	"github.com/hectorgimenez/d2go/pkg/data/difficulty"
-	"github.com/hectorgimenez/d2go/pkg/data/item"
-	"github.com/hectorgimenez/d2go/pkg/data/npc"
-	"github.com/hectorgimenez/d2go/pkg/data/object"
-	"github.com/hectorgimenez/d2go/pkg/data/quest"
-	"github.com/hectorgimenez/d2go/pkg/data/skill"
-	"github.com/hectorgimenez/d2go/pkg/data/stat"
-	"github.com/hectorgimenez/d2go/pkg/memory"
-	"github.com/hectorgimenez/koolo/internal/action"
-	"github.com/hectorgimenez/koolo/internal/action/step"
-	"github.com/hectorgimenez/koolo/internal/config"
-	"github.com/hectorgimenez/koolo/internal/context"
-	"github.com/hectorgimenez/koolo/internal/game"
-	"github.com/hectorgimenez/koolo/internal/town"
-	"github.com/hectorgimenez/koolo/internal/ui"
-	"github.com/hectorgimenez/koolo/internal/utils"
+	"local/internal/svc/internal/gamelib/data"
+	"local/internal/svc/internal/gamelib/data/area"
+	"local/internal/svc/internal/gamelib/data/difficulty"
+	"local/internal/svc/internal/gamelib/data/item"
+	"local/internal/svc/internal/gamelib/data/npc"
+	"local/internal/svc/internal/gamelib/data/object"
+	"local/internal/svc/internal/gamelib/data/quest"
+	"local/internal/svc/internal/gamelib/data/skill"
+	"local/internal/svc/internal/gamelib/data/stat"
+	"local/internal/svc/internal/gamelib/memory"
+	"local/internal/svc/internal/action"
+	"local/internal/svc/internal/action/step"
+	"local/internal/svc/internal/config"
+	"local/internal/svc/internal/context"
+	"local/internal/svc/internal/game"
+	"local/internal/svc/internal/town"
+	"local/internal/svc/internal/ui"
+	"local/internal/svc/internal/utils"
 	"github.com/lxn/win"
 )
 
@@ -264,7 +264,7 @@ func (a Leveling) act2() error {
 			return err
 		}
 
-		// This block can be removed when https://github.com/hectorgimenez/koolo/pull/642 gets merged
+		// This block can be removed when https://local/internal/svc/pull/642 gets merged
 		tome, found := a.ctx.Data.Objects.FindOne(object.YetAnotherTome)
 		if !found {
 			a.ctx.Logger.Error("YetAnotherTome (journal) not found after Summoner kill. This is unexpected.")
@@ -305,7 +305,7 @@ func (a Leveling) act2() error {
 			return err
 		}
 
-		// This block can be removed when https://github.com/hectorgimenez/koolo/pull/642 gets merged
+		// This block can be removed when https://local/internal/svc/pull/642 gets merged
 		tome, found := a.ctx.Data.Objects.FindOne(object.YetAnotherTome)
 		if !found {
 			a.ctx.Logger.Error("YetAnotherTome (journal) not found after Summoner kill. This is unexpected.")

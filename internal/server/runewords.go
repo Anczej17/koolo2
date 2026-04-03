@@ -11,11 +11,11 @@ import (
 	"strings"
 	"time"
 
-	"github.com/hectorgimenez/d2go/pkg/data/item"
-	"github.com/hectorgimenez/koolo/internal/action"
-	"github.com/hectorgimenez/koolo/internal/config"
-	"github.com/hectorgimenez/koolo/internal/event"
-	"github.com/hectorgimenez/koolo/internal/pickit"
+	"local/internal/svc/internal/gamelib/data/item"
+	"local/internal/svc/internal/action"
+	"local/internal/svc/internal/config"
+	"local/internal/svc/internal/event"
+	"local/internal/svc/internal/pickit"
 )
 
 type RunewordHistoryEntry struct {
@@ -181,7 +181,7 @@ func (s *HttpServer) runewordBaseTypes(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 
-		// Only expose this base type if there exists at least one d2go
+		// Only expose this base type if there exists at least one gamelib
 		// item with matching type code and enough sockets to hold the
 		// runeword. This avoids showing types like Club/Wand/etc. for
 		// 5-socket runewords where no actual 5-socket base exists.
@@ -234,7 +234,7 @@ func (s *HttpServer) runewordBases(w http.ResponseWriter, r *http.Request) {
 	var result []baseItemDTO
 
 	// Find the matching runeword recipe so we can infer default base types
-	// and required sockets directly from d2go data.
+	// and required sockets directly from gamelib data.
 	var recipe *action.Runeword
 	for i := range action.Runewords {
 		if string(action.Runewords[i].Name) == name {
@@ -272,7 +272,7 @@ func (s *HttpServer) runewordBases(w http.ResponseWriter, r *http.Request) {
 		allowedTypeCodes = unique
 	}
 
-	// Map tier string to d2go item tier
+	// Map tier string to gamelib item tier
 	var tierFilter item.Tier
 	useTierFilter := false
 	switch tier {
@@ -290,9 +290,9 @@ func (s *HttpServer) runewordBases(w http.ResponseWriter, r *http.Request) {
 	requiredSockets := len(recipe.Runes)
 	seenBases := make(map[string]bool)
 
-	// Build the base list directly from d2go item descriptions.
+	// Build the base list directly from gamelib item descriptions.
 	for _, desc := range item.Desc {
-		// Filter by allowed d2go item type codes (TypeArmor, TypeBow, etc.)
+		// Filter by allowed gamelib item type codes (TypeArmor, TypeBow, etc.)
 		if len(allowedTypeCodes) > 0 {
 			match := false
 			for _, code := range allowedTypeCodes {
@@ -363,7 +363,7 @@ func (s *HttpServer) runewordSettings(w http.ResponseWriter, r *http.Request) {
 				Saved:              false,
 				ErrorMessage:       err.Error(),
 				RunewordRecipeList: availableRunewordRecipesForCharacter(cfg),
-				RunewordFavoriteRecipes: config.Koolo.RunewordFavoriteRecipes,
+				RunewordFavoriteRecipes: config.App.RunewordFavoriteRecipes,
 				RunewordRuneNames:  buildRunewordRuneNames(),
 				RunewordRerollable: buildRunewordRerollable(),
 			})
@@ -393,8 +393,8 @@ func (s *HttpServer) runewordSettings(w http.ResponseWriter, r *http.Request) {
 		for _, name := range visibleRunewords {
 			visibleSet[name] = struct{}{}
 		}
-		mergedFavorites := make([]string, 0, len(favoriteRunewordRecipes)+len(config.Koolo.RunewordFavoriteRecipes))
-		seenFavorites := make(map[string]struct{}, len(favoriteRunewordRecipes)+len(config.Koolo.RunewordFavoriteRecipes))
+		mergedFavorites := make([]string, 0, len(favoriteRunewordRecipes)+len(config.App.RunewordFavoriteRecipes))
+		seenFavorites := make(map[string]struct{}, len(favoriteRunewordRecipes)+len(config.App.RunewordFavoriteRecipes))
 		for _, name := range favoriteRunewordRecipes {
 			if _, ok := seenFavorites[name]; ok {
 				continue
@@ -402,7 +402,7 @@ func (s *HttpServer) runewordSettings(w http.ResponseWriter, r *http.Request) {
 			seenFavorites[name] = struct{}{}
 			mergedFavorites = append(mergedFavorites, name)
 		}
-		for _, name := range config.Koolo.RunewordFavoriteRecipes {
+		for _, name := range config.App.RunewordFavoriteRecipes {
 			if _, visible := visibleSet[name]; visible {
 				continue
 			}
@@ -412,7 +412,7 @@ func (s *HttpServer) runewordSettings(w http.ResponseWriter, r *http.Request) {
 			seenFavorites[name] = struct{}{}
 			mergedFavorites = append(mergedFavorites, name)
 		}
-		config.Koolo.RunewordFavoriteRecipes = mergedFavorites
+		config.App.RunewordFavoriteRecipes = mergedFavorites
 
 		// Parse and save per-runeword overrides into cfg.Game.RunewordOverrides.
 		// Currently the UI only edits a single runeword at a time, identified
@@ -460,7 +460,7 @@ func (s *HttpServer) runewordSettings(w http.ResponseWriter, r *http.Request) {
 					Saved:                   false,
 					ErrorMessage:            fmt.Sprintf("failed to parse reroll rules: %v", err),
 					RunewordRecipeList:      availableRunewordRecipesForCharacter(cfg),
-					RunewordFavoriteRecipes: config.Koolo.RunewordFavoriteRecipes,
+					RunewordFavoriteRecipes: config.App.RunewordFavoriteRecipes,
 					RunewordRuneNames:       buildRunewordRuneNames(),
 					RunewordRerollable:      buildRunewordRerollable(),
 				})
@@ -481,7 +481,7 @@ func (s *HttpServer) runewordSettings(w http.ResponseWriter, r *http.Request) {
 		}
 
 	saveConfig:
-		if err := config.SaveKooloConfig(config.Koolo); err != nil {
+		if err := config.SaveAppConfig(config.App); err != nil {
 			s.templates.ExecuteTemplate(w, "runewords.gohtml", CharacterSettings{
 				Version:                 config.Version,
 				Supervisor:              characterName,
@@ -489,7 +489,7 @@ func (s *HttpServer) runewordSettings(w http.ResponseWriter, r *http.Request) {
 				Saved:                   false,
 				ErrorMessage:            err.Error(),
 				RunewordRecipeList:      availableRunewordRecipesForCharacter(cfg),
-				RunewordFavoriteRecipes: config.Koolo.RunewordFavoriteRecipes,
+				RunewordFavoriteRecipes: config.App.RunewordFavoriteRecipes,
 				RunewordRuneNames:       buildRunewordRuneNames(),
 				RunewordRerollable:      buildRunewordRerollable(),
 			})
@@ -503,7 +503,7 @@ func (s *HttpServer) runewordSettings(w http.ResponseWriter, r *http.Request) {
 				Saved:                   false,
 				ErrorMessage:            err.Error(),
 				RunewordRecipeList:      availableRunewordRecipesForCharacter(cfg),
-				RunewordFavoriteRecipes: config.Koolo.RunewordFavoriteRecipes,
+				RunewordFavoriteRecipes: config.App.RunewordFavoriteRecipes,
 				RunewordRuneNames:       buildRunewordRuneNames(),
 				RunewordRerollable:      buildRunewordRerollable(),
 			})
@@ -520,7 +520,7 @@ func (s *HttpServer) runewordSettings(w http.ResponseWriter, r *http.Request) {
 		Config:                  cfg,
 		Saved:                   saved,
 		RunewordRecipeList:      availableRunewordRecipesForCharacter(cfg),
-		RunewordFavoriteRecipes: config.Koolo.RunewordFavoriteRecipes,
+		RunewordFavoriteRecipes: config.App.RunewordFavoriteRecipes,
 		RunewordRuneNames:       buildRunewordRuneNames(),
 		RunewordRerollable:      buildRunewordRerollable(),
 	})

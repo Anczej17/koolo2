@@ -7,13 +7,13 @@ import (
 	"sort"
 	"time"
 
-	"github.com/hectorgimenez/d2go/pkg/data"
-	"github.com/hectorgimenez/d2go/pkg/data/area"
-	"github.com/hectorgimenez/d2go/pkg/data/object"
-	"github.com/hectorgimenez/d2go/pkg/data/skill"
-	"github.com/hectorgimenez/d2go/pkg/data/stat"
-	"github.com/hectorgimenez/koolo/internal/game"
-	"github.com/hectorgimenez/koolo/internal/utils"
+	"local/internal/svc/internal/gamelib/data"
+	"local/internal/svc/internal/gamelib/data/area"
+	"local/internal/svc/internal/gamelib/data/object"
+	"local/internal/svc/internal/gamelib/data/skill"
+	"local/internal/svc/internal/gamelib/data/stat"
+	"local/internal/svc/internal/game"
+	"local/internal/svc/internal/utils"
 )
 
 func (pf *PathFinder) RandomMovement() {
@@ -890,8 +890,8 @@ func (pf *PathFinder) GetClosestSuperChest(position data.Position, losCheck bool
 			continue
 		}
 
-		// Rely on d2go classification for super chests.
-		// NOTE: This intentionally includes racks/stands if d2go marks them as SuperChest.
+		// Rely on gamelib classification for super chests.
+		// NOTE: This intentionally includes racks/stands if gamelib marks them as SuperChest.
 		if !o.IsSuperChest() {
 			continue
 		}

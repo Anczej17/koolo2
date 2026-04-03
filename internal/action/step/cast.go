@@ -1,10 +1,10 @@
 package step
 
 import (
-	"github.com/hectorgimenez/d2go/pkg/data"
-	"github.com/hectorgimenez/d2go/pkg/data/skill"
-	"github.com/hectorgimenez/koolo/internal/context"
-	"github.com/hectorgimenez/koolo/internal/game"
+	"local/internal/svc/internal/gamelib/data"
+	"local/internal/svc/internal/gamelib/data/skill"
+	"local/internal/svc/internal/context"
+	"local/internal/svc/internal/game"
 )
 
 // CastAtPosition selects a skill (if bound) and casts it at the given position.

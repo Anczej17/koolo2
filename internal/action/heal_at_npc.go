@@ -4,9 +4,9 @@ import (
 	"fmt"
 	"log/slog"
 
-	"github.com/hectorgimenez/koolo/internal/action/step"
-	"github.com/hectorgimenez/koolo/internal/context"
-	"github.com/hectorgimenez/koolo/internal/town"
+	"local/internal/svc/internal/action/step"
+	"local/internal/svc/internal/context"
+	"local/internal/svc/internal/town"
 )
 
 func HealAtNPC() error {

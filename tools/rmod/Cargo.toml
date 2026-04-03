@@ -1,0 +1,18 @@
+[package]
+name = "rmod"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+# No external dependencies — all Windows FFI is declared inline.
+# This keeps the binary small, avoids feature-flag churn, and ensures
+# we control every type definition exactly.
+
+[profile.release]
+opt-level = "s"
+lto = true
+strip = true
+panic = "abort"

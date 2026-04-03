@@ -10,8 +10,8 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/hectorgimenez/koolo/internal/pickit"
-	"github.com/hectorgimenez/koolo/internal/utils"
+	"local/internal/svc/internal/pickit"
+	"local/internal/svc/internal/utils"
 )
 
 // PickitAPI handles all pickit editor endpoints

@@ -3,7 +3,7 @@ package pickit
 import (
 	"strings"
 
-	"github.com/hectorgimenez/d2go/pkg/data/item"
+	"local/internal/svc/internal/gamelib/data/item"
 )
 
 // ToNIPName converts a display name to NIP format (lowercase, no spaces)

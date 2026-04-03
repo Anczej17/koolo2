@@ -4,8 +4,8 @@ import (
 	"context"
 	"log/slog"
 
-	"github.com/hectorgimenez/koolo/internal/config"
-	"github.com/hectorgimenez/koolo/internal/event"
+	"local/internal/svc/internal/config"
+	"local/internal/svc/internal/event"
 )
 
 // CompanionEventHandler handles events related to companion functionality

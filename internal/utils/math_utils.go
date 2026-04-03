@@ -3,7 +3,7 @@ package utils
 import (
 	"math"
 
-	"github.com/hectorgimenez/d2go/pkg/data"
+	"local/internal/svc/internal/gamelib/data"
 )
 
 type Vector struct {

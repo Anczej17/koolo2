@@ -6,15 +6,15 @@ import (
 	"sync"
 	"time"
 
-	"github.com/hectorgimenez/d2go/pkg/data"
-	"github.com/hectorgimenez/d2go/pkg/data/npc"
-	"github.com/hectorgimenez/d2go/pkg/data/skill"
-	"github.com/hectorgimenez/d2go/pkg/data/stat"
-	"github.com/hectorgimenez/d2go/pkg/utils"
-	"github.com/hectorgimenez/koolo/internal/chicken"
-	"github.com/hectorgimenez/koolo/internal/context"
-	"github.com/hectorgimenez/koolo/internal/game"
-	"github.com/hectorgimenez/koolo/internal/packet"
+	"local/internal/svc/internal/gamelib/data"
+	"local/internal/svc/internal/gamelib/data/npc"
+	"local/internal/svc/internal/gamelib/data/skill"
+	"local/internal/svc/internal/gamelib/data/stat"
+	"local/internal/svc/internal/gamelib/utils"
+	"local/internal/svc/internal/chicken"
+	"local/internal/svc/internal/context"
+	"local/internal/svc/internal/game"
+	"local/internal/svc/internal/packet"
 )
 
 const attackCycleDuration = 120 * time.Millisecond

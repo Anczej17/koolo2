@@ -3,7 +3,7 @@ package packet
 import (
 	"encoding/binary"
 
-	"github.com/hectorgimenez/d2go/pkg/data"
+	"local/internal/svc/internal/gamelib/data"
 )
 
 // EntranceInteraction represents the packet for interacting with entrances

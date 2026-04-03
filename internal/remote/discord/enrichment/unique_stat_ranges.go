@@ -1,7 +1,7 @@
 package enrichment
 
 import (
-	"github.com/hectorgimenez/d2go/pkg/data/stat"
+	"local/internal/svc/internal/gamelib/data/stat"
 )
 
 // StatRange defines the possible roll range for a single stat on a unique item.
@@ -75,7 +75,7 @@ var UniqueStatRanges = map[string][]StatRange{
 		{stat.Strength, "Strength", 20, 30},
 		{stat.FireResist, "All Resistances", 20, 30},
 	},
-	// Note: Tal Rasha's armor is "Tal Rasha's Howling Wind" in d2go (see set items section)
+	// Note: Tal Rasha's armor is "Tal Rasha's Howling Wind" in gamelib (see set items section)
 	"The Gladiator's Bane": {
 		{stat.Defense, "Defense", 1255, 1496},
 	},
@@ -539,7 +539,7 @@ var UniqueStatRanges = map[string][]StatRange{
 	"Trang-Oul's Scales": {
 		{stat.Defense, "Defense", 857, 1057},
 	},
-	// Note: Aldur's weapon is "Aldur's Stony Gaze" in d2go — no variable stats
+	// Note: Aldur's weapon is "Aldur's Stony Gaze" in gamelib — no variable stats
 	"Aldur's Deception": {
 		{stat.Defense, "Defense", 1029, 1109},
 	},

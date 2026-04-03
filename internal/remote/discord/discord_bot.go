@@ -8,9 +8,9 @@ import (
 	"strings"
 
 	"github.com/bwmarrin/discordgo"
-	"github.com/hectorgimenez/koolo/internal/bot"
-	"github.com/hectorgimenez/koolo/internal/config"
-	"github.com/hectorgimenez/koolo/internal/remote/discord/enrichment"
+	"local/internal/svc/internal/bot"
+	"local/internal/svc/internal/config"
+	"local/internal/svc/internal/remote/discord/enrichment"
 )
 
 type Bot struct {
@@ -35,16 +35,16 @@ func NewBot(token, channelID, itemChannelID string, manager *bot.SupervisorManag
 	}
 
 	// Initialize enrichment service if enabled
-	if config.Koolo.Discord.EnableFancyItemDrops {
+	if config.App.Discord.EnableFancyItemDrops {
 		logger := slog.Default()
 
 		// FlareSolverr for bypassing Cloudflare on d2jsp/traderie
 		var flare *enrichment.FlareSolverr
-		if config.Koolo.Discord.FlareSolverrURL != "" || config.Koolo.Discord.D2JSPScraping {
-			flare = enrichment.NewFlareSolverr(config.Koolo.Discord.FlareSolverrURL, logger)
+		if config.App.Discord.FlareSolverrURL != "" || config.App.Discord.D2JSPScraping {
+			flare = enrichment.NewFlareSolverr(config.App.Discord.FlareSolverrURL, logger)
 		}
 
-		d2jspScraper := enrichment.NewD2JSPScraper(config.Koolo.Discord.D2JSPRealm, flare, logger, config.Koolo.Discord.D2JSPCookie)
+		d2jspScraper := enrichment.NewD2JSPScraper(config.App.Discord.D2JSPRealm, flare, logger, config.App.Discord.D2JSPCookie)
 		traderieScraper := enrichment.NewTraderieScraper(flare, logger)
 		botInstance.enrichmentService = enrichment.NewService(d2jspScraper, traderieScraper, logger)
 	}
@@ -101,9 +101,9 @@ func (b *Bot) onMessageCreated(s *discordgo.Session, m *discordgo.MessageCreate)
 	// fmt.Printf("[Discord] Message from %s (ID: %s): %s\n", m.Author.Username, m.Author.ID, m.Content)
 
 	// Check if the message is from a bot admin
-	if !slices.Contains(config.Koolo.Discord.BotAdmins, m.Author.ID) {
+	if !slices.Contains(config.App.Discord.BotAdmins, m.Author.ID) {
 		// Debug: Uncomment to see who is trying to use commands
-		// fmt.Printf("[Discord] User %s (ID: %s) not in admin list. Admins: %v\n", m.Author.Username, m.Author.ID, config.Koolo.Discord.BotAdmins)
+		// fmt.Printf("[Discord] User %s (ID: %s) not in admin list. Admins: %v\n", m.Author.Username, m.Author.ID, config.App.Discord.BotAdmins)
 		return
 	}
 

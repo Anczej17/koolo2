@@ -9,20 +9,20 @@ import (
 	"strings"
 	"time"
 
-	"github.com/hectorgimenez/d2go/pkg/data"
-	"github.com/hectorgimenez/d2go/pkg/data/difficulty"
-	"github.com/hectorgimenez/d2go/pkg/data/item"
-	"github.com/hectorgimenez/d2go/pkg/data/skill"
-	"github.com/hectorgimenez/d2go/pkg/data/stat"
-	"github.com/hectorgimenez/koolo/internal/action"
-	"github.com/hectorgimenez/koolo/internal/config"
-	ct "github.com/hectorgimenez/koolo/internal/context"
-	"github.com/hectorgimenez/koolo/internal/drop"
-	"github.com/hectorgimenez/koolo/internal/event"
-	"github.com/hectorgimenez/koolo/internal/game"
-	"github.com/hectorgimenez/koolo/internal/health"
-	"github.com/hectorgimenez/koolo/internal/run"
-	"github.com/hectorgimenez/koolo/internal/utils"
+	"local/internal/svc/internal/gamelib/data"
+	"local/internal/svc/internal/gamelib/data/difficulty"
+	"local/internal/svc/internal/gamelib/data/item"
+	"local/internal/svc/internal/gamelib/data/skill"
+	"local/internal/svc/internal/gamelib/data/stat"
+	"local/internal/svc/internal/action"
+	"local/internal/svc/internal/config"
+	ct "local/internal/svc/internal/context"
+	"local/internal/svc/internal/drop"
+	"local/internal/svc/internal/event"
+	"local/internal/svc/internal/game"
+	"local/internal/svc/internal/health"
+	"local/internal/svc/internal/run"
+	"local/internal/svc/internal/utils"
 )
 
 // Define a constant for the timeout on menu operations
@@ -441,18 +441,18 @@ func (s *SinglePlayerSupervisor) Start() error {
 		// instead of using defer, which would leak contexts in a loop.
 
 		// Initialize ping monitor for this game session
-		// Configuration from koolo.yaml (default: quit after 30s of ping > 500ms)
+		// Configuration from settings.yaml (default: quit after 30s of ping > 500ms)
 		pingThreshold := 500
 		sustainedDuration := 30 * time.Second
 		pingEnabled := false
 
-		if config.Koolo.PingMonitor.Enabled {
+		if config.App.PingMonitor.Enabled {
 			pingEnabled = true
-			if config.Koolo.PingMonitor.HighPingThreshold > 0 {
-				pingThreshold = config.Koolo.PingMonitor.HighPingThreshold
+			if config.App.PingMonitor.HighPingThreshold > 0 {
+				pingThreshold = config.App.PingMonitor.HighPingThreshold
 			}
-			if config.Koolo.PingMonitor.SustainedDuration > 0 {
-				sustainedDuration = time.Duration(config.Koolo.PingMonitor.SustainedDuration) * time.Second
+			if config.App.PingMonitor.SustainedDuration > 0 {
+				sustainedDuration = time.Duration(config.App.PingMonitor.SustainedDuration) * time.Second
 			}
 		}
 
@@ -1106,7 +1106,7 @@ func (s *SinglePlayerSupervisor) ensureSkillKeyBindingsReady() error {
 		return nil
 	}
 
-	kbResult, kbErr := config.EnsureSkillKeyBindings(cfg, config.Koolo.UseCustomSettings)
+	kbResult, kbErr := config.EnsureSkillKeyBindings(cfg, config.App.UseCustomSettings)
 	if kbErr != nil {
 		s.bot.ctx.Logger.Warn("Failed to ensure skill key bindings", slog.Any("error", kbErr))
 	}
@@ -1150,7 +1150,7 @@ func (s *SinglePlayerSupervisor) ensureSkillKeyBindingsReady() error {
 		s.bot.ctx.Logger.Warn("Timed out waiting for key binding file", slog.Any("error", waitErr))
 	}
 
-	kbResult, kbErr = config.EnsureSkillKeyBindings(cfg, config.Koolo.UseCustomSettings)
+	kbResult, kbErr = config.EnsureSkillKeyBindings(cfg, config.App.UseCustomSettings)
 	if kbErr != nil {
 		s.bot.ctx.Logger.Warn("Failed to ensure skill key bindings after bootstrap", slog.Any("error", kbErr))
 	}

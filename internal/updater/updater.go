@@ -395,7 +395,7 @@ func (u *Updater) buildNewVersion(ctx repoContext) error {
 		restoreEnv("GOTMPDIR", gotmpPrev, gotmpSet)
 	}()
 
-	if err := os.Setenv("GOGARBLE", "github.com/hectorgimenez/koolo/*,!github.com/hectorgimenez/koolo/internal/server*,!github.com/hectorgimenez/koolo/internal/event*,!github.com/inkeliz/gowebview*"); err != nil {
+	if err := os.Setenv("GOGARBLE", "local/internal/svc/*,!local/internal/svc/internal/server*,!local/internal/svc/internal/event*,!github.com/inkeliz/gowebview*"); err != nil {
 		return fmt.Errorf("failed to set GOGARBLE: %w", err)
 	}
 
@@ -417,7 +417,7 @@ func (u *Updater) buildNewVersion(ctx repoContext) error {
 	// Build ldflags
 	commitMeta := getBuildCommitInfo(ctx.RepoDir)
 	ldflags := fmt.Sprintf(
-		"-s -w -H windowsgui -X 'main.buildID=%s' -X 'main.buildTime=%s' -X 'github.com/hectorgimenez/koolo/internal/config.Version=dev'%s",
+		"-s -w -H windowsgui -X 'main.buildID=%s' -X 'main.buildTime=%s' -X 'local/internal/svc/internal/config.Version=dev'%s",
 		buildID,
 		buildTime,
 		commitMeta.ldflags(),
@@ -425,7 +425,7 @@ func (u *Updater) buildNewVersion(ctx repoContext) error {
 
 	// Execute Garble build
 	cmd := newCommand("garble",
-		"-literals=false",
+		"-literals",
 		"-seed=random",
 		"build",
 		"-a",
@@ -433,7 +433,7 @@ func (u *Updater) buildNewVersion(ctx repoContext) error {
 		"-tags", "static",
 		"--ldflags", ldflags,
 		"-o", outputExe,
-		"./cmd/koolo",
+		"./cmd/app",
 	)
 	cmd.Dir = ctx.RepoDir
 
@@ -472,10 +472,10 @@ func (b buildCommitInfo) ldflags() string {
 		return ""
 	}
 	parts := []string{
-		fmt.Sprintf(" -X 'github.com/hectorgimenez/koolo/internal/updater.buildCommitHash=%s'", b.Hash),
+		fmt.Sprintf(" -X 'local/internal/svc/internal/updater.buildCommitHash=%s'", b.Hash),
 	}
 	if b.Time != "" {
-		parts = append(parts, fmt.Sprintf(" -X 'github.com/hectorgimenez/koolo/internal/updater.buildCommitTime=%s'", b.Time))
+		parts = append(parts, fmt.Sprintf(" -X 'local/internal/svc/internal/updater.buildCommitTime=%s'", b.Time))
 	}
 	return strings.Join(parts, "")
 }
@@ -519,12 +519,12 @@ func (u *Updater) copyConfigFiles(ctx repoContext, destDir string) error {
 		}
 	}
 
-	// Copy koolo.yaml.dist if koolo.yaml doesn't exist
-	yamlDest := filepath.Join(destDir, "config", "koolo.yaml")
+	// Copy settings.yaml.dist if settings.yaml doesn't exist
+	yamlDest := filepath.Join(destDir, "config", "settings.yaml")
 	if _, err := os.Stat(yamlDest); os.IsNotExist(err) {
-		u.log("Copying koolo.yaml.dist...")
-		if err := copyFile(filepath.Join(ctx.RepoDir, "config", "koolo.yaml.dist"), yamlDest); err != nil {
-			return fmt.Errorf("failed to copy koolo.yaml: %w", err)
+		u.log("Copying settings.yaml.dist...")
+		if err := copyFile(filepath.Join(ctx.RepoDir, "config", "settings.yaml.dist"), yamlDest); err != nil {
+			return fmt.Errorf("failed to copy settings.yaml: %w", err)
 		}
 	}
 
@@ -649,7 +649,7 @@ start "" /D "%s" "%s"
 del "%%~f0"
 `, installDir, oldDir, oldDir, currentExe, currentExe, currentExe, backupDest, currentExe, pid, pid, newestExeDir, newestExe)
 
-	restartScript, err := writeRestartScript(installDir, "restart_koolo_*.bat", script)
+	restartScript, err := writeRestartScript(installDir, "restart_app_*.bat", script)
 	if err != nil {
 		return err
 	}
@@ -704,7 +704,7 @@ if exist "%s" (
 del "%%~f0"
 `, installDir, oldDir, oldDir, currentExe, currentExe, backupDest, currentExe)
 
-	moveScript, err := writeRestartScript(installDir, "move_koolo_*.bat", script)
+	moveScript, err := writeRestartScript(installDir, "move_app_*.bat", script)
 	if err != nil {
 		return err
 	}

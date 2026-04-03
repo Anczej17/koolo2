@@ -12,9 +12,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/hectorgimenez/d2go/pkg/data"
-	"github.com/hectorgimenez/koolo/internal/config"
-	"github.com/hectorgimenez/koolo/internal/event"
+	"local/internal/svc/internal/gamelib/data"
+	"local/internal/svc/internal/config"
+	"local/internal/svc/internal/event"
 )
 
 // Record is the persisted representation of a stashed drop including metadata for aggregation.

@@ -4,21 +4,21 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/hectorgimenez/koolo/internal/action/step"
+	"local/internal/svc/internal/action/step"
 
-	"github.com/hectorgimenez/koolo/internal/game"
-	"github.com/hectorgimenez/koolo/internal/ui"
-	"github.com/hectorgimenez/koolo/internal/utils"
+	"local/internal/svc/internal/game"
+	"local/internal/svc/internal/ui"
+	"local/internal/svc/internal/utils"
 
-	"github.com/hectorgimenez/d2go/pkg/data"
-	"github.com/hectorgimenez/d2go/pkg/data/area"
-	"github.com/hectorgimenez/d2go/pkg/data/difficulty"
-	"github.com/hectorgimenez/d2go/pkg/data/npc"
-	"github.com/hectorgimenez/d2go/pkg/data/object"
-	"github.com/hectorgimenez/d2go/pkg/data/quest"
-	"github.com/hectorgimenez/d2go/pkg/data/stat"
-	"github.com/hectorgimenez/koolo/internal/action"
-	"github.com/hectorgimenez/koolo/internal/config" // Make sure this import is present
+	"local/internal/svc/internal/gamelib/data"
+	"local/internal/svc/internal/gamelib/data/area"
+	"local/internal/svc/internal/gamelib/data/difficulty"
+	"local/internal/svc/internal/gamelib/data/npc"
+	"local/internal/svc/internal/gamelib/data/object"
+	"local/internal/svc/internal/gamelib/data/quest"
+	"local/internal/svc/internal/gamelib/data/stat"
+	"local/internal/svc/internal/action"
+	"local/internal/svc/internal/config" // Make sure this import is present
 	"github.com/lxn/win"
 )
 

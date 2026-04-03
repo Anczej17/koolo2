@@ -5,11 +5,11 @@ import (
 	"math"
 	"sort"
 	"time"
-	"github.com/hectorgimenez/koolo/internal/context"
-	"github.com/hectorgimenez/koolo/internal/pather"
+	"local/internal/svc/internal/context"
+	"local/internal/svc/internal/pather"
 
-	"github.com/hectorgimenez/d2go/pkg/data"
-	"github.com/hectorgimenez/d2go/pkg/data/stat"
+	"local/internal/svc/internal/gamelib/data"
+	"local/internal/svc/internal/gamelib/data/stat"
 )
 
 func GetDistanceFromClosestEnemy(pos data.Position, monsters data.Monsters) float64 {

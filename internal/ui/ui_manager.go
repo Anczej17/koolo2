@@ -1,9 +1,9 @@
 package ui
 
 import (
-	"github.com/hectorgimenez/d2go/pkg/data"
-	"github.com/hectorgimenez/d2go/pkg/data/item"
-	"github.com/hectorgimenez/koolo/internal/context"
+	"local/internal/svc/internal/gamelib/data"
+	"local/internal/svc/internal/gamelib/data/item"
+	"local/internal/svc/internal/context"
 )
 
 var (

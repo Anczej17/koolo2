@@ -375,7 +375,7 @@ func (b *NIPBuilder) ExportToNIP(rules []PickitRule, options ExportOptions) (str
 
 	// Add header comment
 	if options.IncludeComments {
-		lines = append(lines, "// Koolo Pickit Rules")
+		lines = append(lines, "// Pickit Rules")
 		lines = append(lines, fmt.Sprintf("// Generated: %s", time.Now().Format(time.RFC3339)))
 		lines = append(lines, "")
 	}

@@ -1,6 +1,6 @@
 package config
 
-import "github.com/hectorgimenez/d2go/pkg/data/npc"
+import "local/internal/svc/internal/gamelib/data/npc"
 
 type ShoppingConfig struct {
 	Enabled           bool     `yaml:"enabled"`

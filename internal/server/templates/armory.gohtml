@@ -3768,7 +3768,7 @@
             try { return JSON.parse(text); } catch(e) { return {error: 'Traderie zwróciło nieprawidłową odpowiedź'}; }
         }
 
-        // Convert PascalCase d2go name to human-readable
+        // Convert PascalCase name to human-readable
         function pascalToReadable(name) {
             if (!name || name.includes(' ')) return name || '';
             return name.replace(/([a-z])([A-Z])/g, '$1 $2').replace(/([A-Z]+)([A-Z][a-z])/g, '$1 $2');

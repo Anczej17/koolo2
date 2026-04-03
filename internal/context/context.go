@@ -9,16 +9,16 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/hectorgimenez/d2go/pkg/data"
-	"github.com/hectorgimenez/d2go/pkg/data/area"
-	"github.com/hectorgimenez/d2go/pkg/data/skill"
-	"github.com/hectorgimenez/koolo/internal/config"
-	"github.com/hectorgimenez/koolo/internal/drop"
-	"github.com/hectorgimenez/koolo/internal/event"
-	"github.com/hectorgimenez/koolo/internal/game"
-	"github.com/hectorgimenez/koolo/internal/health"
-	"github.com/hectorgimenez/koolo/internal/pather"
-	"github.com/hectorgimenez/koolo/internal/utils"
+	"local/internal/svc/internal/gamelib/data"
+	"local/internal/svc/internal/gamelib/data/area"
+	"local/internal/svc/internal/gamelib/data/skill"
+	"local/internal/svc/internal/config"
+	"local/internal/svc/internal/drop"
+	"local/internal/svc/internal/event"
+	"local/internal/svc/internal/game"
+	"local/internal/svc/internal/health"
+	"local/internal/svc/internal/pather"
+	"local/internal/svc/internal/utils"
 )
 
 var mu sync.Mutex

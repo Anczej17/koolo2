@@ -4,14 +4,14 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/hectorgimenez/d2go/pkg/data"
-	"github.com/hectorgimenez/d2go/pkg/data/item"
-	"github.com/hectorgimenez/d2go/pkg/data/stat"
+	"local/internal/svc/internal/gamelib/data"
+	"local/internal/svc/internal/gamelib/data/item"
+	"local/internal/svc/internal/gamelib/data/stat"
 
-	"github.com/hectorgimenez/koolo/internal/action/step"
-	"github.com/hectorgimenez/koolo/internal/config"
-	"github.com/hectorgimenez/koolo/internal/context"
-	"github.com/hectorgimenez/koolo/internal/pickit"
+	"local/internal/svc/internal/action/step"
+	"local/internal/svc/internal/config"
+	"local/internal/svc/internal/context"
+	"local/internal/svc/internal/pickit"
 )
 
 // IsDropProtected determines which items must NOT be dropped

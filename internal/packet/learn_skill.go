@@ -3,7 +3,7 @@ package packet
 import (
 	"encoding/binary"
 
-	"github.com/hectorgimenez/d2go/pkg/data/skill"
+	"local/internal/svc/internal/gamelib/data/skill"
 )
 
 // LearnSkill represents packet 0x3B for learning/allocating skill points

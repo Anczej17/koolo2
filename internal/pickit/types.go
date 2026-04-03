@@ -1,7 +1,7 @@
 package pickit
 
 import (
-	"github.com/hectorgimenez/d2go/pkg/data/item"
+	"local/internal/svc/internal/gamelib/data/item"
 )
 
 // ItemDefinition represents a D2R item with metadata for the pickit editor

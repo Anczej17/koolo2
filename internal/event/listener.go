@@ -10,8 +10,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/hectorgimenez/koolo/internal/config"
-	"github.com/hectorgimenez/koolo/internal/utils"
+	"local/internal/svc/internal/config"
+	"local/internal/svc/internal/utils"
 )
 
 // Buffered channel prevents event.Send() from blocking supervisor goroutines
@@ -71,7 +71,7 @@ func (l *Listener) Listen(ctx context.Context) error {
 				}
 			}
 
-			if e.Image() != nil && config.Koolo.Debug.Screenshots {
+			if e.Image() != nil && config.App.Debug.Screenshots {
 				fileName := fmt.Sprintf("screenshots/error-%s.jpeg", time.Now().Format("2006-01-02 15_04_05"))
 				err := utils.SaveImageJPEG(e.Image(), fileName)
 				if err != nil {

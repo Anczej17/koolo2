@@ -1,9 +1,9 @@
 package step
 
 import (
-	"github.com/hectorgimenez/koolo/internal/context"
-	"github.com/hectorgimenez/koolo/internal/drop"
-	"github.com/hectorgimenez/koolo/internal/utils"
+	"local/internal/svc/internal/context"
+	"local/internal/svc/internal/drop"
+	"local/internal/svc/internal/utils"
 )
 
 // Drop: interruptDropIfRequested checks if a Drop is pending and returns an error to interrupt the current operation

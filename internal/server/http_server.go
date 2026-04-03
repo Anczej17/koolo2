@@ -29,21 +29,21 @@ import (
 	"path/filepath"
 
 	"github.com/gorilla/websocket"
-	"github.com/hectorgimenez/d2go/pkg/data"
-	"github.com/hectorgimenez/d2go/pkg/data/area"
-	"github.com/hectorgimenez/d2go/pkg/data/difficulty"
-	"github.com/hectorgimenez/d2go/pkg/data/skill"
-	"github.com/hectorgimenez/d2go/pkg/data/stat"
-	"github.com/hectorgimenez/koolo/internal/bot"
-	"github.com/hectorgimenez/koolo/internal/config"
-	ctx "github.com/hectorgimenez/koolo/internal/context"
-	"github.com/hectorgimenez/koolo/internal/drop"
-	"github.com/hectorgimenez/koolo/internal/game"
-	"github.com/hectorgimenez/koolo/internal/remote/droplog"
-	terrorzones "github.com/hectorgimenez/koolo/internal/terrorzone"
-	"github.com/hectorgimenez/koolo/internal/updater"
-	"github.com/hectorgimenez/koolo/internal/utils"
-	"github.com/hectorgimenez/koolo/internal/utils/winproc"
+	"local/internal/svc/internal/gamelib/data"
+	"local/internal/svc/internal/gamelib/data/area"
+	"local/internal/svc/internal/gamelib/data/difficulty"
+	"local/internal/svc/internal/gamelib/data/skill"
+	"local/internal/svc/internal/gamelib/data/stat"
+	"local/internal/svc/internal/bot"
+	"local/internal/svc/internal/config"
+	ctx "local/internal/svc/internal/context"
+	"local/internal/svc/internal/drop"
+	"local/internal/svc/internal/game"
+	"local/internal/svc/internal/remote/droplog"
+	terrorzones "local/internal/svc/internal/terrorzone"
+	"local/internal/svc/internal/updater"
+	"local/internal/svc/internal/utils"
+	"local/internal/svc/internal/utils/winproc"
 	"github.com/lxn/win"
 	cp "github.com/otiai10/copy"
 	"golang.org/x/sys/windows"
@@ -947,8 +947,8 @@ func (s *HttpServer) getStatusData() IndexData {
 		DropCount:                   drops,
 		AutoStart:                   autoStart,
 		SchedulerStatus:             schedulerStatus,
-		GlobalAutoStartEnabled:      config.Koolo.AutoStart.Enabled,
-		GlobalAutoStartDelaySeconds: config.Koolo.AutoStart.DelaySeconds,
+		GlobalAutoStartEnabled:      config.App.AutoStart.Enabled,
+		GlobalAutoStartDelaySeconds: config.App.AutoStart.DelaySeconds,
 	}
 }
 
@@ -1151,7 +1151,7 @@ func (s *HttpServer) getRoot(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if config.Koolo.FirstRun {
+	if config.App.FirstRun {
 		http.Redirect(w, r, "/config", http.StatusSeeOther)
 		return
 	}
@@ -1801,7 +1801,7 @@ func (s *HttpServer) autoStartOnceInternal() error {
 	}
 
 	// Fallback to a sensible default if not configured
-	delaySeconds := config.Koolo.AutoStart.DelaySeconds
+	delaySeconds := config.App.AutoStart.DelaySeconds
 	if delaySeconds <= 0 {
 		delaySeconds = 60
 	}
@@ -1864,9 +1864,9 @@ func (s *HttpServer) autoStartOnceInternal() error {
 }
 
 // AutoStartOnStartup triggers a one-off Auto Start sequence if it is enabled
-// in the global configuration. This is intended to be called when Koolo starts.
+// in the global configuration. This is intended to be called when application starts.
 func (s *HttpServer) AutoStartOnStartup() {
-	if !config.Koolo.AutoStart.Enabled {
+	if !config.App.AutoStart.Enabled {
 		return
 	}
 
@@ -1939,7 +1939,7 @@ func (s *HttpServer) drops(w http.ResponseWriter, r *http.Request) {
 // allDrops renders a centralized droplog view across all characters.
 func (s *HttpServer) allDrops(w http.ResponseWriter, r *http.Request) {
 	// Determine droplog directory
-	base := config.Koolo.LogSaveDirectory
+	base := config.App.LogSaveDirectory
 	if base == "" {
 		base = "logs"
 	}
@@ -1996,7 +1996,7 @@ func (s *HttpServer) allDrops(w http.ResponseWriter, r *http.Request) {
 // exportDrops renders a static HTML of the centralized drops and returns it as a file download.
 func (s *HttpServer) exportDrops(w http.ResponseWriter, r *http.Request) {
 	// Reuse allDrops data generation
-	base := config.Koolo.LogSaveDirectory
+	base := config.App.LogSaveDirectory
 	if base == "" {
 		base = "logs"
 	}
@@ -2115,14 +2115,14 @@ func (s *HttpServer) config(w http.ResponseWriter, r *http.Request) {
 		err := r.ParseForm()
 		if err != nil {
 			s.templates.ExecuteTemplate(w, "config.gohtml", ConfigData{
-				KooloCfg:       config.Koolo,
+				AppCfg:       config.App,
 				ErrorMessage:   "Error parsing form",
 				CurrentVersion: s.getVersionData(),
 			})
 			return
 		}
 
-		newConfig := *config.Koolo
+		newConfig := *config.App
 		newConfig.FirstRun = false // Disable the welcome assistant
 		newConfig.D2RPath = r.Form.Get("d2rpath")
 		newConfig.D2LoDPath = r.Form.Get("d2lodpath")
@@ -2172,7 +2172,7 @@ func (s *HttpServer) config(w http.ResponseWriter, r *http.Request) {
 		telegramChatId, err := strconv.ParseInt(r.Form.Get("telegram_chat_id"), 10, 64)
 		if err != nil {
 			s.templates.ExecuteTemplate(w, "config.gohtml", ConfigData{
-				KooloCfg:       &newConfig,
+				AppCfg:       &newConfig,
 				ErrorMessage:   "Invalid Telegram Chat ID",
 				CurrentVersion: s.getVersionData(),
 			})
@@ -2189,7 +2189,7 @@ func (s *HttpServer) config(w http.ResponseWriter, r *http.Request) {
 		newConfig.Ngrok.BasicAuthPass = strings.TrimSpace(r.Form.Get("ngrok_basic_auth_pass"))
 		if newConfig.Ngrok.BasicAuthUser != "" && newConfig.Ngrok.BasicAuthPass == "" {
 			s.templates.ExecuteTemplate(w, "config.gohtml", ConfigData{
-				KooloCfg:       &newConfig,
+				AppCfg:       &newConfig,
 				ErrorMessage:   "ngrok basic auth password is required when a username is set",
 				CurrentVersion: s.getVersionData(),
 			})
@@ -2197,7 +2197,7 @@ func (s *HttpServer) config(w http.ResponseWriter, r *http.Request) {
 		}
 		if newConfig.Ngrok.BasicAuthPass != "" && newConfig.Ngrok.BasicAuthUser == "" {
 			s.templates.ExecuteTemplate(w, "config.gohtml", ConfigData{
-				KooloCfg:       &newConfig,
+				AppCfg:       &newConfig,
 				ErrorMessage:   "ngrok basic auth username is required when a password is set",
 				CurrentVersion: s.getVersionData(),
 			})
@@ -2205,7 +2205,7 @@ func (s *HttpServer) config(w http.ResponseWriter, r *http.Request) {
 		}
 		if newConfig.Ngrok.BasicAuthPass != "" && len(newConfig.Ngrok.BasicAuthPass) < 8 {
 			s.templates.ExecuteTemplate(w, "config.gohtml", ConfigData{
-				KooloCfg:       &newConfig,
+				AppCfg:       &newConfig,
 				ErrorMessage:   "ngrok basic auth password must be at least 8 characters",
 				CurrentVersion: s.getVersionData(),
 			})
@@ -2237,7 +2237,7 @@ func (s *HttpServer) config(w http.ResponseWriter, r *http.Request) {
 		err = config.ValidateAndSaveConfig(newConfig)
 		if err != nil {
 			s.templates.ExecuteTemplate(w, "config.gohtml", ConfigData{
-				KooloCfg:       &newConfig,
+				AppCfg:       &newConfig,
 				ErrorMessage:   err.Error(),
 				CurrentVersion: s.getVersionData(),
 			})
@@ -2261,7 +2261,7 @@ func (s *HttpServer) config(w http.ResponseWriter, r *http.Request) {
 	}
 
 	s.templates.ExecuteTemplate(w, "config.gohtml", ConfigData{
-		KooloCfg:       config.Koolo,
+		AppCfg:       config.App,
 		ErrorMessage:   "",
 		CurrentVersion: versionData,
 	})
@@ -2986,7 +2986,7 @@ func (s *HttpServer) characterSettings(w http.ResponseWriter, r *http.Request) {
 				ErrorMessage:          err.Error(),
 				SkillOptions:          defaultSkillOptions,
 				LevelingSequenceFiles: sequenceFiles,
-				RunFavoriteRuns:       config.Koolo.RunFavoriteRuns,
+				RunFavoriteRuns:       config.App.RunFavoriteRuns,
 			})
 			return
 		}
@@ -3003,7 +3003,7 @@ func (s *HttpServer) characterSettings(w http.ResponseWriter, r *http.Request) {
 					Supervisor:            supervisorName,
 					SkillOptions:          defaultSkillOptions,
 					LevelingSequenceFiles: sequenceFiles,
-					RunFavoriteRuns:       config.Koolo.RunFavoriteRuns,
+					RunFavoriteRuns:       config.App.RunFavoriteRuns,
 				})
 				return
 			}
@@ -3015,7 +3015,7 @@ func (s *HttpServer) characterSettings(w http.ResponseWriter, r *http.Request) {
 					Supervisor:            supervisorName,
 					SkillOptions:          defaultSkillOptions,
 					LevelingSequenceFiles: sequenceFiles,
-					RunFavoriteRuns:       config.Koolo.RunFavoriteRuns,
+					RunFavoriteRuns:       config.App.RunFavoriteRuns,
 				})
 				return
 			}
@@ -3701,8 +3701,8 @@ func (s *HttpServer) characterSettings(w http.ResponseWriter, r *http.Request) {
 
 		cfg.Muling.ReturnTo = r.FormValue("mulingReturnTo")
 		favoriteRuns := sanitizeFavoriteRunSelection(r.Form["runFavoriteRuns"])
-		config.Koolo.RunFavoriteRuns = favoriteRuns
-		if err := config.SaveKooloConfig(config.Koolo); err != nil {
+		config.App.RunFavoriteRuns = favoriteRuns
+		if err := config.SaveAppConfig(config.App); err != nil {
 			s.logger.Error("Failed to save run favorites", slog.Any("error", err))
 		}
 		config.SaveSupervisorConfig(supervisorName, cfg)
@@ -3799,7 +3799,7 @@ func (s *HttpServer) characterSettings(w http.ResponseWriter, r *http.Request) {
 		TerrorZoneGroups:      buildTZGroups(),
 		RecipeList:            config.AvailableRecipes,
 		RunewordRecipeList:    availableRunewordRecipesForCharacter(cfg),
-		RunFavoriteRuns:       config.Koolo.RunFavoriteRuns,
+		RunFavoriteRuns:       config.App.RunFavoriteRuns,
 		AvailableProfiles:     muleProfiles,
 		FarmerProfiles:        farmerProfiles,
 		LevelingSequenceFiles: sequenceFiles,
@@ -4370,7 +4370,7 @@ func (s *HttpServer) skillOptionsAPI(w http.ResponseWriter, r *http.Request) {
 
 // openDroplogs opens the droplogs directory in Windows Explorer.
 func (s *HttpServer) openDroplogs(w http.ResponseWriter, r *http.Request) {
-	base := config.Koolo.LogSaveDirectory
+	base := config.App.LogSaveDirectory
 	if base == "" {
 		base = "logs"
 	}
@@ -4394,7 +4394,7 @@ func (s *HttpServer) openDroplogs(w http.ResponseWriter, r *http.Request) {
 
 // resetDroplogs removes droplog JSONL/HTML files from the droplogs directory.
 func (s *HttpServer) resetDroplogs(w http.ResponseWriter, r *http.Request) {
-	base := config.Koolo.LogSaveDirectory
+	base := config.App.LogSaveDirectory
 	if base == "" {
 		base = "logs"
 	}

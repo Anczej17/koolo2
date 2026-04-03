@@ -8,13 +8,13 @@ import (
 	"strings"
 	"time"
 
-	"github.com/hectorgimenez/d2go/pkg/data"
-	"github.com/hectorgimenez/d2go/pkg/data/npc"
-	"github.com/hectorgimenez/d2go/pkg/data/stat"
-	"github.com/hectorgimenez/koolo/internal/action/step"
-	"github.com/hectorgimenez/koolo/internal/context"
-	"github.com/hectorgimenez/koolo/internal/game"
-	"github.com/hectorgimenez/koolo/internal/pather"
+	"local/internal/svc/internal/gamelib/data"
+	"local/internal/svc/internal/gamelib/data/npc"
+	"local/internal/svc/internal/gamelib/data/stat"
+	"local/internal/svc/internal/action/step"
+	"local/internal/svc/internal/context"
+	"local/internal/svc/internal/game"
+	"local/internal/svc/internal/pather"
 )
 
 func ClearAreaAroundPlayer(radius int, filter data.MonsterFilter) error {

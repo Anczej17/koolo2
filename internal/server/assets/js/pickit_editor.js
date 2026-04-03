@@ -59,11 +59,11 @@ async function browseFolder() {
             // Automatically scan after selecting folder
             await scanForFiles();
         } else {
-            alert('No folder was selected. Please try again or enter the path manually.\n\nExample: G:\\koolo\\config\\MyChar\\pickit');
+            alert('No folder was selected. Please try again or enter the path manually.\n\nExample: G:\\app\\config\\MyChar\\pickit');
         }
     } catch (error) {
         console.error('Error browsing folder:', error);
-        alert('Failed to open folder browser: ' + error.message + '\n\nPlease enter the full path to your pickit folder manually.\n\nExample: G:\\koolo\\config\\MyChar\\pickit');
+        alert('Failed to open folder browser: ' + error.message + '\n\nPlease enter the full path to your pickit folder manually.\n\nExample: G:\\app\\config\\MyChar\\pickit');
     }
 } function closeFileConfigModal() {
     const modal = document.getElementById('fileConfigModal');
@@ -143,7 +143,7 @@ async function loadData() {
         const itemsResponse = await fetch('/api/pickit/items');
         allItems = await itemsResponse.json();
 
-        console.log(`Loaded ${allItems.length} items from d2go database`);
+        console.log(`Loaded ${allItems.length} items from game database`);
 
         // Load stats
         const statsResponse = await fetch('/api/pickit/stats');

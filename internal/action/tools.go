@@ -3,11 +3,11 @@ package action
 import (
 	"time"
 
-	"github.com/hectorgimenez/d2go/pkg/data"
-	"github.com/hectorgimenez/d2go/pkg/data/npc"
-	"github.com/hectorgimenez/koolo/internal/action/step"
-	"github.com/hectorgimenez/koolo/internal/context"
-	"github.com/hectorgimenez/koolo/internal/utils"
+	"local/internal/svc/internal/gamelib/data"
+	"local/internal/svc/internal/gamelib/data/npc"
+	"local/internal/svc/internal/action/step"
+	"local/internal/svc/internal/context"
+	"local/internal/svc/internal/utils"
 )
 
 func OpenTPIfLeader() error {

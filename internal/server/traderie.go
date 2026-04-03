@@ -10,7 +10,7 @@ import (
 	"os/exec"
 	"strings"
 
-	"github.com/hectorgimenez/koolo/internal/config"
+	"local/internal/svc/internal/config"
 )
 
 const traderieBaseURL = "https://traderie.com/api/diablo2resurrected"
@@ -36,12 +36,12 @@ func traderieCurl(method, rawURL string, body []byte) ([]byte, int, error) {
 		"-H", "Origin: https://traderie.com",
 	}
 
-	if config.Koolo != nil {
-		if config.Koolo.Traderie.CfClearance != "" {
-			args = append(args, "-H", "Cookie: cf_clearance="+config.Koolo.Traderie.CfClearance)
+	if config.App != nil {
+		if config.App.Traderie.CfClearance != "" {
+			args = append(args, "-H", "Cookie: cf_clearance="+config.App.Traderie.CfClearance)
 		}
-		if config.Koolo.Traderie.Token != "" {
-			args = append(args, "-H", "Authorization: Bearer "+config.Koolo.Traderie.Token)
+		if config.App.Traderie.Token != "" {
+			args = append(args, "-H", "Authorization: Bearer "+config.App.Traderie.Token)
 		}
 	}
 
@@ -89,12 +89,12 @@ func traderieCurlMultipart(rawURL string, formBody []byte) ([]byte, int, error) 
 		"-F", "body=" + string(formBody),
 	}
 
-	if config.Koolo != nil {
-		if config.Koolo.Traderie.CfClearance != "" {
-			args = append(args, "-H", "Cookie: cf_clearance="+config.Koolo.Traderie.CfClearance)
+	if config.App != nil {
+		if config.App.Traderie.CfClearance != "" {
+			args = append(args, "-H", "Cookie: cf_clearance="+config.App.Traderie.CfClearance)
 		}
-		if config.Koolo.Traderie.Token != "" {
-			args = append(args, "-H", "Authorization: Bearer "+config.Koolo.Traderie.Token)
+		if config.App.Traderie.Token != "" {
+			args = append(args, "-H", "Authorization: Bearer "+config.App.Traderie.Token)
 		}
 	}
 
@@ -205,7 +205,7 @@ func (s *HttpServer) traderieCreateListing(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	token := config.Koolo.Traderie.Token
+	token := config.App.Traderie.Token
 	if token == "" {
 		traderieJSONError(w, "Traderie token nie skonfigurowany. Wejdź w Ustawienia i dodaj JWT token.", http.StatusUnauthorized)
 		return
@@ -259,7 +259,7 @@ func (s *HttpServer) traderieCreateListing(w http.ResponseWriter, r *http.Reques
 
 // GET /api/traderie/status
 func (s *HttpServer) traderieGetCookieStatus(w http.ResponseWriter, r *http.Request) {
-	hasToken := config.Koolo.Traderie.Token != ""
+	hasToken := config.App.Traderie.Token != ""
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]bool{"configured": hasToken})
 }
@@ -280,9 +280,9 @@ func (s *HttpServer) traderieSetCookies(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	config.Koolo.Traderie.Token = strings.TrimSpace(reqBody.Token)
-	config.Koolo.Traderie.CfClearance = strings.TrimSpace(reqBody.CfClearance)
-	if err := config.SaveKooloConfig(config.Koolo); err != nil {
+	config.App.Traderie.Token = strings.TrimSpace(reqBody.Token)
+	config.App.Traderie.CfClearance = strings.TrimSpace(reqBody.CfClearance)
+	if err := config.SaveAppConfig(config.App); err != nil {
 		traderieJSONError(w, "failed to save config: "+err.Error(), http.StatusInternalServerError)
 		return
 	}

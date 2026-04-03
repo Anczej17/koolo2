@@ -6,11 +6,11 @@ import (
 	"log/slog"
 	"time"
 
-	"github.com/hectorgimenez/d2go/pkg/data"
-	"github.com/hectorgimenez/d2go/pkg/data/stat"
-	"github.com/hectorgimenez/koolo/internal/context"
-	"github.com/hectorgimenez/koolo/internal/game"
-	"github.com/hectorgimenez/koolo/internal/utils"
+	"local/internal/svc/internal/gamelib/data"
+	"local/internal/svc/internal/gamelib/data/stat"
+	"local/internal/svc/internal/context"
+	"local/internal/svc/internal/game"
+	"local/internal/svc/internal/utils"
 )
 
 // Cow-only tuned clear: aggressive movement + less pickup spam + fixed alive filtering (only inside cows).

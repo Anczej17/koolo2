@@ -3,7 +3,7 @@ package packet
 import (
 	"encoding/binary"
 
-	"github.com/hectorgimenez/d2go/pkg/data"
+	"local/internal/svc/internal/gamelib/data"
 )
 
 // TelekinesisInteraction represents packet 0x0D - Cast Skill on Entity

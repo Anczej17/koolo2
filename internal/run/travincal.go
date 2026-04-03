@@ -4,18 +4,18 @@ import (
 	"errors"
 	"log/slog"
 
-	"github.com/hectorgimenez/d2go/pkg/data"
-	"github.com/hectorgimenez/d2go/pkg/data/area"
-	"github.com/hectorgimenez/d2go/pkg/data/npc"
-	"github.com/hectorgimenez/d2go/pkg/data/object"
-	"github.com/hectorgimenez/d2go/pkg/data/quest"
-	"github.com/hectorgimenez/d2go/pkg/data/stat"
-	"github.com/hectorgimenez/koolo/internal/action"
-	"github.com/hectorgimenez/koolo/internal/character"
-	"github.com/hectorgimenez/koolo/internal/config"
-	"github.com/hectorgimenez/koolo/internal/context"
-	"github.com/hectorgimenez/koolo/internal/game"
-	"github.com/hectorgimenez/koolo/internal/utils"
+	"local/internal/svc/internal/gamelib/data"
+	"local/internal/svc/internal/gamelib/data/area"
+	"local/internal/svc/internal/gamelib/data/npc"
+	"local/internal/svc/internal/gamelib/data/object"
+	"local/internal/svc/internal/gamelib/data/quest"
+	"local/internal/svc/internal/gamelib/data/stat"
+	"local/internal/svc/internal/action"
+	"local/internal/svc/internal/character"
+	"local/internal/svc/internal/config"
+	"local/internal/svc/internal/context"
+	"local/internal/svc/internal/game"
+	"local/internal/svc/internal/utils"
 )
 
 type Travincal struct {
@@ -62,7 +62,7 @@ func (t *Travincal) Run(parameters *RunParameters) error {
 	t.ctx.CurrentGame.AreaCorrection.ExpectedArea = area.Travincal
 	t.ctx.CurrentGame.AreaCorrection.Enabled = true
 
-	//TODO This is temporary needed for barb because have no cta; isrebuffrequired not working for him. We have ActiveWeaponSlot in d2go ready for that
+	//TODO This is temporary needed for barb because have no cta; isrebuffrequired not working for him. We have ActiveWeaponSlot in gamelib ready for that
 	action.Buff()
 
 	// Blacklist the Durance of Hate entrance to prevent accidental entry during combat

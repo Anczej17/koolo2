@@ -4,8 +4,8 @@ import (
 	"fmt"
 	"math"
 
-	"github.com/hectorgimenez/d2go/pkg/data"
-	"github.com/hectorgimenez/d2go/pkg/data/stat"
+	"local/internal/svc/internal/gamelib/data"
+	"local/internal/svc/internal/gamelib/data/stat"
 )
 
 // RollResult holds the quality assessment for a single stat roll.

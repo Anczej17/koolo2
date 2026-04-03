@@ -10,7 +10,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/hectorgimenez/koolo/internal/config"
+	"local/internal/svc/internal/config"
 )
 
 // SchedulerPhase represents the current phase in duration mode

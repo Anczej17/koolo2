@@ -1,6 +1,6 @@
 package config
 
-import "github.com/hectorgimenez/d2go/pkg/data/item"
+import "local/internal/svc/internal/gamelib/data/item"
 
 var AvailableRunewordRecipes = []string{
 	// List out all the recipe names from runeword_recipes.go

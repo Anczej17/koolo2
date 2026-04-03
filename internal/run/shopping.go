@@ -3,9 +3,9 @@ package run
 import (
 	"log/slog"
 
-	"github.com/hectorgimenez/koolo/internal/action"
-	"github.com/hectorgimenez/koolo/internal/config"
-	"github.com/hectorgimenez/koolo/internal/context"
+	"local/internal/svc/internal/action"
+	"local/internal/svc/internal/config"
+	"local/internal/svc/internal/context"
 )
 
 type Shopping struct{}

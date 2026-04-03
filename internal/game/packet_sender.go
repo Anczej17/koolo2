@@ -3,10 +3,10 @@ package game
 import (
 	"fmt"
 
-	"github.com/hectorgimenez/d2go/pkg/data"
-	"github.com/hectorgimenez/d2go/pkg/data/skill"
-	"github.com/hectorgimenez/d2go/pkg/data/stat"
-	packet "github.com/hectorgimenez/koolo/internal/packet"
+	"local/internal/svc/internal/gamelib/data"
+	"local/internal/svc/internal/gamelib/data/skill"
+	"local/internal/svc/internal/gamelib/data/stat"
+	packet "local/internal/svc/internal/packet"
 )
 
 type ProcessSender interface {
@@ -58,6 +58,7 @@ func (ps *PacketSender) Teleport(position data.Position) error {
 	}
 	return nil
 }
+
 
 // TelekinesisInteraction sends packet 0x0D for object interaction using telekinesis
 // Use cases: waypoints, chests, shrines from distance (Sorceress only)

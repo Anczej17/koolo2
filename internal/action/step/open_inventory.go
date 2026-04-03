@@ -3,8 +3,8 @@ package step
 import (
 	"errors"
 
-	"github.com/hectorgimenez/koolo/internal/context"
-	"github.com/hectorgimenez/koolo/internal/utils"
+	"local/internal/svc/internal/context"
+	"local/internal/svc/internal/utils"
 )
 
 func OpenInventory() error {

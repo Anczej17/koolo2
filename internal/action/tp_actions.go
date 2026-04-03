@@ -6,13 +6,13 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/hectorgimenez/d2go/pkg/data"
-	"github.com/hectorgimenez/d2go/pkg/data/object"
-	"github.com/hectorgimenez/koolo/internal/action/step"
-	"github.com/hectorgimenez/koolo/internal/context"
-	"github.com/hectorgimenez/koolo/internal/health"
-	"github.com/hectorgimenez/koolo/internal/town"
-	"github.com/hectorgimenez/koolo/internal/utils"
+	"local/internal/svc/internal/gamelib/data"
+	"local/internal/svc/internal/gamelib/data/object"
+	"local/internal/svc/internal/action/step"
+	"local/internal/svc/internal/context"
+	"local/internal/svc/internal/health"
+	"local/internal/svc/internal/town"
+	"local/internal/svc/internal/utils"
 )
 
 func checkPlayerDeathForTP(ctx *context.Status) error {

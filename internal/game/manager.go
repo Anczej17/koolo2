@@ -12,10 +12,10 @@ import (
 	"unsafe"
 
 	"github.com/billgraziano/dpapi"
-	"github.com/hectorgimenez/d2go/pkg/data/difficulty"
-	"github.com/hectorgimenez/koolo/internal/config"
-	"github.com/hectorgimenez/koolo/internal/utils"
-	"github.com/hectorgimenez/koolo/internal/utils/winproc"
+	"local/internal/svc/internal/gamelib/data/difficulty"
+	"local/internal/svc/internal/config"
+	"local/internal/svc/internal/utils"
+	"local/internal/svc/internal/utils/winproc"
 	"github.com/lxn/win"
 	"golang.org/x/sys/windows"
 	"golang.org/x/sys/windows/registry"
@@ -318,7 +318,7 @@ func StartGame(username string, password string, authmethod string, authToken st
 
 	// Let's use the mod directory for storing the settings, so we stop overwriting the default config
 	if useCustomSettings {
-		modName := "koolo"
+		modName := "custom"
 		found := false
 		for i, arg := range additionalArguments {
 			if arg == "-mod" {
@@ -331,8 +331,8 @@ func StartGame(username string, password string, authmethod string, authToken st
 			additionalArguments = append(additionalArguments, "-mod", modName)
 		}
 
-		// If there is no real mod, let's create a fake mod called "koolo" so we can store our own config
-		if modName == "koolo" {
+		// If there is no real mod, let's create a fake mod called "custom" so we can store our own config
+		if modName == "custom" {
 			err = config.InstallMod()
 			if err != nil {
 				return 0, 0, err
@@ -399,7 +399,7 @@ func StartGame(username string, password string, authmethod string, authToken st
 
 	// Start the game with retry logic for GPU initialization errors
 	for attempt := 0; attempt < maxGPURetries; attempt++ {
-		cmd := exec.Command(config.Koolo.D2RPath+"\\D2R.exe", fullArgs...)
+		cmd := exec.Command(config.App.D2RPath+"\\D2R.exe", fullArgs...)
 		err = cmd.Start()
 		if err != nil {
 			return 0, 0, err

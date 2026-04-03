@@ -7,7 +7,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/hectorgimenez/d2go/pkg/data/item"
+	"local/internal/svc/internal/gamelib/data/item"
 )
 
 // Request represents a single Drop request issued for a supervisor.

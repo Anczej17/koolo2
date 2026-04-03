@@ -6,8 +6,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/hectorgimenez/d2go/pkg/data"
-	"github.com/hectorgimenez/koolo/internal/event"
+	"local/internal/svc/internal/gamelib/data"
+	"local/internal/svc/internal/event"
 )
 
 const (

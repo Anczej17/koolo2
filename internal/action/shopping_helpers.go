@@ -1,8 +1,8 @@
 package action
 
 import (
-	"github.com/hectorgimenez/d2go/pkg/data/area"
-	"github.com/hectorgimenez/d2go/pkg/data/npc"
+	"local/internal/svc/internal/gamelib/data/area"
+	"local/internal/svc/internal/gamelib/data/npc"
 )
 
 // Vendor → town area

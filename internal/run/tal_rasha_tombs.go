@@ -1,13 +1,13 @@
 package run
 
 import (
-	"github.com/hectorgimenez/d2go/pkg/data"
-	"github.com/hectorgimenez/d2go/pkg/data/area"
-	"github.com/hectorgimenez/d2go/pkg/data/quest"
-	"github.com/hectorgimenez/d2go/pkg/data/stat"
-	"github.com/hectorgimenez/koolo/internal/action"
-	"github.com/hectorgimenez/koolo/internal/config"
-	"github.com/hectorgimenez/koolo/internal/context"
+	"local/internal/svc/internal/gamelib/data"
+	"local/internal/svc/internal/gamelib/data/area"
+	"local/internal/svc/internal/gamelib/data/quest"
+	"local/internal/svc/internal/gamelib/data/stat"
+	"local/internal/svc/internal/action"
+	"local/internal/svc/internal/config"
+	"local/internal/svc/internal/context"
 )
 
 type TalRashaTombs struct {

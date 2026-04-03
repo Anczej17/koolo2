@@ -6,7 +6,7 @@ import (
     "image/jpeg"
 
     tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
-    "github.com/hectorgimenez/koolo/internal/event"
+    "local/internal/svc/internal/event"
 )
 
 func (b *Bot) Handle(_ context.Context, e event.Event) error {

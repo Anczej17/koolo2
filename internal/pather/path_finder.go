@@ -4,12 +4,12 @@ import (
 	"fmt"
 	"math"
 
-	"github.com/hectorgimenez/d2go/pkg/data"
-	"github.com/hectorgimenez/d2go/pkg/data/area"
-	"github.com/hectorgimenez/d2go/pkg/data/npc"
-	"github.com/hectorgimenez/koolo/internal/config"
-	"github.com/hectorgimenez/koolo/internal/game"
-	"github.com/hectorgimenez/koolo/internal/pather/astar"
+	"local/internal/svc/internal/gamelib/data"
+	"local/internal/svc/internal/gamelib/data/area"
+	"local/internal/svc/internal/gamelib/data/npc"
+	"local/internal/svc/internal/config"
+	"local/internal/svc/internal/game"
+	"local/internal/svc/internal/pather/astar"
 )
 
 type PathFinder struct {
@@ -170,7 +170,7 @@ func (pf *PathFinder) GetPathFrom(from, to data.Position) (Path, int, bool) {
 
 	path, distance, found := astar.CalculatePath(grid, from, to, canTeleport, pf.astarBuffers)
 
-	if config.Koolo.Debug.RenderMap {
+	if config.App.Debug.RenderMap {
 		pf.renderMap(grid, from, to, path)
 	}
 

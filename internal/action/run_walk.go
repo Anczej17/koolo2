@@ -3,10 +3,10 @@ package action
 import (
 	"time"
 
-	"github.com/hectorgimenez/d2go/pkg/data"
-	"github.com/hectorgimenez/d2go/pkg/data/mode"
-	"github.com/hectorgimenez/koolo/internal/context"
-	"github.com/hectorgimenez/koolo/internal/utils"
+	"local/internal/svc/internal/gamelib/data"
+	"local/internal/svc/internal/gamelib/data/mode"
+	"local/internal/svc/internal/context"
+	"local/internal/svc/internal/utils"
 )
 
 const (

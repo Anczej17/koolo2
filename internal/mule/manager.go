@@ -3,7 +3,7 @@ package mule
 import (
 	"log/slog"
 
-	"github.com/hectorgimenez/koolo/internal/config"
+	"local/internal/svc/internal/config"
 )
 
 // Manager is responsible for managing the muling process.

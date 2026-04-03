@@ -8,8 +8,8 @@ import (
 	"time"
 
 	"github.com/bwmarrin/discordgo"
-	"github.com/hectorgimenez/d2go/pkg/data"
-	"github.com/hectorgimenez/d2go/pkg/data/item"
+	"local/internal/svc/internal/gamelib/data"
+	"local/internal/svc/internal/gamelib/data/item"
 )
 
 // Service orchestrates async item enrichment (roll quality + prices).

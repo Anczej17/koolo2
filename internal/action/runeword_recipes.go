@@ -1,8 +1,8 @@
 package action
 
 import (
-	"github.com/hectorgimenez/d2go/pkg/data/item"
-	"github.com/hectorgimenez/d2go/pkg/data/stat"
+	"local/internal/svc/internal/gamelib/data/item"
+	"local/internal/svc/internal/gamelib/data/stat"
 )
 
 type ItemBase struct {
@@ -355,7 +355,7 @@ var Runewords = []Runeword{
 		Rolls: []RunewordStatRolls{
 			// Fortitude armor has a fixed +200% Enhanced Defense.
 			//{Min: 200, Max: 200, StatID: stat.EnhancedDefense},
-			// {Min: 1.0, Max: 1.5, StatID: stat.LifePerLevel}, // commented: d2go provides per-level as int(stat/2048)
+			// {Min: 1.0, Max: 1.5, StatID: stat.LifePerLevel}, // commented: gamelib provides per-level as int(stat/2048)
 			{Min: 25, Max: 30, StatID: stat.FireResist},
 			{Min: 25, Max: 30, StatID: stat.ColdResist},
 			{Min: 25, Max: 30, StatID: stat.LightningResist},

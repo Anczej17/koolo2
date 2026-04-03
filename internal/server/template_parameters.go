@@ -1,9 +1,9 @@
 package server
 
 import (
-	"github.com/hectorgimenez/d2go/pkg/data"
-	"github.com/hectorgimenez/koolo/internal/bot"
-	"github.com/hectorgimenez/koolo/internal/config"
+	"local/internal/svc/internal/gamelib/data"
+	"local/internal/svc/internal/bot"
+	"local/internal/svc/internal/config"
 )
 
 type TZGroup struct {
@@ -105,7 +105,7 @@ type SkillOption struct {
 type ConfigData struct {
 	ErrorMessage   string
 	CurrentVersion *VersionData
-	*config.KooloCfg
+	*config.AppCfg
 }
 
 type VersionData struct {

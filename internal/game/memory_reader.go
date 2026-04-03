@@ -8,12 +8,12 @@ import (
 	"sync"
 	"time"
 
-	"github.com/hectorgimenez/d2go/pkg/data"
-	"github.com/hectorgimenez/d2go/pkg/data/area"
-	"github.com/hectorgimenez/d2go/pkg/memory"
-	"github.com/hectorgimenez/d2go/pkg/utils"
-	"github.com/hectorgimenez/koolo/internal/config"
-	"github.com/hectorgimenez/koolo/internal/game/map_client"
+	"local/internal/svc/internal/gamelib/data"
+	"local/internal/svc/internal/gamelib/data/area"
+	"local/internal/svc/internal/gamelib/memory"
+	"local/internal/svc/internal/gamelib/utils"
+	"local/internal/svc/internal/config"
+	"local/internal/svc/internal/game/map_client"
 	"github.com/lxn/win"
 	"golang.org/x/sync/errgroup"
 )

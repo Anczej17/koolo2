@@ -5,15 +5,15 @@ import (
 	"log/slog"
 	"time"
 
-	"github.com/hectorgimenez/d2go/pkg/data"
-	"github.com/hectorgimenez/d2go/pkg/data/item"
-	"github.com/hectorgimenez/d2go/pkg/data/skill"
-	"github.com/hectorgimenez/d2go/pkg/data/stat"
-	"github.com/hectorgimenez/d2go/pkg/data/state"
-	"github.com/hectorgimenez/koolo/internal/action/step"
-	"github.com/hectorgimenez/koolo/internal/context"
-	"github.com/hectorgimenez/koolo/internal/game"
-	"github.com/hectorgimenez/koolo/internal/utils"
+	"local/internal/svc/internal/gamelib/data"
+	"local/internal/svc/internal/gamelib/data/item"
+	"local/internal/svc/internal/gamelib/data/skill"
+	"local/internal/svc/internal/gamelib/data/stat"
+	"local/internal/svc/internal/gamelib/data/state"
+	"local/internal/svc/internal/action/step"
+	"local/internal/svc/internal/context"
+	"local/internal/svc/internal/game"
+	"local/internal/svc/internal/utils"
 )
 
 // ============================================================================
@@ -541,7 +541,7 @@ func castBuffWithRetry(buffSkill skill.ID, expectedState state.State) {
 		// Ensure the skill is on the right mouse button before clicking.
 		// This prevents casting whatever random skill happens to be on right-click.
 		_ = step.SelectRightSkill(buffSkill)
-		utils.Sleep(150)
+		utils.Sleep(300) // Present hook dispatch: extra frames for game state sync
 		ctx.RefreshGameData()
 
 		if ctx.Data.PlayerUnit.RightSkill != buffSkill {
@@ -575,11 +575,22 @@ func castBuffWithRetry(buffSkill skill.ID, expectedState state.State) {
 	ctx.Logger.Warn("Buff failed after max retries", slog.String("skill", skillName))
 }
 
-// doCast clicks the right mouse button to cast whatever skill is on it.
-// Call step.SelectRightSkill and verify PlayerUnit.RightSkill before calling this.
+// doCast casts whatever skill is on right button at player position via packet.
+// Falls back to mouse click if packet sender unavailable.
 func doCast() {
+	ctx := context.Get()
 	utils.Sleep(100)
-	context.Get().HID.Click(game.RightButton, 640, 340)
+
+	if ctx.PacketSender != nil {
+		pos := ctx.Data.PlayerUnit.Position
+		if err := ctx.PacketSender.CastSkillAtLocation(pos); err == nil {
+			utils.Sleep(postCastBaseDelay)
+			return
+		}
+	}
+
+	// Fallback to mouse click
+	ctx.HID.Click(game.RightButton, 640, 340)
 	utils.Sleep(postCastBaseDelay)
 }
 

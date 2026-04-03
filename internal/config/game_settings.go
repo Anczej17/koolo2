@@ -38,21 +38,21 @@ func ReplaceGameSettings(modName string) error {
 }
 
 func InstallMod() error {
-	if _, err := os.Stat(Koolo.D2RPath + "\\d2r.exe"); os.IsNotExist(err) {
-		return fmt.Errorf("game not found at %s", Koolo.D2RPath)
+	if _, err := os.Stat(App.D2RPath + "\\d2r.exe"); os.IsNotExist(err) {
+		return fmt.Errorf("game not found at %s", App.D2RPath)
 	}
 
-	if _, err := os.Stat(Koolo.D2RPath + "\\mods\\koolo\\koolo.mpq\\modinfo.json"); err == nil {
+	if _, err := os.Stat(App.D2RPath + "\\mods\\custom\\custom.mpq\\modinfo.json"); err == nil {
 		return nil
 	}
 
-	if err := os.MkdirAll(Koolo.D2RPath+"\\mods\\koolo\\koolo.mpq", os.ModePerm); err != nil {
+	if err := os.MkdirAll(App.D2RPath+"\\mods\\custom\\custom.mpq", os.ModePerm); err != nil {
 		return fmt.Errorf("error creating mod folder: %w", err)
 	}
 
-	modFileContent := []byte(`{"name":"koolo","savepath":"koolo/"}`)
+	modFileContent := []byte(`{"name":"custom","savepath":"custom/"}`)
 
-	return os.WriteFile(Koolo.D2RPath+"\\mods\\koolo\\koolo.mpq\\modinfo.json", modFileContent, 0644)
+	return os.WriteFile(App.D2RPath+"\\mods\\custom\\custom.mpq\\modinfo.json", modFileContent, 0644)
 }
 
 func GetCurrentDisplayScale() float64 {

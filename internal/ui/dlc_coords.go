@@ -1,8 +1,8 @@
 package ui
 
 import (
-	"github.com/hectorgimenez/d2go/pkg/data"
-	"github.com/hectorgimenez/d2go/pkg/data/item"
+	"local/internal/svc/internal/gamelib/data"
+	"local/internal/svc/internal/gamelib/data/item"
 )
 
 // DLCTabCoords maps item Name to fixed screen coordinates for each DLC stash tab.

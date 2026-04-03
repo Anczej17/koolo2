@@ -7,7 +7,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/hectorgimenez/koolo/internal/drop"
+	"local/internal/svc/internal/drop"
 )
 
 // DropRequest represents a single Drop request.

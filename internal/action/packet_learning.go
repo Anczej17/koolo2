@@ -5,9 +5,9 @@ import (
 	"log/slog"
 	"time"
 
-	"github.com/hectorgimenez/d2go/pkg/data/skill"
-	"github.com/hectorgimenez/d2go/pkg/data/stat"
-	"github.com/hectorgimenez/koolo/internal/context"
+	"local/internal/svc/internal/gamelib/data/skill"
+	"local/internal/svc/internal/gamelib/data/stat"
+	"local/internal/svc/internal/context"
 )
 
 // LearnSkillPacket uses packet 0x3B to instantly learn a skill

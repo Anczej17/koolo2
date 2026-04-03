@@ -5,7 +5,7 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/hectorgimenez/koolo/internal/config"
+	"local/internal/svc/internal/config"
 )
 
 // ShoppingVM mirrors config.ShoppingConfig for templating.

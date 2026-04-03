@@ -5,9 +5,9 @@ import (
 	"math"
 	"strings"
 
-	"github.com/hectorgimenez/d2go/pkg/data"
-	"github.com/hectorgimenez/d2go/pkg/data/item"
-	"github.com/hectorgimenez/d2go/pkg/data/stat"
+	"local/internal/svc/internal/gamelib/data"
+	"local/internal/svc/internal/gamelib/data/item"
+	"local/internal/svc/internal/gamelib/data/stat"
 )
 
 // PrettyRunewordStatLabel maps the raw stat ID + layer combo to the label shown in the reroll UI.

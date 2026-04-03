@@ -5,7 +5,7 @@ import (
     "reflect"
     "unsafe"
 
-    "github.com/hectorgimenez/koolo/internal/utils/winproc"
+    "local/internal/svc/internal/utils/winproc"
 )
 
 type bmpInfoHeader struct {

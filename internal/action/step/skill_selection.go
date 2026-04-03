@@ -1,11 +1,11 @@
 package step
 
 import (
-	"github.com/hectorgimenez/d2go/pkg/data"
-	"github.com/hectorgimenez/d2go/pkg/data/skill"
-	"github.com/hectorgimenez/koolo/internal/context"
-	"github.com/hectorgimenez/koolo/internal/game"
-	"github.com/hectorgimenez/koolo/internal/utils"
+	"local/internal/svc/internal/gamelib/data"
+	"local/internal/svc/internal/gamelib/data/skill"
+	"local/internal/svc/internal/context"
+	"local/internal/svc/internal/game"
+	"local/internal/svc/internal/utils"
 )
 
 // SelectRightSkill selects a skill for the right mouse button
@@ -18,17 +18,14 @@ func SelectRightSkill(skillID skill.ID) error {
 		return nil
 	}
 
-	// If packets are enabled, use them directly (no keybinding needed)
 	if ctx.CharacterCfg.PacketCasting.UseForSkillSelection && ctx.PacketSender != nil {
 		if err := ctx.PacketSender.SelectRightSkill(skillID); err != nil {
-			// Try HID fallback only if keybinding exists
 			return selectSkillViaHIDIfAvailable(skillID)
 		}
-		utils.Sleep(50)
+		utils.Sleep(200)
 		return nil
 	}
 
-	// When not using packets, keybinding is required
 	return selectSkillViaHIDIfAvailable(skillID)
 }
 
@@ -42,17 +39,13 @@ func SelectLeftSkill(skillID skill.ID) error {
 		return nil
 	}
 
-	// If packets are enabled, use them directly (no keybinding needed)
 	if ctx.CharacterCfg.PacketCasting.UseForSkillSelection && ctx.PacketSender != nil {
 		if err := ctx.PacketSender.SelectLeftSkill(skillID); err != nil {
-			// Try HID fallback only if keybinding exists
 			return selectSkillViaHIDIfAvailable(skillID)
 		}
-		utils.Sleep(50)
+		utils.Sleep(200)
 		return nil
 	}
-
-	// When not using packets, keybinding is required
 	return selectSkillViaHIDIfAvailable(skillID)
 }
 

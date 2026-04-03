@@ -12,12 +12,12 @@ import (
 	"time"
 
 	"github.com/bwmarrin/discordgo"
-	"github.com/hectorgimenez/d2go/pkg/data"
-	d2stat "github.com/hectorgimenez/d2go/pkg/data/stat"
-	"github.com/hectorgimenez/d2go/pkg/data/item"
-	"github.com/hectorgimenez/koolo/internal/config"
-	"github.com/hectorgimenez/koolo/internal/event"
-	"github.com/hectorgimenez/koolo/internal/remote/discord/enrichment"
+	"local/internal/svc/internal/gamelib/data"
+	d2stat "local/internal/svc/internal/gamelib/data/stat"
+	"local/internal/svc/internal/gamelib/data/item"
+	"local/internal/svc/internal/config"
+	"local/internal/svc/internal/event"
+	"local/internal/svc/internal/remote/discord/enrichment"
 )
 
 var excludedStatIDs = map[int]bool{
@@ -69,7 +69,7 @@ func (b *Bot) Handle(ctx context.Context, e event.Event) error {
 	case event.NgrokTunnelEvent:
 		return b.sendEventMessage(ctx, evt.Message())
 	case event.ItemStashedEvent:
-		if config.Koolo.Discord.DisableItemStashScreenshots {
+		if config.App.Discord.DisableItemStashScreenshots {
 			if b.useWebhook {
 				embed := buildItemStashEmbed(evt)
 				// Try to attach item thumbnail from local assets
@@ -328,7 +328,7 @@ func buildItemStashDescription(evt event.ItemStashedEvent) string {
 		description.WriteString(fmt.Sprintf("Sockets: %d\n", socketCount))
 	}
 
-	if config.Koolo.Discord.IncludePickitInfoInItemText && (evt.Item.RuleFile != "" || evt.Item.Rule != "") {
+	if config.App.Discord.IncludePickitInfoInItemText && (evt.Item.RuleFile != "" || evt.Item.Rule != "") {
 		location := formatRuleLocation(evt.Item.RuleFile)
 		ruleLine := strings.TrimSpace(evt.Item.Rule)
 		description.WriteString("\n")
@@ -626,21 +626,21 @@ func (b *Bot) shouldPublish(e event.Event) bool {
 	switch evt := e.(type) {
 	case event.GameFinishedEvent:
 		if evt.Reason == event.FinishedError {
-			return config.Koolo.Discord.EnableDiscordErrorMessages
+			return config.App.Discord.EnableDiscordErrorMessages
 		}
 		if evt.Reason == event.FinishedChicken || evt.Reason == event.FinishedMercChicken || evt.Reason == event.FinishedDied {
-			return config.Koolo.Discord.EnableDiscordChickenMessages
+			return config.App.Discord.EnableDiscordChickenMessages
 		}
 		if evt.Reason == event.FinishedOK {
 			return false // supress game finished messages until we add proper option for it
 		}
 		return true
 	case event.GameCreatedEvent:
-		return config.Koolo.Discord.EnableGameCreatedMessages
+		return config.App.Discord.EnableGameCreatedMessages
 	case event.RunStartedEvent:
-		return config.Koolo.Discord.EnableNewRunMessages
+		return config.App.Discord.EnableNewRunMessages
 	case event.RunFinishedEvent:
-		return config.Koolo.Discord.EnableRunFinishMessages
+		return config.App.Discord.EnableRunFinishMessages
 	case event.NgrokTunnelEvent:
 		return true
 	default:

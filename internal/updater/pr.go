@@ -10,8 +10,8 @@ import (
 )
 
 const (
-	upstreamOwner = "kwader2k"
-	upstreamRepo  = "koolo"
+	upstreamOwner = "user"
+	upstreamRepo  = "app"
 )
 
 var githubHTTPClient = &http.Client{Timeout: 15 * time.Second}
@@ -64,7 +64,7 @@ func GetUpstreamPRs(state string, limit int) ([]PullRequest, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to build PR request: %w", err)
 	}
-	req.Header.Set("User-Agent", "koolo-updater")
+	req.Header.Set("User-Agent", "app-updater")
 
 	resp, err := githubHTTPClient.Do(req)
 	if err != nil {
@@ -98,7 +98,7 @@ func GetPRCommits(prNumber int) ([]PRCommit, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to build commit request: %w", err)
 	}
-	req.Header.Set("User-Agent", "koolo-updater")
+	req.Header.Set("User-Agent", "app-updater")
 
 	resp, err := githubHTTPClient.Do(req)
 	if err != nil {

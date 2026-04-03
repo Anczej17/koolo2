@@ -1,2 +1,3 @@
-go mod edit -replace github.com/hectorgimenez/d2go=github.com/kwader2k/d2go@main
+@echo off
+REM d2go is now vendored locally - this script is no longer needed
 go mod tidy

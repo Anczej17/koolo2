@@ -5,12 +5,12 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/hectorgimenez/d2go/pkg/data/item"
-	"github.com/hectorgimenez/d2go/pkg/data/skill"
-	"github.com/hectorgimenez/koolo/internal/action/step"
-	"github.com/hectorgimenez/koolo/internal/config"
-	"github.com/hectorgimenez/koolo/internal/context"
-	"github.com/hectorgimenez/koolo/internal/utils"
+	"local/internal/svc/internal/gamelib/data/item"
+	"local/internal/svc/internal/gamelib/data/skill"
+	"local/internal/svc/internal/action/step"
+	"local/internal/svc/internal/config"
+	"local/internal/svc/internal/context"
+	"local/internal/svc/internal/utils"
 )
 
 func StashFull() bool {

@@ -4,7 +4,7 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/hectorgimenez/d2go/pkg/data/item"
+	"local/internal/svc/internal/gamelib/data/item"
 )
 
 // ItemQuantity represents an item name together with an optional max Drop quota.

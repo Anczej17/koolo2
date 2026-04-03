@@ -12,3 +12,9 @@
 !/config/koolo.yaml.dist
 !/config/Settings.json
 internal/buildnoise/noise_gen.go
+tools/rmod/target/
+tools/inject_test/
+tools/pattern_find/
+tools/logs/
+build/
+internal/buildnoise/noise_gen.go

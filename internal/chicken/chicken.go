@@ -3,9 +3,9 @@ package chicken
 import (
 	"fmt"
 
-	"github.com/hectorgimenez/d2go/pkg/data/state"
-	"github.com/hectorgimenez/koolo/internal/context"
-	"github.com/hectorgimenez/koolo/internal/health"
+	"local/internal/svc/internal/gamelib/data/state"
+	"local/internal/svc/internal/context"
+	"local/internal/svc/internal/health"
 )
 
 const RangeForScaryAura = 25

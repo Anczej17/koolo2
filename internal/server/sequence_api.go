@@ -12,9 +12,9 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/hectorgimenez/koolo/internal/config"
-	"github.com/hectorgimenez/koolo/internal/run"
-	"github.com/hectorgimenez/koolo/internal/utils"
+	"local/internal/svc/internal/config"
+	"local/internal/svc/internal/run"
+	"local/internal/svc/internal/utils"
 )
 
 type SequenceAPI struct {

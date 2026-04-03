@@ -1,6 +1,6 @@
 package terrorzones
 
-import "github.com/hectorgimenez/d2go/pkg/data/area"
+import "local/internal/svc/internal/gamelib/data/area"
 
 // StepKind defines what to do in a route step.
 type StepKind int

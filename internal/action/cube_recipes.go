@@ -4,11 +4,11 @@ import (
 	"slices"
 	"strings"
 
-	"github.com/hectorgimenez/d2go/pkg/data"
-	"github.com/hectorgimenez/d2go/pkg/data/item"
-	"github.com/hectorgimenez/d2go/pkg/nip"
-	"github.com/hectorgimenez/koolo/internal/context"
-	"github.com/hectorgimenez/koolo/internal/utils"
+	"local/internal/svc/internal/gamelib/data"
+	"local/internal/svc/internal/gamelib/data/item"
+	"local/internal/svc/internal/gamelib/nip"
+	"local/internal/svc/internal/context"
+	"local/internal/svc/internal/utils"
 )
 
 type CubeRecipe struct {

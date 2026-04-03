@@ -3,24 +3,27 @@ package bot
 import (
 	"fmt"
 	"log/slog"
+	"os"
+	"path/filepath"
 	"strconv"
 	"sync"
 	"syscall"
 	"time"
 	"unsafe"
 
-	"github.com/hectorgimenez/koolo/cmd/koolo/log"
-	"github.com/hectorgimenez/koolo/internal/character"
-	"github.com/hectorgimenez/koolo/internal/config"
-	"github.com/hectorgimenez/koolo/internal/context"
-	"github.com/hectorgimenez/koolo/internal/drop"
-	"github.com/hectorgimenez/koolo/internal/event"
-	"github.com/hectorgimenez/koolo/internal/game"
-	"github.com/hectorgimenez/koolo/internal/health"
-	"github.com/hectorgimenez/koolo/internal/mule"
-	"github.com/hectorgimenez/koolo/internal/pather"
-	"github.com/hectorgimenez/koolo/internal/utils"
-	"github.com/hectorgimenez/koolo/internal/utils/winproc"
+	"local/internal/svc/cmd/app/log"
+	"local/internal/svc/internal/character"
+	"local/internal/svc/internal/config"
+	"local/internal/svc/internal/context"
+	"local/internal/svc/internal/drop"
+	"local/internal/svc/internal/event"
+	"local/internal/svc/internal/game"
+	"local/internal/svc/internal/health"
+	"local/internal/svc/internal/mule"
+	"local/internal/svc/internal/pather"
+	"local/internal/svc/internal/presenter"
+	"local/internal/svc/internal/utils"
+	"local/internal/svc/internal/utils/winproc"
 	"github.com/lxn/win"
 )
 
@@ -72,7 +75,7 @@ func (mng *SupervisorManager) Start(supervisorName string, attachToExisting bool
 		return fmt.Errorf("error loading config: %w", err)
 	}
 
-	supervisorLogger, err := log.NewLogger(config.Koolo.Debug.Log, config.Koolo.LogSaveDirectory, supervisorName)
+	supervisorLogger, err := log.NewLogger(config.App.Debug.Log, config.App.LogSaveDirectory, supervisorName)
 	if err != nil {
 		return err
 	}
@@ -115,7 +118,7 @@ func (mng *SupervisorManager) Start(supervisorName string, attachToExisting bool
 	mng.crashDetectors[supervisorName] = crashDetector
 	mng.mu.Unlock()
 
-	if config.Koolo.GameWindowArrangement {
+	if config.App.GameWindowArrangement {
 		go func() {
 			// When the game starts, its doing some weird stuff like repositioning and resizing window automatically
 			// we need to wait until this is done in order to reposition, or it will be overridden
@@ -290,12 +293,12 @@ func (mng *SupervisorManager) buildSupervisor(supervisorName string, logger *slo
 		}
 	} else {
 		var err error
-		if kbResult, kbErr := config.EnsureSkillKeyBindings(cfg, config.Koolo.UseCustomSettings); kbErr != nil {
+		if kbResult, kbErr := config.EnsureSkillKeyBindings(cfg, config.App.UseCustomSettings); kbErr != nil {
 			logger.Warn("Failed to ensure skill key bindings", slog.Any("error", kbErr))
 		} else if kbResult.Missing {
 			logger.Info("Key binding file missing; will bootstrap in-game", slog.String("character", cfg.CharacterName))
 		}
-		pid, hwnd, err = game.StartGame(cfg.Username, cfg.Password, cfg.AuthMethod, cfg.AuthToken, cfg.Realm, cfg.CommandLineArgs, config.Koolo.UseCustomSettings)
+		pid, hwnd, err = game.StartGame(cfg.Username, cfg.Password, cfg.AuthMethod, cfg.AuthToken, cfg.Realm, cfg.CommandLineArgs, config.App.UseCustomSettings)
 		if err != nil {
 			return nil, nil, fmt.Errorf("error starting game: %w", err)
 		}
@@ -310,6 +313,36 @@ func (mng *SupervisorManager) buildSupervisor(supervisorName string, logger *slo
 	if err != nil {
 		return nil, nil, fmt.Errorf("error creating game injector: %w", err)
 	}
+
+	// Present hook — Phase 8. Requires absolute path for LoadLibraryW in D2R.
+	func() {
+		defer func() {
+			if r := recover(); r != nil {
+				logger.Error(fmt.Sprintf("PANIC in presenter init: %v", r))
+			}
+		}()
+		presenterDLLPath := filepath.Join("tools", "rmod.dll")
+		if absPath, err := filepath.Abs(presenterDLLPath); err == nil {
+			presenterDLLPath = absPath
+		}
+		if _, statErr := os.Stat(presenterDLLPath); statErr == nil {
+			logger.Info(fmt.Sprintf("Phase8: pid=%d grPID=%d dll=%s", pid, gr.GetPID(), presenterDLLPath))
+			fnSendPacket, fnErr := gr.Process.GetD2GSSendPacketFn()
+			if fnErr != nil {
+				logger.Warn("could not resolve dispatch function, using legacy path", slog.Any("error", fnErr))
+			} else {
+				logger.Info(fmt.Sprintf("Phase8: SendPacket=%#x, creating presenter for pid=%d", fnSendPacket, pid))
+				pres := presenter.New(pid, presenterDLLPath)
+				if initErr := pres.Init(fnSendPacket); initErr != nil {
+					logger.Warn("runtime module init failed, using legacy path", slog.Any("error", initErr))
+				} else {
+					gr.Process.SetExternalSender(pres.SendPacket)
+					gi.SetPresenter(pres)
+					logger.Info("runtime module initialized, using Present hook path")
+				}
+			}
+		}
+	}()
 
 	ctx := context.NewContext(supervisorName)
 
@@ -462,7 +495,7 @@ func (mng *SupervisorManager) buildSupervisor(supervisorName string, logger *slo
 			utils.Sleep(5000)
 		}
 
-		gameTitle := "D2R - [" + strconv.FormatInt(int64(pid), 10) + "] - " + supervisorName + " - " + cfg.Realm
+		gameTitle := supervisorName
 		winproc.SetWindowText.Call(uintptr(hwnd), uintptr(unsafe.Pointer(syscall.StringToUTF16Ptr(gameTitle))))
 
 		err := mng.Start(supervisorName, false, false)
@@ -471,7 +504,7 @@ func (mng *SupervisorManager) buildSupervisor(supervisorName string, logger *slo
 		}
 	}
 
-	gameTitle := "D2R - [" + strconv.FormatInt(int64(pid), 10) + "] - " + supervisorName + " - " + cfg.Realm
+	gameTitle := supervisorName
 	winproc.SetWindowText.Call(uintptr(hwnd), uintptr(unsafe.Pointer(syscall.StringToUTF16Ptr(gameTitle))))
 	crashDetector := game.NewCrashDetector(supervisorName, int32(pid), uintptr(hwnd), mng.logger, restartFunc)
 
