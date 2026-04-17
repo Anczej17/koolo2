@@ -311,8 +311,7 @@ func (s *WarcryBarb) tryGrimWard() {
 		return
 	}
 
-	grimWardKey, found := s.Data.KeyBindings.KeyBindingForSkill(skill.GrimWard)
-	if !found {
+	if _, found := s.Data.KeyBindings.KeyBindingForSkill(skill.GrimWard); !found {
 		return
 	}
 
@@ -369,8 +368,7 @@ func (s *WarcryBarb) tryGrimWard() {
 		}
 
 		if s.Data.PlayerUnit.RightSkill != skill.GrimWard {
-			ctx.HID.PressKeyBinding(grimWardKey)
-			time.Sleep(time.Millisecond * 50)
+			_ = step.SelectRightSkill(skill.GrimWard)
 		}
 
 		clickPos := s.clickPos(corpse)
@@ -444,8 +442,7 @@ func (s *WarcryBarb) horkCorpses(maxRange int) {
 	ctx := context.Get()
 	ctx.PauseIfNotPriority()
 
-	findItemKey, found := s.Data.KeyBindings.KeyBindingForSkill(skill.FindItem)
-	if !found {
+	if _, found := s.Data.KeyBindings.KeyBindingForSkill(skill.FindItem); !found {
 		return
 	}
 
@@ -486,7 +483,12 @@ func (s *WarcryBarb) horkCorpses(maxRange int) {
 					"original", originalSlot,
 					"current", ctx.Data.ActiveWeaponSlot)
 				for i := 0; i < 10; i++ {
-					ctx.HID.PressKey('W')
+					if ctx.CharacterCfg.PacketCasting.UseForWeaponSwap && ctx.PacketSender != nil {
+						fL, fR, tL, tR := action.WeaponSwapGIDs(ctx.Data)
+						ctx.PacketSender.SwapWeapon(fL, fR, tL, tR)
+					} else {
+						ctx.HID.PressKey('W')
+					}
 					time.Sleep(200 * time.Millisecond)
 					ctx.RefreshGameData()
 					if ctx.Data.ActiveWeaponSlot == originalSlot {
@@ -522,8 +524,7 @@ func (s *WarcryBarb) horkCorpses(maxRange int) {
 		keepHorkSlot()
 
 		if s.Data.PlayerUnit.RightSkill != skill.FindItem {
-			ctx.HID.PressKeyBinding(findItemKey)
-			time.Sleep(time.Millisecond * 50)
+			_ = step.SelectRightSkill(skill.FindItem)
 		}
 
 		clickPos := s.clickPos(corpse)
@@ -620,7 +621,12 @@ func (s *WarcryBarb) SwapToSlot(slot int) bool {
 			return true
 		}
 
-		ctx.HID.PressKey('W')
+		if ctx.CharacterCfg.PacketCasting.UseForWeaponSwap && ctx.PacketSender != nil {
+			fL, fR, tL, tR := action.WeaponSwapGIDs(ctx.Data)
+			ctx.PacketSender.SwapWeapon(fL, fR, tL, tR)
+		} else {
+			ctx.HID.PressKey('W')
+		}
 		time.Sleep(retryDelay)
 		ctx.RefreshGameData()
 

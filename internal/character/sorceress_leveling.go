@@ -581,7 +581,7 @@ func (s *SorceressLeveling) killMonsterByName(id npc.ID, monsterType data.Monste
 		if m, found := s.Data.Monsters.FindOne(id, monsterType); found {
 			// If the monster's life is 0 or less, it's dead, so break the loop
 			if m.Stats[stat.Life] <= 0 {
-				fmt.Printf("Monster %s (ID: %d) is dead. Breaking attack loop.\n", m.Name, m.UnitID)
+				fmt.Printf("Monster %d (ID: %d) is dead. Breaking attack loop.\n", m.Name, m.UnitID)
 				break
 			}
 

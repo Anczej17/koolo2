@@ -3,6 +3,7 @@ package run
 import (
 	"errors" // NEW: Import errors package
 	"fmt"    // NEW: Import fmt for error formatting
+	"log/slog"
 	"time"
 
 	"local/internal/svc/internal/gamelib/data"
@@ -100,7 +101,7 @@ func (a Quests) clearDenQuest() error {
 
 	a.ctx.CharacterCfg.Character.ClearPathDist = 20
 	if err := config.SaveSupervisorConfig(a.ctx.CharacterCfg.ConfigFolderName, a.ctx.CharacterCfg); err != nil {
-		a.ctx.Logger.Error("Failed to save character configuration: %s", err.Error())
+		a.ctx.Logger.Error("Failed to save character configuration", slog.Any("error", err))
 	}
 
 	if err := action.ClearCurrentLevel(false, data.MonsterAnyFilter()); err != nil {
@@ -138,7 +139,7 @@ func (a Quests) rescueCainQuest() error {
 
 	a.ctx.CharacterCfg.Character.ClearPathDist = 20
 	if err := config.SaveSupervisorConfig(a.ctx.CharacterCfg.ConfigFolderName, a.ctx.CharacterCfg); err != nil {
-		a.ctx.Logger.Error("Failed to save character configuration: %s", err.Error())
+		a.ctx.Logger.Error("Failed to save character configuration", slog.Any("error", err))
 	}
 
 	err = action.WayPoint(area.DarkWood)
@@ -148,7 +149,7 @@ func (a Quests) rescueCainQuest() error {
 
 	a.ctx.CharacterCfg.Character.ClearPathDist = 30
 	if err := config.SaveSupervisorConfig(a.ctx.CharacterCfg.ConfigFolderName, a.ctx.CharacterCfg); err != nil {
-		a.ctx.Logger.Error("Failed to save character configuration: %s", err.Error())
+		a.ctx.Logger.Error("Failed to save character configuration", slog.Any("error", err))
 	}
 
 	// Find the Inifuss Tree position.

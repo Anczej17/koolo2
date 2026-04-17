@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"local/internal/svc/internal/action"
+	"local/internal/svc/internal/action/step"
 
 	"local/internal/svc/internal/gamelib/data"
 	"local/internal/svc/internal/gamelib/data/npc"
@@ -12,7 +13,6 @@ import (
 	"local/internal/svc/internal/gamelib/data/stat"
 	"local/internal/svc/internal/context"
 	"local/internal/svc/internal/game"
-	"local/internal/svc/internal/utils"
 )
 
 type Smiter struct {
@@ -52,10 +52,8 @@ func (f Smiter) PerformSmiteAttack(monsterID data.UnitID) {
 		return
 	}
 
-	smiteKey, found := f.Data.KeyBindings.KeyBindingForSkill(skill.Smite)
-	if found && f.Data.PlayerUnit.LeftSkill != skill.Smite {
-		ctx.HID.PressKeyBinding(smiteKey)
-		utils.Sleep(50)
+	if f.Data.PlayerUnit.LeftSkill != skill.Smite {
+		_ = step.SelectLeftSkill(skill.Smite)
 	}
 
 	screenX, screenY := ctx.PathFinder.GameCoordsToScreenCords(monster.Position.X, monster.Position.Y)
@@ -104,11 +102,8 @@ func (f Smiter) KillMonsterSequence(monsterSelector func(d game.Data) (data.Unit
 		}
 
 		if aura != 0 {
-			if kb, found := f.Data.KeyBindings.KeyBindingForSkill(aura); found {
-				if f.Data.PlayerUnit.RightSkill != aura {
-					ctx.HID.PressKeyBinding(kb)
-					utils.Sleep(50)
-				}
+			if f.Data.PlayerUnit.RightSkill != aura {
+				_ = step.SelectRightSkill(aura)
 			}
 		}
 

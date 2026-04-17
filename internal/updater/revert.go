@@ -110,7 +110,7 @@ func (u *Updater) RevertPR(prNumber int, progressCallback func(message string)) 
 				result.Success = false
 				result.Error = fmt.Sprintf("Conflict while reverting %s", shortSHA)
 				progressCallback(result.Error)
-				return result, fmt.Errorf(result.Error)
+				return result, fmt.Errorf("%s", result.Error)
 			}
 
 			_ = gitCmd(ctx.RepoDir, "revert", "--abort").Run()

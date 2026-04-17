@@ -1,6 +1,8 @@
 package run
 
 import (
+	"log/slog"
+
 	"local/internal/svc/internal/gamelib/data"
 	"local/internal/svc/internal/gamelib/data/area"
 	"local/internal/svc/internal/gamelib/data/npc"
@@ -101,11 +103,11 @@ func (a ArcaneSanctuary) Run(parameters *RunParameters) error {
 
 	// Clear all 4 lanes
 	for lane := 0; lane < 4; lane++ {
-		a.ctx.Logger.Info("Clearing Arcane Sanctuary - Lane %d/4", lane+1)
+		a.ctx.Logger.Info("Clearing Arcane Sanctuary", slog.Int("lane", lane+1), slog.Int("total", 4))
 
 		// Clear this lane to End Point (one side)
 		if err := lanes.ClearLane(filter, summonerNPC, summonerFound); err != nil {
-			a.ctx.Logger.Warn("Lane %d clearing issue: %v", lane+1, err)
+			a.ctx.Logger.Warn("Lane clearing issue", slog.Int("lane", lane+1), slog.Any("error", err))
 		}
 
 		// Open chests at end of lane
@@ -115,7 +117,7 @@ func (a ArcaneSanctuary) Run(parameters *RunParameters) error {
 
 		// Return to center via the other side
 		if err := lanes.ReturnToCenter(filter); err != nil {
-			a.ctx.Logger.Warn("Lane %d return path issue: %v", lane+1, err)
+			a.ctx.Logger.Warn("Lane return path issue", slog.Int("lane", lane+1), slog.Any("error", err))
 		}
 
 		// Move on to next lane

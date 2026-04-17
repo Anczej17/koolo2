@@ -253,10 +253,9 @@ func (s Baal) checkForSoulsOrDolls() bool {
 func (s *Baal) preAttackBaalWaves() {
 	// Switch to Cleansing aura if poisoned.
 	if s.ctx.Data.PlayerUnit.States.HasState(state.Poison) && !s.ctx.Data.PlayerUnit.States.HasState(state.Cleansing) {
-		if kb, found := s.ctx.Data.KeyBindings.KeyBindingForSkill(skill.Cleansing); found && s.ctx.Data.PlayerUnit.RightSkill != skill.Cleansing {
-			s.ctx.HID.PressKeyBinding(kb)
-			utils.Sleep(60)         // Allow at least 1 D2R tick
-			s.ctx.RefreshGameData() // Update player skills after the key press.
+		if _, found := s.ctx.Data.KeyBindings.KeyBindingForSkill(skill.Cleansing); found && s.ctx.Data.PlayerUnit.RightSkill != skill.Cleansing {
+			_ = step.SelectRightSkill(skill.Cleansing)
+			s.ctx.RefreshGameData() // Update player skills after the skill change.
 		}
 	}
 	player := s.ctx.Data.PlayerUnit
@@ -344,9 +343,8 @@ func (s *Baal) preAttackBaalWaves() {
 	if player.States.HasState(state.Meditation) || player.Class != data.Paladin {
 		if player.Skills[skill.BlessedHammer].Level > 1 {
 			// Switch to Concentration if not under Cleansing or no longer poisoned.
-			if kb, found := s.ctx.Data.KeyBindings.KeyBindingForSkill(skill.Concentration); found && player.RightSkill != skill.Concentration && (player.RightSkill != skill.Cleansing || !player.States.HasState(state.Poison)) {
-				s.ctx.HID.PressKeyBinding(kb)
-				utils.Sleep(60) // Allow at least 1 D2R tick
+			if _, found := s.ctx.Data.KeyBindings.KeyBindingForSkill(skill.Concentration); found && player.RightSkill != skill.Concentration && (player.RightSkill != skill.Cleansing || !player.States.HasState(state.Poison)) {
+				_ = step.SelectRightSkill(skill.Concentration)
 			}
 			if step.CastAtPosition(skill.BlessedHammer, true, hammerPrecastPos) {
 				return

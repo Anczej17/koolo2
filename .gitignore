@@ -9,7 +9,7 @@
 
 /config/*
 !/config/template
-!/config/koolo.yaml.dist
+!/config/settings.yaml.dist
 !/config/Settings.json
 internal/buildnoise/noise_gen.go
 tools/rmod/target/
@@ -18,3 +18,7 @@ tools/pattern_find/
 tools/logs/
 build/
 internal/buildnoise/noise_gen.go
+/app.exe
+/dist/
+/tools/*.dll
+/tools/*.exe

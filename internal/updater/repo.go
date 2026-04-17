@@ -10,6 +10,18 @@ import (
 
 const sourceDirName = ".app-src"
 
+// repoCloneURL builds the upstream clone URL at runtime to avoid a static string in the binary.
+func repoCloneURL() string {
+	parts := []string{"https:/", "/", "gith", "ub.co", "m/", upstreamOwner, "/", upstreamRepo, ".git"}
+	return strings.Join(parts, "")
+}
+
+// apiBaseURL builds the API base at runtime.
+func apiBaseURL() string {
+	parts := []string{"https:/", "/api.", "gith", "ub.co", "m"}
+	return strings.Join(parts, "")
+}
+
 type repoContext struct {
 	RepoDir    string
 	InstallDir string
@@ -56,7 +68,7 @@ func resolveRepoContext() (repoContext, error) {
 		return repoContext{}, err
 	}
 
-	cloneCmd := newCommand("git", "clone", "https://github.com/user/app.git", repoDir)
+	cloneCmd := newCommand("git", "clone", repoCloneURL(), repoDir)
 	cloneCmd.Dir = workDir
 	if output, err := cloneCmd.CombinedOutput(); err != nil {
 		return repoContext{}, fmt.Errorf("failed to clone upstream repository: %w\nOutput: %s", err, strings.TrimSpace(string(output)))

@@ -11,7 +11,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/bwmarrin/discordgo"
+	"local/internal/svc/internal/remote/discord/discordembed"
 )
 
 type webhookClient struct {
@@ -75,29 +75,29 @@ func (w *webhookClient) Send(ctx context.Context, content, fileName string, file
 	return nil
 }
 
-func (w *webhookClient) SendEmbed(ctx context.Context, embed *discordgo.MessageEmbed) error {
+func (w *webhookClient) SendEmbed(ctx context.Context, embed *discordembed.Embed) error {
 	_, err := w.sendEmbedInternal(ctx, embed, false, nil, "")
 	return err
 }
 
 // SendEmbedWithResponse sends an embed and returns the Discord message ID.
 // Uses ?wait=true so Discord returns the created message object.
-func (w *webhookClient) SendEmbedWithResponse(ctx context.Context, embed *discordgo.MessageEmbed) (string, error) {
+func (w *webhookClient) SendEmbedWithResponse(ctx context.Context, embed *discordembed.Embed) (string, error) {
 	return w.sendEmbedInternal(ctx, embed, true, nil, "")
 }
 
 // SendEmbedWithThumbnail sends an embed with a local image file as attachment thumbnail.
 // The embed's Thumbnail.URL should be set to "attachment://filename" before calling.
-func (w *webhookClient) SendEmbedWithThumbnail(ctx context.Context, embed *discordgo.MessageEmbed, imageData []byte, imageFilename string) (string, error) {
+func (w *webhookClient) SendEmbedWithThumbnail(ctx context.Context, embed *discordembed.Embed, imageData []byte, imageFilename string) (string, error) {
 	return w.sendEmbedInternal(ctx, embed, true, imageData, imageFilename)
 }
 
 // EditEmbed edits an existing webhook message by ID with a new embed.
-func (w *webhookClient) EditEmbed(ctx context.Context, messageID string, embed *discordgo.MessageEmbed) error {
+func (w *webhookClient) EditEmbed(ctx context.Context, messageID string, embed *discordembed.Embed) error {
 	payload := struct {
-		Embeds []*discordgo.MessageEmbed `json:"embeds"`
+		Embeds []*discordembed.Embed `json:"embeds"`
 	}{
-		Embeds: []*discordgo.MessageEmbed{embed},
+		Embeds: []*discordembed.Embed{embed},
 	}
 	payloadJSON, err := json.Marshal(payload)
 	if err != nil {
@@ -135,7 +135,7 @@ type FileAttachment struct {
 // This uses multipart/form-data so new attachments (e.g. rune icon) can be added on PATCH.
 // IMPORTANT: Discord requires an explicit "attachments" array in the payload when sending files
 // on PATCH — only listed attachments survive; unlisted ones (including the original) are removed.
-func (w *webhookClient) EditEmbedWithFiles(ctx context.Context, messageID string, embed *discordgo.MessageEmbed, files []FileAttachment) error {
+func (w *webhookClient) EditEmbedWithFiles(ctx context.Context, messageID string, embed *discordembed.Embed, files []FileAttachment) error {
 	var body bytes.Buffer
 	writer := multipart.NewWriter(&body)
 
@@ -152,10 +152,10 @@ func (w *webhookClient) EditEmbedWithFiles(ctx context.Context, messageID string
 	}
 
 	payload := struct {
-		Embeds      []*discordgo.MessageEmbed `json:"embeds"`
+		Embeds      []*discordembed.Embed `json:"embeds"`
 		Attachments []attachmentRef           `json:"attachments"`
 	}{
-		Embeds:      []*discordgo.MessageEmbed{embed},
+		Embeds:      []*discordembed.Embed{embed},
 		Attachments: attachments,
 	}
 	payloadJSON, err := json.Marshal(payload)
@@ -207,14 +207,14 @@ func (w *webhookClient) EditEmbedWithFiles(ctx context.Context, messageID string
 	return nil
 }
 
-func (w *webhookClient) sendEmbedInternal(ctx context.Context, embed *discordgo.MessageEmbed, wantResponse bool, imageData []byte, imageFilename string) (string, error) {
+func (w *webhookClient) sendEmbedInternal(ctx context.Context, embed *discordembed.Embed, wantResponse bool, imageData []byte, imageFilename string) (string, error) {
 	var body bytes.Buffer
 	writer := multipart.NewWriter(&body)
 
 	payload := struct {
-		Embeds []*discordgo.MessageEmbed `json:"embeds"`
+		Embeds []*discordembed.Embed `json:"embeds"`
 	}{
-		Embeds: []*discordgo.MessageEmbed{embed},
+		Embeds: []*discordembed.Embed{embed},
 	}
 	payloadJSON, err := json.Marshal(payload)
 	if err != nil {

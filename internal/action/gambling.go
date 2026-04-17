@@ -15,7 +15,6 @@ import (
 	"local/internal/svc/internal/town"
 	"local/internal/svc/internal/ui"
 	"local/internal/svc/internal/utils"
-	"github.com/lxn/win"
 )
 
 func Gamble() error {
@@ -36,12 +35,7 @@ func Gamble() error {
 		}
 
 		InteractNPC(vendorNPC)
-		// Jamella gamble button is the second one
-		if vendorNPC == npc.Jamella {
-			ctx.HID.KeySequence(win.VK_HOME, win.VK_DOWN, win.VK_RETURN)
-		} else {
-			ctx.HID.KeySequence(win.VK_HOME, win.VK_DOWN, win.VK_DOWN, win.VK_RETURN)
-		}
+		SelectNPCGambleOption(vendorNPC)
 
 		if !ctx.Data.OpenMenus.NPCShop {
 			return errors.New("failed opening gambling window")
@@ -75,12 +69,7 @@ func GambleSingleItem(items []string, desiredQuality item.Quality) error {
 		}
 
 		InteractNPC(vendorNPC)
-		// Jamella gamble button is the second one
-		if vendorNPC == npc.Jamella {
-			ctx.HID.KeySequence(win.VK_HOME, win.VK_DOWN, win.VK_RETURN)
-		} else {
-			ctx.HID.KeySequence(win.VK_HOME, win.VK_DOWN, win.VK_DOWN, win.VK_RETURN)
-		}
+		SelectNPCGambleOption(vendorNPC)
 
 		if !ctx.Data.OpenMenus.NPCShop {
 			return errors.New("failed opening gambling window")
@@ -280,11 +269,7 @@ func gambleItems() error {
 					return err
 				}
 
-				if vendorNPC == npc.Jamella {
-					ctx.HID.KeySequence(win.VK_HOME, win.VK_DOWN, win.VK_RETURN)
-				} else {
-					ctx.HID.KeySequence(win.VK_HOME, win.VK_DOWN, win.VK_DOWN, win.VK_RETURN)
-				}
+				SelectNPCGambleOption(vendorNPC)
 
 				refreshAttempts = 0
 				continue

@@ -15,7 +15,6 @@ import (
 	"local/internal/svc/internal/town"
 	"local/internal/svc/internal/ui"
 	"local/internal/svc/internal/utils"
-	"github.com/lxn/win"
 )
 
 func IdentifyAll(skipIdentify bool) error {
@@ -124,9 +123,9 @@ func CainIdentify() error {
 		return fmt.Errorf("NPC menu did not open")
 	}
 
-	// Select identify option
-	ctx.HID.KeySequence(win.VK_HOME, win.VK_DOWN, win.VK_RETURN)
-	utils.PingSleep(utils.Medium, 800) // Medium operation: Wait for key sequence to register
+	// Select identify option via packet, fallback to HID
+	SelectNPCTradeOption(stayAwhileAndListen)
+	utils.PingSleep(utils.Medium, 800) // Medium operation: Wait for dialog to register
 
 	// Close menu if still open
 	if ctx.Data.OpenMenus.NPCInteract {
@@ -185,6 +184,17 @@ func HaveItemsToStashUnidentified() bool {
 
 func identifyItem(idTome data.Item, i data.Item) {
 	ctx := context.Get()
+
+	if ctx.CharacterCfg.PacketCasting.UseForIdentify && ctx.PacketSender != nil {
+		ctx.Logger.Debug("Identifying item via packet", "item", i.Name, "itemGID", i.UnitID, "tomeGID", idTome.UnitID)
+		if err := ctx.PacketSender.IdentifyItem(idTome.UnitID); err == nil {
+			utils.PingSleep(utils.Medium, 250)
+			return
+		} else {
+			ctx.Logger.Warn("Identify packet failed, falling back to HID", "error", err)
+		}
+	}
+
 	screenPos := ui.GetScreenCoordsForItem(idTome)
 
 	utils.PingSleep(utils.Medium, 500) // Medium operation: Prepare for right-click on tome

@@ -2,11 +2,11 @@ package action
 
 import (
 	"local/internal/svc/internal/gamelib/data/item"
-	"local/internal/svc/internal/gamelib/data/npc"
 	"local/internal/svc/internal/gamelib/data/stat"
-	botCtx "local/internal/svc/internal/context" // ALIAS THIS IMPORT
+	"local/internal/svc/internal/action/step"
+	botCtx "local/internal/svc/internal/context"
 	"local/internal/svc/internal/town"
-	"github.com/lxn/win"
+	"local/internal/svc/internal/utils"
 )
 
 func ReviveMerc() {
@@ -22,11 +22,10 @@ func ReviveMerc() {
 
 		InteractNPC(mercNPC)
 
-		if mercNPC == npc.Tyrael2 {
-			status.HID.KeySequence(win.VK_END, win.VK_UP, win.VK_RETURN, win.VK_ESCAPE)
-		} else {
-			status.HID.KeySequence(win.VK_HOME, win.VK_DOWN, win.VK_RETURN, win.VK_ESCAPE)
-		}
+		// Resurrect option + close dialog
+		SelectNPCTradeOption(mercNPC) // "resurrect" is same position as "trade" for merc NPCs
+		utils.Sleep(200)
+		step.CloseAllMenus()
 	}
 }
 

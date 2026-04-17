@@ -13,7 +13,7 @@ import (
 
 func (gd *GameReader) Monsters(playerPosition data.Position, hover data.HoverData) data.Monsters {
 	baseAddr := gd.Process.moduleBaseAddressPtr + gd.offset.UnitTable + 1024
-	unitTableBuffer := gd.Process.ReadBytesFromMemory(baseAddr, 128*8)
+	unitTableBuffer := gd.reader.ReadBytesFromMemory(baseAddr, 128*8)
 
 	monsters := data.Monsters{}
 	for i := 0; i < 128; i++ {
@@ -21,32 +21,32 @@ func (gd *GameReader) Monsters(playerPosition data.Position, hover data.HoverDat
 		monsterUnitPtr := uintptr(ReadUIntFromBuffer(unitTableBuffer, uint(monsterOffset), Uint64))
 		for monsterUnitPtr > 0 {
 			// Quick corpse check first
-			isCorpse := gd.Process.ReadUInt(monsterUnitPtr+0x1AE, Uint8)
+			isCorpse := gd.reader.ReadUInt(monsterUnitPtr+0x1AE, Uint8)
 			if isCorpse != 0 {
-				monsterUnitPtr = uintptr(gd.Process.ReadUInt(monsterUnitPtr+0x158, Uint64))
+				monsterUnitPtr = uintptr(gd.reader.ReadUInt(monsterUnitPtr+0x158, Uint64))
 				continue
 			}
 
-			monsterDataBuffer := gd.Process.ReadBytesFromMemory(monsterUnitPtr, 144)
+			monsterDataBuffer := gd.reader.ReadBytesFromMemory(monsterUnitPtr, 144)
 			txtFileNo := ReadUIntFromBuffer(monsterDataBuffer, 0x04, Uint32)
 			unitID := ReadUIntFromBuffer(monsterDataBuffer, 0x08, Uint32)
 
 			// Get stats early for filtering
 			statsListExPtr := uintptr(ReadUIntFromBuffer(monsterDataBuffer, 0x88, Uint64))
-			statPtr := uintptr(gd.Process.ReadUInt(statsListExPtr+0x30, Uint64))
-			statCount := gd.Process.ReadUInt(statsListExPtr+0x38, Uint64)
+			statPtr := uintptr(gd.reader.ReadUInt(statsListExPtr+0x30, Uint64))
+			statCount := gd.reader.ReadUInt(statsListExPtr+0x38, Uint64)
 			stats := gd.getMonsterStats(statCount, statPtr)
 
 			if !gd.shouldBeIgnored(txtFileNo) || stats[stat.Experience] > 0 {
-				monsterMode := mode.NpcMode(gd.Process.ReadUInt(monsterUnitPtr+0x0c, Uint32))
+				monsterMode := mode.NpcMode(gd.reader.ReadUInt(monsterUnitPtr+0x0c, Uint32))
 				unitDataPtr := uintptr(ReadUIntFromBuffer(monsterDataBuffer, 0x10, Uint64))
-				flag := gd.Process.ReadBytesFromMemory(unitDataPtr+0x1A, Uint8)[0]
-				//unitDataBuffer := gd.Process.ReadBytesFromMemory(unitDataPtr, 144)
+				flag := gd.reader.ReadBytesFromMemory(unitDataPtr+0x1A, Uint8)[0]
+				//unitDataBuffer := gd.reader.ReadBytesFromMemory(unitDataPtr, 144)
 
 				// Coordinates (X, Y)
-				pathPtr := uintptr(gd.Process.ReadUInt(monsterUnitPtr+0x38, Uint64))
-				posX := gd.Process.ReadUInt(pathPtr+0x02, Uint16)
-				posY := gd.Process.ReadUInt(pathPtr+0x06, Uint16)
+				pathPtr := uintptr(gd.reader.ReadUInt(monsterUnitPtr+0x38, Uint64))
+				posX := gd.reader.ReadUInt(pathPtr+0x02, Uint16)
+				posY := gd.reader.ReadUInt(pathPtr+0x06, Uint16)
 
 				states := gd.GetStates(statsListExPtr)
 
@@ -65,7 +65,7 @@ func (gd *GameReader) Monsters(playerPosition data.Position, hover data.HoverDat
 				})
 			}
 
-			monsterUnitPtr = uintptr(gd.Process.ReadUInt(monsterUnitPtr+0x158, Uint64))
+			monsterUnitPtr = uintptr(gd.reader.ReadUInt(monsterUnitPtr+0x158, Uint64))
 		}
 	}
 
@@ -82,7 +82,7 @@ func (gd *GameReader) Monsters(playerPosition data.Position, hover data.HoverDat
 
 func (gd *GameReader) Corpses(playerPosition data.Position, hover data.HoverData) data.Monsters {
 	baseAddr := gd.Process.moduleBaseAddressPtr + gd.offset.UnitTable + 1024
-	unitTableBuffer := gd.Process.ReadBytesFromMemory(baseAddr, 128*8)
+	unitTableBuffer := gd.reader.ReadBytesFromMemory(baseAddr, 128*8)
 
 	corpses := data.Monsters{}
 
@@ -90,28 +90,28 @@ func (gd *GameReader) Corpses(playerPosition data.Position, hover data.HoverData
 		monsterOffset := 8 * i
 		monsterUnitPtr := uintptr(ReadUIntFromBuffer(unitTableBuffer, uint(monsterOffset), Uint64))
 		for monsterUnitPtr > 0 {
-			isCorpse := gd.Process.ReadUInt(monsterUnitPtr+0x1AE, Uint8)
+			isCorpse := gd.reader.ReadUInt(monsterUnitPtr+0x1AE, Uint8)
 			if isCorpse == 0 {
-				monsterUnitPtr = uintptr(gd.Process.ReadUInt(monsterUnitPtr+0x158, Uint64))
+				monsterUnitPtr = uintptr(gd.reader.ReadUInt(monsterUnitPtr+0x158, Uint64))
 				continue
 			}
 
-			monsterDataBuffer := gd.Process.ReadBytesFromMemory(monsterUnitPtr, 144)
+			monsterDataBuffer := gd.reader.ReadBytesFromMemory(monsterUnitPtr, 144)
 			txtFileNo := ReadUIntFromBuffer(monsterDataBuffer, 0x04, Uint32)
 
 			statsListExPtr := uintptr(ReadUIntFromBuffer(monsterDataBuffer, 0x88, Uint64))
-			statPtr := uintptr(gd.Process.ReadUInt(statsListExPtr+0x30, Uint64))
-			statCount := gd.Process.ReadUInt(statsListExPtr+0x38, Uint64)
+			statPtr := uintptr(gd.reader.ReadUInt(statsListExPtr+0x30, Uint64))
+			statCount := gd.reader.ReadUInt(statsListExPtr+0x38, Uint64)
 			stats := gd.getMonsterStats(statCount, statPtr)
 
 			if !gd.shouldBeIgnored(txtFileNo) || stats[stat.Experience] > 0 {
 				unitID := ReadUIntFromBuffer(monsterDataBuffer, 0x08, Uint32)
 				unitDataPtr := uintptr(ReadUIntFromBuffer(monsterDataBuffer, 0x10, Uint64))
-				flag := gd.Process.ReadBytesFromMemory(unitDataPtr+0x1A, Uint8)[0]
+				flag := gd.reader.ReadBytesFromMemory(unitDataPtr+0x1A, Uint8)[0]
 
-				pathPtr := uintptr(gd.Process.ReadUInt(monsterUnitPtr+0x38, Uint64))
-				posX := gd.Process.ReadUInt(pathPtr+0x02, Uint16)
-				posY := gd.Process.ReadUInt(pathPtr+0x06, Uint16)
+				pathPtr := uintptr(gd.reader.ReadUInt(monsterUnitPtr+0x38, Uint64))
+				posX := gd.reader.ReadUInt(pathPtr+0x02, Uint16)
+				posY := gd.reader.ReadUInt(pathPtr+0x06, Uint16)
 
 				states := gd.GetStates(statsListExPtr)
 
@@ -129,7 +129,7 @@ func (gd *GameReader) Corpses(playerPosition data.Position, hover data.HoverData
 				})
 			}
 
-			monsterUnitPtr = uintptr(gd.Process.ReadUInt(monsterUnitPtr+0x158, Uint64))
+			monsterUnitPtr = uintptr(gd.reader.ReadUInt(monsterUnitPtr+0x158, Uint64))
 		}
 	}
 
@@ -162,7 +162,7 @@ func (gd *GameReader) getMonsterStats(statCount uint, statPtr uintptr) map[stat.
 	stats := map[stat.ID]int{}
 
 	if statCount > 0 {
-		statBuffer := gd.Process.ReadBytesFromMemory(statPtr+0x2, statCount*8)
+		statBuffer := gd.reader.ReadBytesFromMemory(statPtr+0x2, statCount*8)
 		for i := 0; i < int(statCount); i++ {
 			offset := uint(i * 8)
 			statEnum := ReadUIntFromBuffer(statBuffer, offset, Uint16)

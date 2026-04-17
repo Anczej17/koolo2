@@ -11,13 +11,21 @@ import (
 	"time"
 
 	"local/internal/svc/internal/gamelib/data"
+	"local/internal/svc/internal/gamelib/data/area"
 	"local/internal/svc/internal/gamelib/data/skill"
 	"local/internal/svc/internal/gamelib/data/stat"
+	"local/internal/svc/internal/presenter"
 )
 
 type GameReader struct {
 	offset Offset
 	*Process
+
+	// reader is the source of truth for all D2R memory reads. Defaults to
+	// the embedded *Process (RPM path). Phase A of P1-GID attaches a
+	// SnapshotReader via AttachSnapshot so reads come from the rmod-populated
+	// SHM snapshot (in-process, zero syscall), eliminating app.exe → D2R RPM.
+	reader Reader
 
 	monstersLastUpdate  time.Time
 	inventoryLastUpdate time.Time
@@ -55,10 +63,77 @@ func NewGameReader(process *Process) *GameReader {
 	return &GameReader{
 		offset:              calculateOffsets(process),
 		Process:             process,
+		reader:              process, // default reader = RPM path; AttachSnapshot switches it.
 		monstersLastUpdate:  time.Time{},
 		inventoryLastUpdate: time.Time{},
 		objectsLastUpdate:   time.Time{},
 	}
+}
+
+// AttachSnapshot swaps the memory-read source from RPM (*Process) to the
+// in-process SHM snapshot written by rmod. Must be called AFTER the
+// SnapshotReader has observed its first tick (use WaitForFirstTick).
+// Per P1_GID_PLAN.md the caller hard-fails if SR isn't ready — no silent
+// fallback to RPM.
+func (gd *GameReader) AttachSnapshot(sr *SnapshotReader) {
+	gd.reader = sr
+}
+
+// SnapshotInitOffsets returns the three D2R virtual addresses rmod needs to
+// walk the player-unit pointer chain. Helper for wiring presenter.SnapshotInit
+// from bot integration code without exporting the Offset struct or module base.
+func (gd *GameReader) SnapshotInitOffsets() (unitTableVA, expansionVA, waypointVA uint64) {
+	base := uint64(gd.moduleBaseAddressPtr)
+	return base + uint64(gd.offset.UnitTable),
+		base + uint64(gd.offset.Expansion),
+		base + uint64(gd.offset.WaypointTableOffset)
+}
+
+// SnapshotStaticEntries returns the fixed-address D2R regions rmod should mirror
+// every tick (Phase B2). Bot calls presenter.WriteSnapshotStatics(entries) BEFORE
+// presenter.SnapshotInit so rmod sees them on first dispatch. Regular entries
+// cover the simple "ReadBytes/ReadUInt at fixed VA" dispatches in GetData();
+// Role-tagged entries trigger chain walking inside rmod (Phase B2b) so reads
+// past the first deref (Ping struct, QuestInfo flags buffer, TerrorZones
+// zones array) also land in snapshot coverage.
+func (gd *GameReader) SnapshotStaticEntries() []presenter.SnapshotStatic {
+	base := uint64(gd.moduleBaseAddressPtr)
+	return []presenter.SnapshotStatic{
+		// HoveredData: 12 B at moduleBase + offset.Hover
+		{VA: base + uint64(gd.offset.Hover), Len: 12},
+		// OpenMenus/IsIngame/HasMerc share the UI buffer at uiBase = moduleBase + offset.UI - 0xA,
+		// length 0x16D covers all accessed indices including the +0xA map-shown byte.
+		{VA: base + uint64(gd.offset.UI) - 0xA, Len: 0x16D},
+		// LegacyGraphics: 1 B (Uint8) — pad to 8 B for safe alignment.
+		{VA: base + uint64(gd.offset.LegacyGraphics), Len: 8},
+		// FPS: Uint32 read — pad to 8 B.
+		{VA: base + uint64(gd.offset.FPS), Len: 8},
+		// Selected character name + last game name/password — UTF-16 strings,
+		// 0x80 B buffer covers typical names.
+		{VA: base + uint64(gd.offset.SelectedCharName), Len: 0x80},
+		{VA: base + uint64(gd.offset.LastGameName), Len: 0x80},
+		{VA: base + uint64(gd.offset.LastGamePassword), Len: 0x80},
+		// B2b: KeyBindings — two pure-static 0x500 blobs.
+		{VA: base + uint64(gd.offset.KeyBindingsOffset), Len: 0x500},
+		{VA: base + uint64(gd.offset.KeyBindingsSkillsOffset), Len: 0x500},
+		// B2b: Ping — 8 B ptr slot; rmod walker derefs and mirrors 40 B at target (Go reads +0x24 as Uint32).
+		{VA: base + uint64(gd.offset.Ping), Len: 8, Role: presenter.SnapshotStaticRolePingChain},
+		// B2b: QuestInfo — 8 B ptr slot; rmod walker dereferences twice and mirrors 82 B at innermost.
+		{VA: base + uint64(gd.offset.QuestInfo), Len: 8, Role: presenter.SnapshotStaticRoleQuestChain},
+		// B2b: TerrorZones — 16 B head (ptr @0, count @8); rmod walker mirrors count*4 B zones array.
+		{VA: base + uint64(gd.offset.TZ), Len: 16, Role: presenter.SnapshotStaticRoleTZChain},
+		// B3: Roster — 8 B ptr slot; rmod walker mirrors party struct head + linked list via +0x148.
+		{VA: base + uint64(gd.offset.RosterOffset), Len: 8, Role: presenter.SnapshotStaticRoleRosterChain},
+	}
+}
+
+// ReaderSource returns a short identifier of which reader is currently
+// serving memory reads ("rpm" or "snapshot"). Used for debug/log purposes.
+func (gd *GameReader) ReaderSource() string {
+	if _, ok := gd.reader.(*SnapshotReader); ok {
+		return "snapshot"
+	}
+	return "rpm"
 }
 
 func (gd *GameReader) GetData() data.Data {
@@ -66,51 +141,100 @@ func (gd *GameReader) GetData() data.Data {
 		gd.offset = calculateOffsets(gd.Process)
 	}
 
-	// Always refresh core player data
+	// Layer 3: flush per-tick chunk cache so field reads load fresh data.
+	// No-op when STEALTH_READ is off (cache never populated).
+	gd.Process.FlushChunkCache()
+
+	// Prerequisites (order-dependent — consumed by downstream dispatches).
 	rawPlayerUnits := gd.GetRawPlayerUnits()
 	mainPlayerUnit := rawPlayerUnits.GetMainPlayer()
 	pu := gd.GetPlayerUnit(mainPlayerUnit)
 	hover := gd.HoveredData()
-
 	now := time.Now()
 
-	// Conditionally update monsters
-	monsters := gd.cachedMonsters
-	if now.Sub(gd.monstersLastUpdate) > 200*time.Millisecond {
-		monsters = gd.Monsters(pu.Position, hover)
-		gd.cachedMonsters = monsters
-		gd.monstersLastUpdate = now
+	// Layer 1: Independent dispatch block. Shuffled per-tick when
+	// STEALTH_READ=1 so Warden-style fixed-sequence fingerprinting on our
+	// RPM trace is broken. When STEALTH_READ is unset, the natural
+	// [0..N-1] order is used — matches upstream koolo exactly.
+	var (
+		monsters                   data.Monsters
+		inventory                  data.Inventory
+		objects                    []data.Object
+		corpses                    data.Monsters
+		corpseUnit                 RawPlayerUnit
+		roster                     data.Roster
+		openMenus                  data.OpenMenus
+		entrances                  data.Entrances
+		terrorZones                []area.ID
+		keyBindings                data.KeyBindings
+		hasMerc                    bool
+		activeSlot                 int
+		legacyGfx                  bool
+		isIngame                   bool
+		lastGameName, lastGamePass string
+		fps, ping                  int
+		gameQuestsBytes            []byte
+	)
+
+	dispatches := []func(){
+		func() {
+			if now.Sub(gd.monstersLastUpdate) > JitterDuration(200*time.Millisecond, 0.10) {
+				monsters = gd.Monsters(pu.Position, hover)
+				gd.cachedMonsters = monsters
+				gd.monstersLastUpdate = now
+			} else {
+				monsters = gd.cachedMonsters
+			}
+		},
+		func() {
+			if now.Sub(gd.inventoryLastUpdate) > JitterDuration(500*time.Millisecond, 0.10) ||
+				(hover.IsHovered && hover.UnitType == 4) {
+				inventory = gd.Inventory(rawPlayerUnits, hover)
+				gd.cachedInventory = inventory
+				gd.inventoryLastUpdate = now
+			} else {
+				inventory = gd.cachedInventory
+			}
+		},
+		func() {
+			if now.Sub(gd.objectsLastUpdate) > JitterDuration(200*time.Millisecond, 0.10) {
+				objects = gd.Objects(pu.Position, hover)
+				gd.cachedObjects = objects
+				gd.objectsLastUpdate = now
+			} else {
+				objects = gd.cachedObjects
+			}
+		},
+		func() { corpseUnit = rawPlayerUnits.GetCorpse() },
+		func() { corpses = gd.Corpses(pu.Position, hover) },
+		func() { roster = gd.getRoster(rawPlayerUnits) },
+		func() { openMenus = gd.OpenMenus() },
+		func() {
+			questDataPtr := uintptr(gd.reader.ReadUInt(gd.moduleBaseAddressPtr+gd.offset.QuestInfo, Uint64))
+			flagsBufferPtr := uintptr(gd.reader.ReadUInt(questDataPtr, Uint64))
+			gameQuestsBytes = gd.reader.ReadBytesFromMemory(flagsBufferPtr, 82)
+		},
+		func() { entrances = gd.Entrances(pu.Position, hover) },
+		func() { terrorZones = gd.TerrorZones() },
+		func() { keyBindings = gd.GetKeyBindings() },
+		func() { hasMerc = gd.HasMerc() },
+		func() { activeSlot = gd.GetActiveWeaponSlot() },
+		func() { legacyGfx = gd.LegacyGraphics() },
+		func() { isIngame = gd.IsIngame() },
+		func() {
+			lastGameName = gd.LastGameName()
+			lastGamePass = gd.LastGamePass()
+			fps = gd.FPS()
+			ping = gd.Ping()
+		},
 	}
 
-	// Conditionally update inventory 500ms
-	// Except when hovering over an item
-	inventory := gd.cachedInventory
-	if now.Sub(gd.inventoryLastUpdate) > 500*time.Millisecond ||
-		(hover.IsHovered && hover.UnitType == 4) { // 4 = Item type
-		inventory = gd.Inventory(rawPlayerUnits, hover)
-		gd.cachedInventory = inventory
-		gd.inventoryLastUpdate = now
+	order := dispatchOrder(len(dispatches))
+	for _, i := range order {
+		dispatches[i]()
 	}
 
-	// Conditionally update objects
-	objects := gd.cachedObjects
-	if now.Sub(gd.objectsLastUpdate) > 200*time.Millisecond {
-		objects = gd.Objects(pu.Position, hover)
-		gd.cachedObjects = objects
-		gd.objectsLastUpdate = now
-	}
-
-	// Always update other critical data
-	corpseUnit := rawPlayerUnits.GetCorpse()
-	roster := gd.getRoster(rawPlayerUnits)
-	openMenus := gd.OpenMenus()
-
-	// Quests
-	questDataPtr := uintptr(gd.Process.ReadUInt(gd.moduleBaseAddressPtr+gd.offset.QuestInfo, Uint64))
-	flagsBufferPtr := uintptr(gd.Process.ReadUInt(questDataPtr, Uint64))
-	gameQuestsBytes := gd.Process.ReadBytesFromMemory(flagsBufferPtr, 82)
-
-	d := data.Data{
+	return data.Data{
 		Corpse: data.Corpse{
 			Found:     corpseUnit.Address != 0,
 			IsHovered: corpseUnit.IsHovered,
@@ -118,36 +242,42 @@ func (gd *GameReader) GetData() data.Data {
 			States:    corpseUnit.States,
 		},
 		Game: data.OnlineGame{
-			LastGameName:     gd.LastGameName(),
-			LastGamePassword: gd.LastGamePass(),
-			FPS:              gd.FPS(),
-			Ping:             gd.Ping(),
+			LastGameName:     lastGameName,
+			LastGamePassword: lastGamePass,
+			FPS:              fps,
+			Ping:             ping,
 		},
-		Monsters:       monsters,
-		Corpses:        gd.Corpses(pu.Position, hover),
-		PlayerUnit:     pu,
-		Inventory:      inventory,
-		Objects:        objects,
-		Entrances:      gd.Entrances(pu.Position, hover),
-		OpenMenus:      openMenus,
-		Roster:         roster,
-		HoverData:      hover,
-		TerrorZones:    gd.TerrorZones(),
-		Quests:         gd.getQuests(gameQuestsBytes),
-		KeyBindings:    gd.GetKeyBindings(),
-		LegacyGraphics: gd.LegacyGraphics(),
-		IsIngame:       gd.IsIngame(),
-
-		// These use the Panel Manager which is heavy to read. Use the functions below instead.
-		//IsOnline:       		   gd.IsOnline(),
-		//IsInCharCreationScreen:  gd.IsInCharacterCreationScreen(),
-		//IsInLobby:               gd.IsInLobby(),
-		//IsInCharSelectionScreen: gd.IsInCharacterSelectionScreen(),
-		HasMerc:          gd.HasMerc(),
-		ActiveWeaponSlot: gd.GetActiveWeaponSlot(),
+		Monsters:         monsters,
+		Corpses:          corpses,
+		PlayerUnit:       pu,
+		Inventory:        inventory,
+		Objects:          objects,
+		Entrances:        entrances,
+		OpenMenus:        openMenus,
+		Roster:           roster,
+		HoverData:        hover,
+		TerrorZones:      terrorZones,
+		Quests:           gd.getQuests(gameQuestsBytes),
+		KeyBindings:      keyBindings,
+		LegacyGraphics:   legacyGfx,
+		IsIngame:         isIngame,
+		HasMerc:          hasMerc,
+		ActiveWeaponSlot: activeSlot,
 	}
+}
 
-	return d
+// dispatchOrder returns the order in which GetData's independent subsystem
+// dispatches execute. When STEALTH_READ=1 the order is a fresh per-tick
+// permutation (Layer 1); otherwise natural [0..n-1] matching upstream.
+func dispatchOrder(n int) []int {
+	if !StealthEnabled() {
+		out := make([]int, n)
+		for i := range out {
+			out[i] = i
+		}
+		return out
+	}
+	return ShufflePermutation(n)
 }
 
 func (gd *GameReader) GetInventory() data.Inventory {
@@ -165,9 +295,9 @@ func (gd *GameReader) InGame() bool {
 func (gd *GameReader) OpenMenus() data.OpenMenus {
 	uiBase := gd.Process.moduleBaseAddressPtr + gd.offset.UI - 0xA
 
-	buffer := gd.Process.ReadBytesFromMemory(uiBase, 0x16D)
+	buffer := gd.reader.ReadBytesFromMemory(uiBase, 0x16D)
 
-	isMapShown := gd.Process.ReadUInt(gd.Process.moduleBaseAddressPtr+gd.offset.UI, Uint8)
+	isMapShown := gd.reader.ReadUInt(gd.Process.moduleBaseAddressPtr+gd.offset.UI, Uint8)
 
 	return data.OpenMenus{
 		Inventory:      buffer[0x01] != 0,
@@ -196,7 +326,7 @@ func (gd *GameReader) OpenMenus() data.OpenMenus {
 
 func (gd *GameReader) HoveredData() data.HoverData {
 	hoverAddressPtr := gd.Process.moduleBaseAddressPtr + gd.offset.Hover
-	hoverBuffer := gd.Process.ReadBytesFromMemory(hoverAddressPtr, 12)
+	hoverBuffer := gd.reader.ReadBytesFromMemory(hoverAddressPtr, 12)
 	isUnitHovered := ReadUIntFromBuffer(hoverBuffer, 0, Uint16)
 	if isUnitHovered > 0 {
 		hoveredType := ReadUIntFromBuffer(hoverBuffer, 0x04, Uint32)
@@ -213,7 +343,7 @@ func (gd *GameReader) HoveredData() data.HoverData {
 }
 
 func (gd *GameReader) getStatsList(statListPtr uintptr) stat.Stats {
-	statsListBuffer := gd.ReadBytesFromMemory(statListPtr, 0x10)
+	statsListBuffer := gd.reader.ReadBytesFromMemory(statListPtr, 0x10)
 	statList := ReadUIntFromBuffer(statsListBuffer, 0, Uint64)
 	statCount := ReadUIntFromBuffer(statsListBuffer, 0x08, Uint64)
 	if statCount == 0 {
@@ -222,7 +352,7 @@ func (gd *GameReader) getStatsList(statListPtr uintptr) stat.Stats {
 
 	var stats = make([]stat.Data, 0)
 
-	statBuffer := gd.Process.ReadBytesFromMemory(uintptr(statList), statCount*10)
+	statBuffer := gd.reader.ReadBytesFromMemory(uintptr(statList), statCount*10)
 	for i := 0; i < int(statCount); i++ {
 		offset := uint(i * 8)
 
@@ -322,7 +452,7 @@ func (gd *GameReader) InCharacterSelectionScreen() bool {
 }
 
 func (gd *GameReader) GetSelectedCharacterName() string {
-	return gd.Process.ReadStringFromMemory(gd.Process.moduleBaseAddressPtr+gd.offset.SelectedCharName, 0)
+	return gd.reader.ReadStringFromMemory(gd.Process.moduleBaseAddressPtr+gd.offset.SelectedCharName, 0)
 }
 
 func (gd *GameReader) GetExpChar() uint {
@@ -332,7 +462,7 @@ func (gd *GameReader) GetExpChar() uint {
 }
 
 func (gd *GameReader) LegacyGraphics() bool {
-	return gd.ReadUInt(gd.Process.moduleBaseAddressPtr+gd.offset.LegacyGraphics, Uint8) != 0
+	return gd.reader.ReadUInt(gd.Process.moduleBaseAddressPtr+gd.offset.LegacyGraphics, Uint8) != 0
 }
 
 func (gd *GameReader) IsOnline() bool {
@@ -341,7 +471,7 @@ func (gd *GameReader) IsOnline() bool {
 }
 
 func (gd *GameReader) IsIngame() bool {
-	return gd.ReadUInt(gd.Process.moduleBaseAddressPtr+gd.offset.UI-0xA, 1) == 1
+	return gd.reader.ReadUInt(gd.Process.moduleBaseAddressPtr+gd.offset.UI-0xA, 1) == 1
 }
 
 func (gd *GameReader) IsInLobby() bool {
@@ -476,25 +606,25 @@ func (gd *GameReader) IsDismissableModalPresent() (bool, string) {
 }
 
 func (gd *GameReader) LastGameName() string {
-	return gd.ReadStringFromMemory(gd.moduleBaseAddressPtr+gd.offset.LastGameName, 0)
+	return gd.reader.ReadStringFromMemory(gd.moduleBaseAddressPtr+gd.offset.LastGameName, 0)
 }
 
 func (gd *GameReader) LastGamePass() string {
-	return gd.ReadStringFromMemory(gd.moduleBaseAddressPtr+gd.offset.LastGamePassword, 0)
+	return gd.reader.ReadStringFromMemory(gd.moduleBaseAddressPtr+gd.offset.LastGamePassword, 0)
 }
 
 func (gd *GameReader) FPS() int {
-	return int(gd.ReadUInt(gd.moduleBaseAddressPtr+gd.offset.FPS, Uint32))
+	return int(gd.reader.ReadUInt(gd.moduleBaseAddressPtr+gd.offset.FPS, Uint32))
 }
 
 func (gd *GameReader) Ping() int {
 	ptrToStructPtr := gd.moduleBaseAddressPtr + gd.offset.Ping
-	structPtrAddr := gd.ReadUInt(ptrToStructPtr, Uint64)
-	return int(gd.ReadUInt(uintptr(structPtrAddr+36), Uint32))
+	structPtrAddr := gd.reader.ReadUInt(ptrToStructPtr, Uint64)
+	return int(gd.reader.ReadUInt(uintptr(structPtrAddr+36), Uint32))
 }
 
 func (gd *GameReader) HasMerc() bool {
-	return gd.ReadUInt(gd.Process.moduleBaseAddressPtr+gd.offset.UI+0x8, Uint8) != 0
+	return gd.reader.ReadUInt(gd.Process.moduleBaseAddressPtr+gd.offset.UI+0x8, Uint8) != 0
 }
 
 // GetWidgetState reference : https://github.com/ResurrectedTrader/ResurrectedTrade/blob/f121ec02dd3fbe1c574f713e5a0c2db92ccca821/ResurrectedTrade.AgentBase/Capture.cs#L618

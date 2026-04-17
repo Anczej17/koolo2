@@ -6,6 +6,7 @@ import (
 	"unsafe"
 
 	"golang.org/x/sys/windows"
+	"local/internal/svc/internal/utils"
 )
 
 const (
@@ -81,12 +82,12 @@ func KillAllClientHandles() error {
 	info := (*systemHandleInformationStruct)(unsafe.Pointer(&buf[0]))
 	handleCount := info.NumberOfHandles
 	handleSize := unsafe.Sizeof(systemHandleTableEntryInfo{})
-	base := uintptr(unsafe.Pointer(&info.Handles[0]))
+	base := unsafe.Pointer(&info.Handles[0])
 
 	currentPid := windows.GetCurrentProcessId()
 
 	for i := uint32(0); i < handleCount; i++ {
-		entry := (*systemHandleTableEntryInfo)(unsafe.Pointer(base + uintptr(i)*handleSize))
+		entry := (*systemHandleTableEntryInfo)(unsafe.Add(base, uintptr(i)*handleSize))
 		pid := uint32(entry.UniqueProcessId)
 
 		if !d2rPids[pid] || pid == currentPid {
@@ -152,7 +153,7 @@ func findD2RPids() (map[uint32]bool, error) {
 
 	for {
 		name := windows.UTF16ToString(pe.ExeFile[:])
-		if strings.EqualFold(name, "d2r.exe") {
+		if strings.EqualFold(name, utils.GameExeName()) {
 			pids[pe.ProcessID] = true
 		}
 		err = windows.Process32Next(snapshot, &pe)

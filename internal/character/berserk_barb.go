@@ -31,7 +31,7 @@ const (
 	findItemRange     = 5
 )
 
-func (s Berserker) ShouldIgnoreMonster(m data.Monster) bool {
+func (s *Berserker) ShouldIgnoreMonster(m data.Monster) bool {
 	return false
 }
 
@@ -161,10 +161,8 @@ func (s *Berserker) PerformBerserkAttack(monsterID data.UnitID) {
 	}
 
 	// Ensure Berserk skill is active
-	berserkKey, found := s.Data.KeyBindings.KeyBindingForSkill(skill.Berserk)
-	if found && s.Data.PlayerUnit.RightSkill != skill.Berserk {
-		ctx.HID.PressKeyBinding(berserkKey)
-		time.Sleep(50 * time.Millisecond)
+	if s.Data.PlayerUnit.RightSkill != skill.Berserk {
+		_ = step.SelectRightSkill(skill.Berserk)
 	}
 
 	screenX, screenY := ctx.PathFinder.GameCoordsToScreenCords(monster.Position.X, monster.Position.Y)
@@ -310,8 +308,7 @@ func (s *Berserker) FindItemOnNearbyCorpses(maxRange int) {
 	}
 
 
-	findItemKey, found := s.Data.KeyBindings.KeyBindingForSkill(skill.FindItem)
-	if !found {
+	if _, found := s.Data.KeyBindings.KeyBindingForSkill(skill.FindItem); !found {
 		return
 	}
 
@@ -378,7 +375,12 @@ func (s *Berserker) FindItemOnNearbyCorpses(maxRange int) {
 					"current", ctx.Data.ActiveWeaponSlot)
 				// Force multiple swap attempts as last resort
 				for i := 0; i < 10; i++ {
-					ctx.HID.PressKey('W')
+					if ctx.CharacterCfg.PacketCasting.UseForWeaponSwap && ctx.PacketSender != nil {
+						fL, fR, tL, tR := action.WeaponSwapGIDs(ctx.Data)
+						ctx.PacketSender.SwapWeapon(fL, fR, tL, tR)
+					} else {
+						ctx.HID.PressKey('W')
+					}
 					time.Sleep(200 * time.Millisecond)
 					ctx.RefreshGameData()
 					if ctx.Data.ActiveWeaponSlot == originalSlot {
@@ -437,8 +439,7 @@ func (s *Berserker) FindItemOnNearbyCorpses(maxRange int) {
 
 		// Make sure Find Item is on right-click
 		if s.Data.PlayerUnit.RightSkill != skill.FindItem {
-			ctx.HID.PressKeyBinding(findItemKey)
-			time.Sleep(50 * time.Millisecond)
+			_ = step.SelectRightSkill(skill.FindItem)
 		}
 
 		clickPos := s.getOptimalClickPosition(corpse)
@@ -572,7 +573,12 @@ func (s *Berserker) SwapToSlot(slot int) bool {
 			return true
 		}
 
-		ctx.HID.PressKey('W')
+		if ctx.CharacterCfg.PacketCasting.UseForWeaponSwap && ctx.PacketSender != nil {
+			fL, fR, tL, tR := action.WeaponSwapGIDs(ctx.Data)
+			ctx.PacketSender.SwapWeapon(fL, fR, tL, tR)
+		} else {
+			ctx.HID.PressKey('W')
+		}
 		time.Sleep(retryDelay)
 		ctx.RefreshGameData()
 

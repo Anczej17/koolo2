@@ -32,7 +32,12 @@ func ensureActiveWeaponSlot(ctx *context.Status, slot int) error {
 	}
 
 	for attempt := 0; attempt < 3; attempt++ {
-		ctx.HID.PressKeyBinding(ctx.Data.KeyBindings.SwapWeapons)
+		if ctx.CharacterCfg.PacketCasting.UseForWeaponSwap && ctx.PacketSender != nil {
+			fL, fR, tL, tR := action.WeaponSwapGIDs(ctx.Data)
+			ctx.PacketSender.SwapWeapon(fL, fR, tL, tR)
+		} else {
+			ctx.HID.PressKeyBinding(ctx.Data.KeyBindings.SwapWeapons)
+		}
 		utils.PingSleep(utils.Light, 150)
 		ctx.RefreshGameData()
 		if ctx.Data.ActiveWeaponSlot == slot {

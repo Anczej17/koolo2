@@ -4,133 +4,55 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
-	"slices"
 	"strings"
 
-	"github.com/bwmarrin/discordgo"
 	"local/internal/svc/internal/bot"
 	"local/internal/svc/internal/config"
 	"local/internal/svc/internal/remote/discord/enrichment"
 )
 
 type Bot struct {
-	discordSession    *discordgo.Session
 	channelID         string
 	itemChannelID     string
 	manager           *bot.SupervisorManager
-	useWebhook        bool
 	webhookClient     *webhookClient
 	itemWebhook       *webhookClient
 	enrichmentService *enrichment.Service
 }
 
 func NewBot(token, channelID, itemChannelID string, manager *bot.SupervisorManager, useWebhook bool, webhookURL, itemWebhookURL string) (*Bot, error) {
-	botInstance := &Bot{
+	if !useWebhook {
+		return nil, fmt.Errorf("discord gateway mode is no longer supported; enable webhook mode and configure webhook URL")
+	}
+	if strings.TrimSpace(webhookURL) == "" {
+		return nil, fmt.Errorf("webhook URL is required")
+	}
+
+	b := &Bot{
 		channelID:     channelID,
 		itemChannelID: strings.TrimSpace(itemChannelID),
 		manager:       manager,
-		useWebhook:    useWebhook,
-		webhookClient: nil,
-		itemWebhook:   nil,
+		webhookClient: newWebhookClient(webhookURL),
+	}
+	if strings.TrimSpace(itemWebhookURL) != "" {
+		b.itemWebhook = newWebhookClient(itemWebhookURL)
 	}
 
-	// Initialize enrichment service if enabled
 	if config.App.Discord.EnableFancyItemDrops {
 		logger := slog.Default()
-
-		// FlareSolverr for bypassing Cloudflare on d2jsp/traderie
 		var flare *enrichment.FlareSolverr
 		if config.App.Discord.FlareSolverrURL != "" || config.App.Discord.D2JSPScraping {
 			flare = enrichment.NewFlareSolverr(config.App.Discord.FlareSolverrURL, logger)
 		}
-
 		d2jspScraper := enrichment.NewD2JSPScraper(config.App.Discord.D2JSPRealm, flare, logger, config.App.Discord.D2JSPCookie)
 		traderieScraper := enrichment.NewTraderieScraper(flare, logger)
-		botInstance.enrichmentService = enrichment.NewService(d2jspScraper, traderieScraper, logger)
+		b.enrichmentService = enrichment.NewService(d2jspScraper, traderieScraper, logger)
 	}
 
-	if useWebhook {
-		if webhookURL == "" {
-			return nil, fmt.Errorf("webhook URL is required when using webhook mode")
-		}
-		botInstance.webhookClient = newWebhookClient(webhookURL)
-		if strings.TrimSpace(itemWebhookURL) != "" {
-			botInstance.itemWebhook = newWebhookClient(itemWebhookURL)
-		}
-		return botInstance, nil
-	}
-
-	dg, err := discordgo.New("Bot " + token)
-	if err != nil {
-		return nil, fmt.Errorf("error creating Discord session: %w", err)
-	}
-
-	botInstance.discordSession = dg
-
-	return botInstance, nil
+	return b, nil
 }
 
 func (b *Bot) Start(ctx context.Context) error {
-	if b.useWebhook {
-		<-ctx.Done()
-		return nil
-	}
-
-	//b.discordSession.Debug = true
-	b.discordSession.AddHandler(b.onMessageCreated)
-	// Add MESSAGE_CONTENT intent to read message content (required by Discord)
-	b.discordSession.Identify.Intents = discordgo.IntentsGuildMessages | discordgo.IntentMessageContent
-	err := b.discordSession.Open()
-	if err != nil {
-		return fmt.Errorf("error opening connection: %w", err)
-	}
-
-	// Wait until context is finished
 	<-ctx.Done()
-
-	return b.discordSession.Close()
-}
-
-func (b *Bot) onMessageCreated(s *discordgo.Session, m *discordgo.MessageCreate) {
-	// Ignore messages from the bot itself
-	if m.Author.ID == s.State.User.ID {
-		return
-	}
-
-	// Debug: Log all received messages (uncomment to debug)
-	// fmt.Printf("[Discord] Message from %s (ID: %s): %s\n", m.Author.Username, m.Author.ID, m.Content)
-
-	// Check if the message is from a bot admin
-	if !slices.Contains(config.App.Discord.BotAdmins, m.Author.ID) {
-		// Debug: Uncomment to see who is trying to use commands
-		// fmt.Printf("[Discord] User %s (ID: %s) not in admin list. Admins: %v\n", m.Author.Username, m.Author.ID, config.App.Discord.BotAdmins)
-		return
-	}
-
-	// Only process messages that start with !
-	if !strings.HasPrefix(m.Content, "!") {
-		return
-	}
-
-	prefix := strings.Split(m.Content, " ")[0]
-	switch prefix {
-	case "!start":
-		b.handleStartRequest(s, m)
-	case "!stop":
-		b.handleStopRequest(s, m)
-	case "!stats":
-		b.handleStatsRequest(s, m)
-	case "!status":
-		b.handleStatusRequest(s, m)
-	case "!list":
-		b.handleListRequest(s, m)
-	case "!help":
-		b.handleHelpRequest(s, m)
-	case "!drops":
-		b.handleDropsRequest(s, m)
-	default:
-		// Unknown command - send help
-		s.ChannelMessageSend(m.ChannelID, fmt.Sprintf("Unknown command: `%s`. Type `!help` for available commands.", prefix))
-	}
-
+	return nil
 }

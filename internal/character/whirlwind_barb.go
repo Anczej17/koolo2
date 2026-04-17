@@ -25,7 +25,7 @@ type WhirlwindBarb struct {
 	horkedCorpses    map[data.UnitID]bool
 }
 
-func (s WhirlwindBarb) ShouldIgnoreMonster(m data.Monster) bool {
+func (s *WhirlwindBarb) ShouldIgnoreMonster(m data.Monster) bool {
 	return false
 }
 
@@ -148,10 +148,8 @@ func (s *WhirlwindBarb) PerformWhirlwindAttack(monsterID data.UnitID) {
 	}
 
 	// Ensure Whirlwind skill is active
-	whirlwindKey, found := s.Data.KeyBindings.KeyBindingForSkill(skill.Whirlwind)
-	if found && s.Data.PlayerUnit.RightSkill != skill.Whirlwind {
-		ctx.HID.PressKeyBinding(whirlwindKey)
-		time.Sleep(50 * time.Millisecond)
+	if s.Data.PlayerUnit.RightSkill != skill.Whirlwind {
+		_ = step.SelectRightSkill(skill.Whirlwind)
 	}
 
 	// Whirlwind position calculation, credit to d2bs/Kolbot
@@ -178,10 +176,8 @@ func (s *WhirlwindBarb) PerformBerserkAttack(monsterID data.UnitID) {
 	}
 
 	// Ensure Berserk skill is active
-	berserkKey, found := s.Data.KeyBindings.KeyBindingForSkill(skill.Berserk)
-	if found && s.Data.PlayerUnit.LeftSkill != skill.Berserk {
-		ctx.HID.PressKeyBinding(berserkKey)
-		time.Sleep(50 * time.Millisecond)
+	if s.Data.PlayerUnit.LeftSkill != skill.Berserk {
+		_ = step.SelectLeftSkill(skill.Berserk)
 	}
 
 	screenX, screenY := ctx.PathFinder.GameCoordsToScreenCords(monster.Position.X, monster.Position.Y)
@@ -192,8 +188,7 @@ func (s *WhirlwindBarb) FindItemOnNearbyCorpses(maxRange int) {
 	ctx := context.Get()
 	ctx.PauseIfNotPriority()
 
-	findItemKey, found := s.Data.KeyBindings.KeyBindingForSkill(skill.FindItem)
-	if !found {
+	if _, found := s.Data.KeyBindings.KeyBindingForSkill(skill.FindItem); !found {
 		return
 	}
 
@@ -227,8 +222,7 @@ func (s *WhirlwindBarb) FindItemOnNearbyCorpses(maxRange int) {
 		}
 		// Make sure Find Item is on right-click
 		if s.Data.PlayerUnit.RightSkill != skill.FindItem {
-			ctx.HID.PressKeyBinding(findItemKey)
-			time.Sleep(50 * time.Millisecond)
+			_ = step.SelectRightSkill(skill.FindItem)
 		}
 
 		clickPos := s.getOptimalClickPosition(corpse)
@@ -353,7 +347,12 @@ func (s *WhirlwindBarb) SwapToSlot(slot int) bool {
 			return true
 		}
 
-		ctx.HID.PressKey('W')
+		if ctx.CharacterCfg.PacketCasting.UseForWeaponSwap && ctx.PacketSender != nil {
+			fL, fR, tL, tR := action.WeaponSwapGIDs(ctx.Data)
+			ctx.PacketSender.SwapWeapon(fL, fR, tL, tR)
+		} else {
+			ctx.HID.PressKey('W')
+		}
 		time.Sleep(retryDelay)
 		ctx.RefreshGameData()
 

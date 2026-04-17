@@ -14,7 +14,6 @@ import (
 	"local/internal/svc/internal/town"
 	"local/internal/svc/internal/ui"
 	"local/internal/svc/internal/utils"
-	"github.com/lxn/win"
 )
 
 // VendorRefillOpts configures vendor refill behavior
@@ -80,12 +79,7 @@ func VendorRefill(opts VendorRefillOpts) (err error) {
 		return err
 	}
 
-	// Jamella trade button is the first one
-	if vendorNPC == npc.Jamella {
-		ctx.HID.KeySequence(win.VK_HOME, win.VK_RETURN)
-	} else {
-		ctx.HID.KeySequence(win.VK_HOME, win.VK_DOWN, win.VK_RETURN)
-	}
+	SelectNPCTradeOption(vendorNPC)
 
 	if opts.SellJunk {
 		if len(opts.LockConfig) > 0 {
@@ -114,12 +108,7 @@ func BuyAtVendor(vendor npc.ID, items ...VendorItemRequest) error {
 		return err
 	}
 
-	// Jamella trade button is the first one
-	if vendor == npc.Jamella {
-		ctx.HID.KeySequence(win.VK_HOME, win.VK_DOWN, win.VK_RETURN)
-	} else {
-		ctx.HID.KeySequence(win.VK_HOME, win.VK_DOWN, win.VK_RETURN)
-	}
+	SelectNPCTradeOption(vendor)
 
 	for _, i := range items {
 		SwitchVendorTab(i.Tab)

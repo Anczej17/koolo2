@@ -38,7 +38,7 @@ func (d Data) ExpCharLabel() string {
 	case 1:
 		return "Classic"
 	case 2:
-		return "Lord of Destruction"
+		return "Expansion"
 	case 3:
 		return "DLC"
 	default:

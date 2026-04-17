@@ -18,6 +18,11 @@ const (
 
 // loadModule manually maps a no_std Rust DLL into D2R and calls Init via APC.
 // Bypasses: LoadLibraryW hooks (manual map), CreateRemoteThread hooks (APC).
+//
+// All verbose progress prints were removed 2026-04-11 — they were compiled
+// into the release binary as identifiable strings ("LM pid=", "VirtualAllocEx",
+// "queueAPC") that Warden could signature-match. Errors still propagate via
+// the return chain. Set LM_TRACE=1 env var to re-enable inline tracing.
 func loadModule(pid uint32, modulePath string, remoteBuf uintptr) error {
 	pe, err := os.ReadFile(modulePath)
 	if err != nil {
@@ -79,16 +84,19 @@ func loadModule(pid uint32, modulePath string, remoteBuf uintptr) error {
 	}
 
 	// Build APC shellcode: calls Init(remoteBuf) then returns.
+	// TEMPORARILY reverted to static stub (pre-R3) to diagnose D2R AV on
+	// inject observed 2026-04-15. Polymorphic version kept below for later.
 	initAddr := remoteBase + uintptr(initRVA)
 	var sc []byte
-	sc = append(sc, 0x48, 0x83, 0xEC, 0x28)       // sub rsp, 0x28
-	sc = append(sc, 0x48, 0xB9)                     // mov rcx, remoteBuf
+	sc = append(sc, 0x48, 0x83, 0xEC, 0x28) // sub rsp, 0x28
+	sc = append(sc, 0x48, 0xB9)             // mov rcx, imm64
 	sc = appendU64(sc, uint64(remoteBuf))
-	sc = append(sc, 0x48, 0xB8)                     // mov rax, initAddr
+	sc = append(sc, 0x48, 0xB8)             // mov rax, imm64
 	sc = appendU64(sc, uint64(initAddr))
-	sc = append(sc, 0xFF, 0xD0)                     // call rax
-	sc = append(sc, 0x48, 0x83, 0xC4, 0x28)         // add rsp, 0x28
-	sc = append(sc, 0xC3)                           // ret
+	sc = append(sc, 0xFF, 0xD0)             // call rax
+	sc = append(sc, 0x48, 0x83, 0xC4, 0x28) // add rsp, 0x28
+	sc = append(sc, 0xC3)                   // ret
+	_ = buildPolymorphicAPCShellcode        // keep ref (silence unused)
 
 	scAddr := remoteBase + uintptr(img.sizeOfImage) - 256
 	if err := windows.WriteProcessMemory(hProc, scAddr, &sc[0], uintptr(len(sc)), nil); err != nil {
@@ -110,7 +118,86 @@ func loadModule(pid uint32, modulePath string, remoteBuf uintptr) error {
 	return nil
 }
 
-// queueAPC finds a D2R thread, suspends it, queues APC, resumes.
+// buildPolymorphicAPCShellcode emits the APC init stub with per-session
+// polymorphism. Behaviour is unchanged — load remoteBuf into RCX, call
+// initAddr, preserve alignment — but every layout byte differs across
+// sessions. Junk blocks come from ntapi.GenerateJunkBlock; stack adjustment
+// and scratch-register selection are randomised.
+func buildPolymorphicAPCShellcode(remoteBuf, initAddr uintptr) []byte {
+	var sc []byte
+
+	// 1. Stack adjust. Randomise between `sub rsp, 0x28` (classic shadow),
+	//    `sub rsp, 0x38` (+ extra 0x10 locals), or push-based variants.
+	switch ntapi.CryptRandN(4) {
+	case 0:
+		sc = append(sc, 0x48, 0x83, 0xEC, 0x28) // sub rsp, 0x28
+	case 1:
+		sc = append(sc, 0x48, 0x83, 0xEC, 0x38) // sub rsp, 0x38 (tighten later)
+	case 2:
+		// push 0 × 5 — reserves 0x28, different opcode sequence
+		sc = append(sc, 0x6A, 0x00) // push 0
+		sc = append(sc, 0x6A, 0x00)
+		sc = append(sc, 0x6A, 0x00)
+		sc = append(sc, 0x6A, 0x00)
+		sc = append(sc, 0x6A, 0x00)
+	default:
+		// lea rsp, [rsp - 0x28]
+		sc = append(sc, 0x48, 0x8D, 0x64, 0x24, 0xD8) // lea rsp,[rsp-0x28]
+	}
+	stackAdj := uint32(0x28)
+	if sc[0] == 0x48 && len(sc) == 4 && sc[2] == 0xEC && sc[3] == 0x38 {
+		stackAdj = 0x38
+	}
+
+	sc = append(sc, ntapi.GenerateJunkBlock()...)
+
+	// 2. Load initAddr first into a scratch register (rax, r10, or r11),
+	//    then reload into our final call target. Two hops = more variants
+	//    than direct-MOV.
+	scratch := []byte{0x48, 0xB8}                  // mov rax, imm64 (default)
+	reloadFromScratch := []byte{0xFF, 0xD0}        // call rax
+	switch ntapi.CryptRandN(3) {
+	case 1:
+		scratch = []byte{0x49, 0xBA}                // mov r10, imm64
+		reloadFromScratch = []byte{0x41, 0xFF, 0xD2} // call r10
+	case 2:
+		scratch = []byte{0x49, 0xBB}                // mov r11, imm64
+		reloadFromScratch = []byte{0x41, 0xFF, 0xD3} // call r11
+	}
+	sc = append(sc, scratch...)
+	sc = appendU64(sc, uint64(initAddr))
+
+	sc = append(sc, ntapi.GenerateJunkBlock()...)
+
+	// 3. Load remoteBuf into RCX (required by x64 Windows ABI — 1st arg).
+	sc = append(sc, 0x48, 0xB9) // mov rcx, imm64
+	sc = appendU64(sc, uint64(remoteBuf))
+
+	sc = append(sc, ntapi.GenerateJunkBlock()...)
+
+	// 4. Call target (via scratch register selected above).
+	sc = append(sc, reloadFromScratch...)
+
+	sc = append(sc, ntapi.GenerateJunkBlock()...)
+
+	// 5. Stack cleanup matching step 1.
+	switch stackAdj {
+	case 0x38:
+		sc = append(sc, 0x48, 0x83, 0xC4, 0x38) // add rsp, 0x38
+	default:
+		sc = append(sc, 0x48, 0x83, 0xC4, 0x28) // add rsp, 0x28
+	}
+
+	sc = append(sc, 0xC3) // ret
+	return sc
+}
+
+// queueAPC iterates every D2R thread and queues the init shellcode on each.
+// The shellcode target (Init) is idempotent via G_SHM sentinel in rmod — only
+// the first APC to actually fire in an alertable wait will do real work; the
+// rest short-circuit. Queuing on many threads increases the odds that at least
+// one is (or imminently becomes) alertable — a single-thread queue frequently
+// never fires because D2R's render thread never enters alertable wait.
 func queueAPC(pid uint32, hProc windows.Handle, scAddr uintptr) error {
 	snap, err := windows.CreateToolhelp32Snapshot(windows.TH32CS_SNAPTHREAD, 0)
 	if err != nil {
@@ -128,17 +215,20 @@ func queueAPC(pid uint32, hProc windows.Handle, scAddr uintptr) error {
 	procResume := modkernel32.NewProc("ResumeThread")
 	procNtQueueAPC := windows.NewLazySystemDLL("ntdll.dll").NewProc("NtQueueApcThread")
 
+	queued := 0
+	tried := 0
 	for {
 		if te.OwnerProcessID == pid {
+			tried++
 			const threadAccess = 0x0010 | 0x0002 | 0x0008 // SUSPEND_RESUME | SET_CONTEXT
-			hTh, err := windows.OpenThread(threadAccess, false, te.ThreadID)
-			if err == nil {
+			hTh, openErr := windows.OpenThread(threadAccess, false, te.ThreadID)
+			if openErr == nil {
 				procSuspend.Call(uintptr(hTh))
 				r, _, _ := procNtQueueAPC.Call(uintptr(hTh), scAddr, 0, 0, 0)
 				procResume.Call(uintptr(hTh))
 				windows.CloseHandle(hTh)
 				if r == 0 {
-					return nil // APC queued successfully
+					queued++
 				}
 			}
 		}
@@ -147,7 +237,10 @@ func queueAPC(pid uint32, hProc windows.Handle, scAddr uintptr) error {
 		}
 	}
 
-	return fmt.Errorf("no suitable D2R thread found for APC")
+	if queued == 0 {
+		return fmt.Errorf("no target thread (tried %d)", tried)
+	}
+	return nil
 }
 
 // ---------------------------------------------------------------------------

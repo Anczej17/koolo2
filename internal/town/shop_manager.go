@@ -11,9 +11,26 @@ import (
 	"local/internal/svc/internal/gamelib/nip"
 	"local/internal/svc/internal/context"
 	"local/internal/svc/internal/game"
+	"local/internal/svc/internal/packet"
 	"local/internal/svc/internal/ui"
 	"local/internal/svc/internal/utils"
 )
+
+// vendorTerminator returns the per-item-class terminator byte used in the
+// 22-byte 0x32/0x33 vendor packets: 0xFF for stackables (potions, scrolls,
+// tomes, keys), 0x03 for everything else (equipment).
+func vendorTerminator(itm data.Item) byte {
+	if itm.IsPotion() {
+		return packet.NPCSellTermConsumable
+	}
+	switch itm.Name {
+	case item.ScrollOfTownPortal, item.ScrollOfIdentify,
+		item.TomeOfTownPortal, item.TomeOfIdentify,
+		item.Key:
+		return packet.NPCSellTermConsumable
+	}
+	return packet.NPCSellTermEquipment
+}
 
 var questItems = []item.Name{
 	"StaffOfKings",
@@ -305,11 +322,58 @@ func SellJunk(lockConfig ...[][]int) {
 	}
 }
 
-// SellItem sells a single item by Control-Clicking it.
+// findActiveMerchant returns the GID of the merchant whose trade menu is
+// currently open. Heuristic: scan Monsters and pick the NPC closest to the
+// player. Returns 0 if none found within a reasonable distance.
+func findActiveMerchant(ctx *context.Status) data.UnitID {
+	const maxDistanceSq = 20 * 20
+	playerPos := ctx.Data.PlayerUnit.Position
+	bestDistSq := maxDistanceSq + 1
+	var best data.UnitID
+
+	for _, m := range ctx.Data.Monsters {
+		if m.Type != data.MonsterTypeNone {
+			continue
+		}
+		dx := m.Position.X - playerPos.X
+		dy := m.Position.Y - playerPos.Y
+		distSq := dx*dx + dy*dy
+		if distSq < bestDistSq {
+			bestDistSq = distSq
+			best = m.UnitID
+		}
+	}
+	return best
+}
+
+// SellItem sells a single item. With UseForBuySell enabled it sends packet
+// 0x33 via the UI NetMan path; otherwise it Ctrl-clicks the item.
 func SellItem(i data.Item) {
 	ctx := context.Get()
-	screenPos := ui.GetScreenCoordsForItem(i)
 
+	if ctx.CharacterCfg.PacketCasting.UseForBuySell && ctx.PacketSender != nil {
+		merchantGID := findActiveMerchant(ctx)
+		if merchantGID != 0 {
+			sellPrice := uint32(i.Desc().SellPrice(i.Quality))
+			slot := uint16(i.Position.X)
+			seq := uint16(i.Position.Y)
+			term := vendorTerminator(i)
+			ctx.Logger.Debug("Selling item via packet 0x33", "item", i.Name, "itemGID", i.UnitID, "sellPrice", sellPrice, "merchantGID", merchantGID, "slot", slot, "seq", seq, "term", term)
+			if err := ctx.PacketSender.NPCSell(sellPrice, i.UnitID, merchantGID, slot, seq, term); err == nil {
+				utils.PingSleep(utils.Medium, 1000)
+				ctx.RefreshGameData()
+				if _, found := ctx.Data.Inventory.Find(i.Name, item.LocationInventory); !found {
+					ctx.Logger.Info("Sell packet OK — item gone", "item", i.Name, "sellPrice", sellPrice)
+					return
+				}
+				ctx.Logger.Warn("Sell packet sent but item STILL in inventory, falling back to HID", "item", i.Name, "sellPrice", sellPrice)
+			} else {
+				ctx.Logger.Warn("Sell packet failed, falling back to HID", "error", err)
+			}
+		}
+	}
+
+	screenPos := ui.GetScreenCoordsForItem(i)
 	ctx.Logger.Debug(fmt.Sprintf("Attempting to sell single item %s at screen coords X:%d Y:%d", i.Desc().Name, screenPos.X, screenPos.Y))
 
 	utils.PingSleep(utils.Light, 200) // Light operation: Pre-click delay
@@ -318,11 +382,33 @@ func SellItem(i data.Item) {
 	ctx.Logger.Debug(fmt.Sprintf("Item %s [%s] sold", i.Desc().Name, i.Quality.ToString()))
 }
 
-// SellItemFullStack sells an entire stack of items by Ctrl-Clicking it.
+// SellItemFullStack sells an entire stack of items. Same packet path as SellItem.
 func SellItemFullStack(i data.Item) {
 	ctx := context.Get()
-	screenPos := ui.GetScreenCoordsForItem(i)
 
+	if ctx.CharacterCfg.PacketCasting.UseForBuySell && ctx.PacketSender != nil {
+		merchantGID := findActiveMerchant(ctx)
+		if merchantGID != 0 {
+			sellPrice := uint32(i.Desc().SellPrice(i.Quality))
+			slot := uint16(i.Position.X)
+			seq := uint16(i.Position.Y)
+			term := vendorTerminator(i)
+			ctx.Logger.Debug("Selling stack via packet 0x33", "item", i.Name, "itemGID", i.UnitID, "sellPrice", sellPrice, "merchantGID", merchantGID, "slot", slot, "seq", seq, "term", term)
+			if err := ctx.PacketSender.NPCSell(sellPrice, i.UnitID, merchantGID, slot, seq, term); err == nil {
+				utils.PingSleep(utils.Medium, 800)
+				ctx.RefreshGameData()
+				if _, found := ctx.Data.Inventory.Find(i.Name, item.LocationInventory); !found {
+					ctx.Logger.Info("Sell stack packet OK — item gone", "item", i.Name, "sellPrice", sellPrice)
+					return
+				}
+				ctx.Logger.Warn("Sell stack packet sent but item STILL in inventory, falling back to HID", "item", i.Name, "sellPrice", sellPrice)
+			} else {
+				ctx.Logger.Warn("Sell stack packet failed, falling back to HID", "error", err)
+			}
+		}
+	}
+
+	screenPos := ui.GetScreenCoordsForItem(i)
 	ctx.Logger.Debug(fmt.Sprintf("Attempting to sell full stack of item %s at screen coords X:%d Y:%d", i.Desc().Name, screenPos.X, screenPos.Y))
 
 	utils.PingSleep(utils.Light, 200) // Light operation: Pre-click delay for stack sell
@@ -333,8 +419,35 @@ func SellItemFullStack(i data.Item) {
 
 func BuyItem(i data.Item, quantity int) {
 	ctx := context.Get()
-	screenPos := ui.GetScreenCoordsForItem(i)
 
+	if ctx.CharacterCfg.PacketCasting.UseForBuySell && ctx.PacketSender != nil {
+		merchantGID := findActiveMerchant(ctx)
+		if merchantGID != 0 {
+			// Server verifies price against its own shop state. BaseCost is the
+			// closest approximation we can compute client-side; actual buyback
+			// price may differ by quality/class multiplier. If the server
+			// rejects we fall through to HID right-click.
+			price := uint32(i.Desc().BaseCost)
+			slot := uint16(i.Position.X)
+			seq := uint16(i.Position.Y)
+			term := vendorTerminator(i)
+			ctx.Logger.Debug("Buying item via packet 0x32", "item", i.Name, "itemGID", i.UnitID, "price", price, "merchantGID", merchantGID, "slot", slot, "seq", seq, "term", term, "qty", quantity)
+			allOK := true
+			for k := 0; k < quantity; k++ {
+				if err := ctx.PacketSender.NPCBuy(price, i.UnitID, merchantGID, slot, seq, term); err != nil {
+					ctx.Logger.Warn("Buy packet failed, falling back to HID", "error", err, "iteration", k)
+					allOK = false
+					break
+				}
+				utils.PingSleep(utils.Medium, 600)
+			}
+			if allOK {
+				return
+			}
+		}
+	}
+
+	screenPos := ui.GetScreenCoordsForItem(i)
 	utils.PingSleep(utils.Medium, 250) // Medium operation: Pre-buy delay
 	for k := 0; k < quantity; k++ {
 		ctx.HID.Click(game.RightButton, screenPos.X, screenPos.Y)

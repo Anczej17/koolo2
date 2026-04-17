@@ -4,6 +4,7 @@ import (
 	"local/internal/svc/internal/gamelib/data"
 	"local/internal/svc/internal/bot"
 	"local/internal/svc/internal/config"
+	"local/internal/svc/internal/secrets"
 )
 
 type TZGroup struct {
@@ -95,6 +96,7 @@ type CharacterSettings struct {
 	LevelingSequenceFiles   []string
 	Supervisors             []string
 	ShortBonusRuns          []string
+	Realms                  []secrets.Realm
 }
 
 type SkillOption struct {

@@ -19,7 +19,7 @@ func isPortal(txtFileNo int) bool {
 
 func (gd *GameReader) Objects(playerPosition data.Position, hover data.HoverData) []data.Object {
 	baseAddr := gd.Process.moduleBaseAddressPtr + gd.offset.UnitTable + (2 * 1024)
-	unitTableBuffer := gd.Process.ReadBytesFromMemory(baseAddr, 128*8)
+	unitTableBuffer := gd.reader.ReadBytesFromMemory(baseAddr, 128*8)
 
 	var objects []data.Object
 
@@ -29,38 +29,38 @@ func (gd *GameReader) Objects(playerPosition data.Position, hover data.HoverData
 
 		for objectUnitPtr > 0 {
 			// Read minimal data first to check object type
-			objectType := gd.Process.ReadUInt(objectUnitPtr+0x00, Uint32)
+			objectType := gd.reader.ReadUInt(objectUnitPtr+0x00, Uint32)
 
 			if objectType == 2 {
-				rawTxtFileNo := gd.Process.ReadUInt(objectUnitPtr+0x04, Uint32) // Extract actual txtFileNo
+				rawTxtFileNo := gd.reader.ReadUInt(objectUnitPtr+0x04, Uint32) // Extract actual txtFileNo
 				txtFileNo := rawTxtFileNo & 0xFFFF
-				unitID := gd.Process.ReadUInt(objectUnitPtr+0x08, Uint32)
-				objectMode := mode.ObjectMode(gd.Process.ReadUInt(objectUnitPtr+0x0c, Uint32))
-				unitDataPtr := uintptr(gd.Process.ReadUInt(objectUnitPtr+0x10, Uint64))
+				unitID := gd.reader.ReadUInt(objectUnitPtr+0x08, Uint32)
+				objectMode := mode.ObjectMode(gd.reader.ReadUInt(objectUnitPtr+0x0c, Uint32))
+				unitDataPtr := uintptr(gd.reader.ReadUInt(objectUnitPtr+0x10, Uint64))
 
 				//This offset gives timer for each mode to keep progress in real time. exemple: Mode.Operating fresh timer then Mode.Opened new timer (for objects)
-				// timerValue := uint32(gd.Process.ReadUInt(objectUnitPtr+0x5C, Uint32))
+				// timerValue := uint32(gd.reader.ReadUInt(objectUnitPtr+0x5C, Uint32))
 
 				// Path and position data
-				pathPtr := uintptr(gd.Process.ReadUInt(objectUnitPtr+0x38, Uint64))
+				pathPtr := uintptr(gd.reader.ReadUInt(objectUnitPtr+0x38, Uint64))
 				// Coordinates (X, Y)
-				posX := gd.Process.ReadUInt(pathPtr+0x10, Uint16)
-				posY := gd.Process.ReadUInt(pathPtr+0x14, Uint16)
+				posX := gd.reader.ReadUInt(pathPtr+0x10, Uint16)
+				posY := gd.reader.ReadUInt(pathPtr+0x14, Uint16)
 
 				var shrineData object.ShrineData
 				var portalData object.PortalData
-				interactType := gd.Process.ReadUInt(unitDataPtr+0x08, Uint8)
-				owner := gd.Process.ReadStringFromMemory(unitDataPtr+0x34, 32)
+				interactType := gd.reader.ReadUInt(unitDataPtr+0x08, Uint8)
+				owner := gd.reader.ReadStringFromMemory(unitDataPtr+0x34, 32)
 
 				// Handle portals
 				if isPortal(int(txtFileNo)) {
-					destArea := area.ID(gd.Process.ReadUInt(unitDataPtr+0x08, Uint8))
+					destArea := area.ID(gd.reader.ReadUInt(unitDataPtr+0x08, Uint8))
 					portalData.DestArea = destArea
 					// Handle Shrines
 				} else {
-					shrineTextPtr := uintptr(gd.Process.ReadUInt(objectUnitPtr+0x0A, Uint64))
+					shrineTextPtr := uintptr(gd.reader.ReadUInt(objectUnitPtr+0x0A, Uint64))
 					if shrineTextPtr > 0 {
-						shrineType := gd.Process.ReadUInt(unitDataPtr+0x08, Uint8)
+						shrineType := gd.reader.ReadUInt(unitDataPtr+0x08, Uint8)
 						shrineData = object.ShrineData{
 							ShrineName: object.ShrineTypeNames[object.ShrineType(shrineType)],
 							ShrineType: object.ShrineType(shrineType),
@@ -84,7 +84,7 @@ func (gd *GameReader) Objects(playerPosition data.Position, hover data.HoverData
 					PortalData: portalData,
 				})
 			}
-			objectUnitPtr = uintptr(gd.Process.ReadUInt(objectUnitPtr+0x158, Uint64))
+			objectUnitPtr = uintptr(gd.reader.ReadUInt(objectUnitPtr+0x158, Uint64))
 		}
 	}
 
@@ -100,7 +100,7 @@ func (gd *GameReader) Objects(playerPosition data.Position, hover data.HoverData
 }
 func (gd *GameReader) Entrances(playerPosition data.Position, hover data.HoverData) []data.Entrance {
 	baseAddr := gd.Process.moduleBaseAddressPtr + gd.offset.UnitTable + (5 * 1024)
-	unitTableBuffer := gd.Process.ReadBytesFromMemory(baseAddr, 128*8)
+	unitTableBuffer := gd.reader.ReadBytesFromMemory(baseAddr, 128*8)
 
 	var entrances []data.Entrance
 
@@ -110,13 +110,13 @@ func (gd *GameReader) Entrances(playerPosition data.Position, hover data.HoverDa
 
 		for entranceUnitPtr > 0 {
 
-			if entranceType := gd.Process.ReadUInt(entranceUnitPtr+0x00, Uint32); entranceType == 5 {
-				txtFileNo := gd.Process.ReadUInt(entranceUnitPtr+0x04, Uint32)
-				unitID := gd.Process.ReadUInt(entranceUnitPtr+0x08, Uint32)
+			if entranceType := gd.reader.ReadUInt(entranceUnitPtr+0x00, Uint32); entranceType == 5 {
+				txtFileNo := gd.reader.ReadUInt(entranceUnitPtr+0x04, Uint32)
+				unitID := gd.reader.ReadUInt(entranceUnitPtr+0x08, Uint32)
 
-				pathPtr := uintptr(gd.Process.ReadUInt(entranceUnitPtr+0x38, Uint64))
-				posX := gd.Process.ReadUInt(pathPtr+0x10, Uint16)
-				posY := gd.Process.ReadUInt(pathPtr+0x14, Uint16)
+				pathPtr := uintptr(gd.reader.ReadUInt(entranceUnitPtr+0x38, Uint64))
+				posX := gd.reader.ReadUInt(pathPtr+0x10, Uint16)
+				posY := gd.reader.ReadUInt(pathPtr+0x14, Uint16)
 
 				entrances = append(entrances, data.Entrance{
 					ID:        data.UnitID(unitID),
@@ -128,7 +128,7 @@ func (gd *GameReader) Entrances(playerPosition data.Position, hover data.HoverDa
 					},
 				})
 			}
-			entranceUnitPtr = uintptr(gd.Process.ReadUInt(entranceUnitPtr+0x158, Uint64))
+			entranceUnitPtr = uintptr(gd.reader.ReadUInt(entranceUnitPtr+0x158, Uint64))
 		}
 	}
 

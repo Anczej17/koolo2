@@ -13,6 +13,8 @@ import (
 	"unsafe"
 
 	"golang.org/x/sys/windows"
+
+	"local/internal/svc/internal/ntapi"
 )
 
 const (
@@ -561,6 +563,12 @@ func validatePatternMatch(memory []byte, offset int) bool {
 // scan fails (Warden may protect the page containing the call site).
 const sendPacketKnownRVA uintptr = 0x146600
 
+// dual_send_wrap RVA: dedup wrapper that memcmp/memcpy to mirror buffer then
+// calls send_fn. Required for 0x50 swap, 0x32/0x33 sell/buy, 0x5C cain, etc.
+// Standard x64 ABI: rcx=pkt_ptr, edx=size. Arxan-encrypted at rest — decrypts
+// on first vendor/trade interaction.
+const dualSendWrapRVA uintptr = 0x147110
+
 func (p *Process) GetD2GSSendPacketFn() (uintptr, error) {
 	if p == nil {
 		return 0, errors.New("process is nil")
@@ -652,28 +660,23 @@ func (p *Process) scanForSendPacketPattern() (uintptr, error) {
 }
 
 func (p *Process) SendPacket(packet []byte) (err error) {
+	return p.SendPacketWithTimeout(packet, 100*time.Millisecond)
+}
+
+// SendPacketViaDualWrap sends a packet through D2R's dual_send_wrap function
+// via APC on the main thread. This is required for opcodes that crash through
+// send_fn (0x50 swap, 0x32/0x33 sell/buy, etc.). The APC shellcode is identical
+// to SendPacket — only the target function address differs.
+func (p *Process) SendPacketViaDualWrap(packet []byte) error {
 	if p == nil {
 		return errors.New("process is nil")
 	}
-
-	// Use external sender if available (Present hook path).
-	if p.externalSend != nil {
-		return p.externalSend(packet)
+	if len(packet) == 0 || len(packet) > maxPacketSize {
+		return fmt.Errorf("invalid packet size: %d", len(packet))
 	}
 
-	defer func() {
-		if err != nil {
-			log.Printf("SendPacket(%d bytes) error: %v", len(packet), err)
-		}
-	}()
-
-	if len(packet) == 0 {
-		return errors.New("empty payload")
-	}
-
-	if len(packet) > maxPacketSize {
-		return fmt.Errorf("data too large: %d (max %d)", len(packet), maxPacketSize)
-	}
+	dualFnAddr := p.moduleBaseAddressPtr + dualSendWrapRVA
+	log.Printf("SendPacketViaDualWrap: opcode=0x%02X size=%d fn=0x%X", packet[0], len(packet), dualFnAddr)
 
 	p.sendPacketMu.Lock()
 	if p.sendPacket == nil {
@@ -684,11 +687,6 @@ func (p *Process) SendPacket(packet []byte) (err error) {
 	p.sendPacketMu.Unlock()
 	defer state.mu.Unlock()
 
-	fnAddr, err := state.ensureFunction(p)
-	if err != nil {
-		return fmt.Errorf("resolve send fn: %w", err)
-	}
-
 	handle, err := state.ensureHandle(p.pid)
 	if err != nil {
 		return fmt.Errorf("open process: %w", err)
@@ -697,15 +695,12 @@ func (p *Process) SendPacket(packet []byte) (err error) {
 	if err := state.ensureStub(handle); err != nil {
 		return err
 	}
-
 	if err := state.ensureMeta(handle); err != nil {
 		return err
 	}
-
 	if err := state.ensurePacketBuffer(handle, uintptr(len(packet))); err != nil {
 		return err
 	}
-
 	if err := writeRemoteMemory(handle, state.packet, packet); err != nil {
 		return fmt.Errorf("write pkt: %w", err)
 	}
@@ -716,7 +711,7 @@ func (p *Process) SendPacket(packet []byte) (err error) {
 		metaBufPool.Put(metaBuf)
 	}()
 
-	binary.LittleEndian.PutUint64(metaBuf[0:], uint64(fnAddr))
+	binary.LittleEndian.PutUint64(metaBuf[0:], uint64(dualFnAddr))
 	binary.LittleEndian.PutUint64(metaBuf[8:], uint64(state.packet))
 	binary.LittleEndian.PutUint64(metaBuf[16:], uint64(len(packet)))
 	binary.LittleEndian.PutUint32(metaBuf[sendPacketStatusOffset:], 0)
@@ -734,19 +729,23 @@ func (p *Process) SendPacket(packet []byte) (err error) {
 		return fmt.Errorf("dispatch APC: %w", err)
 	}
 
-	// Wait for completion with default timeout
-	return p.waitForPacketCompletion(handle, state, 100*time.Millisecond)
+	return p.waitForPacketCompletion(handle, state, 200*time.Millisecond)
 }
 
 // SendPacketWithTimeout sends a packet with a custom APC timeout
-// Use this for high-ping connections where 100ms may not be enough
+// Use this for high-ping connections where 100ms may not be enough.
+//
+// When the presenter (Present hook via rmod.dll) is available this goes
+// through it. Otherwise we fall back to the classic APC-based path that
+// writes a stub + meta into D2R memory and dispatches it via
+// NtQueueApcThread. The APC path is battle-tested and proven to work for
+// 0x3C / 0x50 / 0x32 / 0x33 and friends — see historical stderr.txt.
 func (p *Process) SendPacketWithTimeout(packet []byte, apcTimeout time.Duration) (err error) {
 	if p == nil {
 		return errors.New("process is nil")
 	}
 
 	// Use external sender if available (Present hook path).
-	// The timeout parameter is not needed — the Presenter has its own timeout.
 	if p.externalSend != nil {
 		return p.externalSend(packet)
 	}
@@ -756,8 +755,6 @@ func (p *Process) SendPacketWithTimeout(packet []byte, apcTimeout time.Duration)
 	if len(packet) > 0 {
 		packetID = packet[0]
 	}
-
-	// Log every increment packet send (0x3A = stat, 0x3B = skill)
 	if packetID == 0x3A || packetID == 0x3B {
 		packetType := "UNKNOWN"
 		if packetID == 0x3A {
@@ -770,7 +767,7 @@ func (p *Process) SendPacketWithTimeout(packet []byte, apcTimeout time.Duration)
 
 	defer func() {
 		if err != nil {
-			log.Printf("SendPacket(%d bytes) error: %v", len(packet), err)
+			log.Printf("SendPacket(%d bytes, opcode=0x%02X) error: %v", len(packet), packetID, err)
 		}
 	}()
 
@@ -791,20 +788,17 @@ func (p *Process) SendPacketWithTimeout(packet []byte, apcTimeout time.Duration)
 	p.sendPacketMu.Unlock()
 	defer state.mu.Unlock()
 
-	// Ensure handle is open (this resets isExiting flag if new game)
 	handle, err := state.ensureHandle(p.pid)
 	if err != nil {
 		return fmt.Errorf("open process: %w", err)
 	}
 
-	// If we're exiting, skip all packet sends immediately
 	if state.isExiting {
 		return errors.New("cancelled: exiting")
 	}
 
-	// Rate limiting: prevent overwhelming the APC queue
+	// Rate limit to prevent APC queue overflow.
 	const maxPacketsPerSecond = 100
-
 	now := time.Now()
 	if !state.lastSendTime.IsZero() {
 		elapsed := now.Sub(state.lastSendTime)
@@ -821,8 +815,6 @@ func (p *Process) SendPacketWithTimeout(packet []byte, apcTimeout time.Duration)
 		state.lastSendTime = now
 		state.sendCount = 1
 	}
-
-	// Additional protection: minimum delay between consecutive packets
 	if !state.lastSendTime.IsZero() && now.Sub(state.lastSendTime) < time.Millisecond {
 		time.Sleep(time.Millisecond - now.Sub(state.lastSendTime))
 	}
@@ -875,6 +867,127 @@ func (p *Process) SendPacketWithTimeout(packet []byte, apcTimeout time.Duration)
 	return p.waitForPacketCompletion(handle, state, apcTimeout)
 }
 
+// uiSendStub is APC shellcode that calls D2R's UI NetMan vtable[5] send function.
+// Meta layout: [0]=ui_send_fn [8]=instance [10]=pkt_ptr [18]=status [1C]=pkt_len
+var uiSendStub = []byte{
+	0xF3, 0x0F, 0x1E, 0xFA,
+	0x53,
+	0x48, 0x89, 0xCB,
+	0x48, 0x83, 0xEC, 0x30,
+	0x48, 0x8B, 0x43, 0x10,
+	0x48, 0x89, 0x44, 0x24, 0x20,
+	0x8B, 0x4B, 0x1C,
+	0x48, 0x01, 0xC1,
+	0x48, 0x89, 0x4C, 0x24, 0x28,
+	0x48, 0x8B, 0x03,
+	0x48, 0x8B, 0x4B, 0x08,
+	0x48, 0x31, 0xD2,
+	0x4C, 0x8D, 0x44, 0x24, 0x20,
+	0xFF, 0xD0,
+	0xC7, 0x43, 0x18, 0x01, 0x00, 0x00, 0x00,
+	0xB8, 0x01, 0x00, 0x00, 0x00,
+	0x48, 0x83, 0xC4, 0x30,
+	0x5B,
+	0xC3,
+}
+
+// SendUIPacketViaMainThread sends a packet through UI NetMan vtable[5] via APC on the main thread.
+func (p *Process) SendUIPacketViaMainThread(packet []byte, uiNetManGlobalAddr uintptr) error {
+	if len(packet) == 0 || len(packet) > maxPacketSize {
+		return fmt.Errorf("invalid packet size: %d", len(packet))
+	}
+
+	p.sendPacketMu.Lock()
+	if p.sendPacket == nil {
+		p.sendPacket = &sendPacketState{}
+	}
+	state := p.sendPacket
+	state.mu.Lock()
+	p.sendPacketMu.Unlock()
+	defer state.mu.Unlock()
+
+	handle, err := state.ensureHandle(p.pid)
+	if err != nil {
+		return fmt.Errorf("open process: %w", err)
+	}
+
+	threadHandle, err := state.ensureThreadHandle(p)
+	if err != nil {
+		return fmt.Errorf("resolve main thread: %w", err)
+	}
+
+	// Resolve UI NetMan: global → instance (fn ptr table), instance+0x28 → ui_send_fn
+	// The global points to an object whose fields ARE function pointers directly
+	// (not a C++ vtable with extra indirection). Slot 5 at offset 0x28.
+	var instanceAddr uint64
+	if err := windows.ReadProcessMemory(handle, uiNetManGlobalAddr, (*byte)(unsafe.Pointer(&instanceAddr)), 8, nil); err != nil {
+		return fmt.Errorf("read UI NetMan global: %w", err)
+	}
+	if instanceAddr == 0 {
+		return errors.New("UI NetMan instance is null")
+	}
+	var uiSendFn uint64
+	if err := windows.ReadProcessMemory(handle, uintptr(instanceAddr)+0x28, (*byte)(unsafe.Pointer(&uiSendFn)), 8, nil); err != nil {
+		return fmt.Errorf("read UI send fn: %w", err)
+	}
+	if uiSendFn == 0 {
+		return errors.New("UI send fn is null")
+	}
+	log.Printf("SendUIPacketViaMainThread: global=%#x instance=%#x fn=%#x (RVA %#x) pktSize=%d",
+		uiNetManGlobalAddr, instanceAddr, uiSendFn, uiSendFn-uint64(p.moduleBaseAddressPtr), len(packet))
+
+	stubSize := uintptr(len(uiSendStub))
+	stubAddr, err := virtualAllocEx(handle, stubSize, windows.PAGE_EXECUTE_READWRITE)
+	if err != nil {
+		return fmt.Errorf("alloc stub: %w", err)
+	}
+	if err := writeRemoteMemory(handle, stubAddr, uiSendStub); err != nil {
+		return fmt.Errorf("write stub: %w", err)
+	}
+	_ = markCallTargetValid(handle, stubAddr, stubSize)
+
+	metaAndPktSize := uintptr(32 + len(packet))
+	metaAddr, err := virtualAllocEx(handle, metaAndPktSize, windows.PAGE_READWRITE)
+	if err != nil {
+		return fmt.Errorf("alloc meta: %w", err)
+	}
+	pktAddr := metaAddr + 32
+
+	// Write packet
+	if err := writeRemoteMemory(handle, pktAddr, packet); err != nil {
+		return fmt.Errorf("write pkt: %w", err)
+	}
+
+	// Build meta: [0]=ui_send_fn [8]=instance [10]=pkt_ptr [18]=status(0) [1C]=pkt_len
+	var meta [32]byte
+	binary.LittleEndian.PutUint64(meta[0:], uiSendFn)
+	binary.LittleEndian.PutUint64(meta[8:], instanceAddr)
+	binary.LittleEndian.PutUint64(meta[16:], uint64(pktAddr))
+	binary.LittleEndian.PutUint32(meta[24:], 0) // status
+	binary.LittleEndian.PutUint32(meta[28:], uint32(len(packet)))
+	if err := writeRemoteMemory(handle, metaAddr, meta[:]); err != nil {
+		return fmt.Errorf("write meta: %w", err)
+	}
+
+	// Dispatch APC
+	if err := state.dispatchAPC(threadHandle, stubAddr, metaAddr); err != nil {
+		return fmt.Errorf("dispatch APC: %w", err)
+	}
+
+	// Wait for status
+	deadline := time.Now().Add(200 * time.Millisecond)
+	for time.Now().Before(deadline) {
+		var status uint32
+		if err := windows.ReadProcessMemory(handle, metaAddr+24, (*byte)(unsafe.Pointer(&status)), 4, nil); err == nil {
+			if status == 1 {
+				return nil
+			}
+		}
+		time.Sleep(time.Millisecond)
+	}
+	return errors.New("UI send APC timeout")
+}
+
 // waitForPacketCompletion waits for the APC to complete with the given timeout
 func (p *Process) waitForPacketCompletion(handle windows.Handle, state *sendPacketState, apcTimeout time.Duration) error {
 	timeout := time.After(apcTimeout)
@@ -888,7 +1001,7 @@ func (p *Process) waitForPacketCompletion(handle windows.Handle, state *sendPack
 		select {
 		case <-timeout:
 			// Try to read status one last time before failing
-			if err := windows.ReadProcessMemory(handle, state.meta+sendPacketStatusOffset, &statusBuf[0], 4, nil); err == nil {
+			if err := ntapi.ReadProcessMemory(handle, state.meta+sendPacketStatusOffset, &statusBuf[0], 4); err == nil {
 				status := binary.LittleEndian.Uint32(statusBuf[:])
 				if status == 1 {
 					return nil
@@ -896,7 +1009,7 @@ func (p *Process) waitForPacketCompletion(handle windows.Handle, state *sendPack
 			}
 			return fmt.Errorf("timeout: %dms", timeoutMs)
 		case <-ticker.C:
-			if err := windows.ReadProcessMemory(handle, state.meta+sendPacketStatusOffset, &statusBuf[0], 4, nil); err != nil {
+			if err := ntapi.ReadProcessMemory(handle, state.meta+sendPacketStatusOffset, &statusBuf[0], 4); err != nil {
 				continue
 			}
 			status := binary.LittleEndian.Uint32(statusBuf[:])

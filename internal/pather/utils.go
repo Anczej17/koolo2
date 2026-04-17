@@ -524,6 +524,8 @@ func (pf *PathFinder) moveThroughPathWalk(p Path, walkDuration time.Duration) {
 
 	// Let's try to calculate how close to the window border we can go
 	screenCords := data.Position{}
+	var lastWorldPos data.Position
+	worldPosSet := false
 	for distance, pos := range p {
 		screenX, screenY := pf.gameCoordsToScreenCords(p.From().X, p.From().Y, pos.X, pos.Y)
 
@@ -542,9 +544,18 @@ func (pf *PathFinder) moveThroughPathWalk(p Path, walkDuration time.Duration) {
 			break
 		}
 		screenCords = data.Position{X: screenX, Y: screenY}
+		lastWorldPos = data.Position{
+			X: pos.X + pf.data.AreaOrigin.X,
+			Y: pos.Y + pf.data.AreaOrigin.Y,
+		}
+		worldPosSet = true
 	}
 
-	pf.MoveCharacter(screenCords.X, screenCords.Y)
+	if worldPosSet {
+		pf.MoveCharacter(screenCords.X, screenCords.Y, lastWorldPos)
+	} else {
+		pf.MoveCharacter(screenCords.X, screenCords.Y)
+	}
 }
 
 func (pf *PathFinder) moveThroughPathTeleport(p Path) {
@@ -671,7 +682,7 @@ func (pf *PathFinder) MoveCharacter(x, y int, gamePos ...data.Position) {
 				}
 			}
 
-			err := pf.packetSender.Teleport(gamePos[0])
+			err := pf.packetSender.Teleport(gamePos[0], pf.data.PlayerUnit.Position)
 			if err != nil {
 				pf.hid.Click(game.RightButton, x, y)
 			} else {
@@ -681,8 +692,28 @@ func (pf *PathFinder) MoveCharacter(x, y int, gamePos ...data.Position) {
 			pf.hid.Click(game.RightButton, x, y)
 		}
 	} else {
-		pf.hid.MovePointer(x, y)
-		pf.hid.PressKeyBinding(pf.data.KeyBindings.ForceMove)
+		// Non-teleport movement (walk/run).
+		//
+		// CANONICAL PATH = HID. The game/mouse.go HID layer goes through
+		// Phase 8C (gi.CursorPos cursor trampoline) + cross-process
+		// SendMessage to D2R's hwnd, which already gives us:
+		//   - in-process operation (no SendInput, no kernel input queue)
+		//   - multi-instance (each D2R has its own trampoline)
+		//   - background-capable (SendMessage cross-process is documented
+		//     and does NOT require foreground)
+		//   - zero ongoing WriteProcessMemory (cursor coords flow via SHM)
+		//
+		// Movement: ForceClick (PostMessageW + ForceMove key) is the primary
+		// non-HID path. Falls back to HID if not available.
+		if pf.cfg.PacketCasting.UseForMovement && pf.packetSender != nil {
+			if err := pf.packetSender.ForceClick(int32(x), int32(y)); err != nil {
+				pf.hid.MovePointer(x, y)
+				pf.hid.PressKeyBinding(pf.data.KeyBindings.ForceMove)
+			}
+		} else {
+			pf.hid.MovePointer(x, y)
+			pf.hid.PressKeyBinding(pf.data.KeyBindings.ForceMove)
+		}
 		utils.Sleep(50)
 	}
 }

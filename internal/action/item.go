@@ -14,6 +14,42 @@ import (
 	"local/internal/svc/internal/utils"
 )
 
+// WeaponSwapGIDs returns the four weapon GIDs needed by PacketSender.SwapWeapon
+// based on which weapon slot is currently active.
+// Equipped items have LocationType="equipped" with BodyLocation set to the slot.
+func WeaponSwapGIDs(d *game.Data) (fromL, fromR, toL, toR data.UnitID) {
+	equipped := d.Inventory.ByLocation(item.LocationEquipped)
+	for _, itm := range equipped {
+		switch itm.Location.BodyLocation {
+		case item.LocLeftArm:
+			if d.ActiveWeaponSlot == 0 {
+				fromL = itm.UnitID
+			} else {
+				toL = itm.UnitID
+			}
+		case item.LocRightArm:
+			if d.ActiveWeaponSlot == 0 {
+				fromR = itm.UnitID
+			} else {
+				toR = itm.UnitID
+			}
+		case item.LocLeftArmSecondary:
+			if d.ActiveWeaponSlot == 0 {
+				toL = itm.UnitID
+			} else {
+				fromL = itm.UnitID
+			}
+		case item.LocRightArmSecondary:
+			if d.ActiveWeaponSlot == 0 {
+				toR = itm.UnitID
+			} else {
+				fromR = itm.UnitID
+			}
+		}
+	}
+	return
+}
+
 func doesExceedQuantity(rule nip.Rule) bool {
 	ctx := context.Get()
 	ctx.SetLastAction("doesExceedQuantity")
@@ -301,7 +337,12 @@ func tryUnequip(ctx *context.Status, itm data.Item) (data.Item, bool, error) {
 	swapped := false
 	if targetSlot != originalSlot {
 		ctx.Logger.Debug("Swapping weapon slot to unequip item", "item", itm.Name, "fromSlot", originalSlot, "toSlot", targetSlot)
-		ctx.HID.PressKeyBinding(ctx.Data.KeyBindings.SwapWeapons)
+		if ctx.CharacterCfg.PacketCasting.UseForWeaponSwap && ctx.PacketSender != nil {
+			fL, fR, tL, tR := WeaponSwapGIDs(ctx.Data)
+			ctx.PacketSender.SwapWeapon(fL, fR, tL, tR)
+		} else {
+			ctx.HID.PressKeyBinding(ctx.Data.KeyBindings.SwapWeapons)
+		}
 		utils.Sleep(200)
 		ctx.RefreshGameData()
 
@@ -312,7 +353,12 @@ func tryUnequip(ctx *context.Status, itm data.Item) (data.Item, bool, error) {
 	}
 	if swapped {
 		defer func() {
-			ctx.HID.PressKeyBinding(ctx.Data.KeyBindings.SwapWeapons)
+			if ctx.CharacterCfg.PacketCasting.UseForWeaponSwap && ctx.PacketSender != nil {
+				fL, fR, tL, tR := WeaponSwapGIDs(ctx.Data)
+				ctx.PacketSender.SwapWeapon(fL, fR, tL, tR)
+			} else {
+				ctx.HID.PressKeyBinding(ctx.Data.KeyBindings.SwapWeapons)
+			}
 			utils.Sleep(200)
 			ctx.RefreshGameData()
 		}()

@@ -111,6 +111,7 @@ type Stats struct {
 	GamePassword     string `json:"gamePassword"`     // Current game password (for party/lobby bots)
 	MuleEnabled      bool   `json:"muleEnabled"`
 	ManualModeActive bool   `json:"manualModeActive"`
+	ClaudeModeActive bool   `json:"claudeModeActive"`
 }
 
 type GameStats struct {

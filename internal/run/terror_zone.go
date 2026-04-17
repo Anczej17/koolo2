@@ -2,6 +2,7 @@ package run
 
 import (
 	"fmt"
+	"log/slog"
 
 	"local/internal/svc/internal/gamelib/data"
 	"local/internal/svc/internal/gamelib/data/area"
@@ -83,7 +84,7 @@ func (tz TerrorZone) Run(parameters *RunParameters) error {
 
 	routes := terrorzones.RoutesFor(primary)
 	if len(routes) == 0 {
-		tz.ctx.Logger.Debug("No terror zone route defined for %v", primary.Area().Name)
+		tz.ctx.Logger.Debug("No terror zone route defined", slog.String("area", primary.Area().Name))
 		return nil
 	}
 

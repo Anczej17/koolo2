@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	cryptorand "crypto/rand"
+	"encoding/binary"
 	"fmt"
 	"log"
 	"log/slog"
@@ -18,6 +20,7 @@ import (
 	"local/internal/svc/internal/bot"
 	"local/internal/svc/internal/config"
 	"local/internal/svc/internal/event"
+	"local/internal/svc/internal/gamelib/memory"
 	"local/internal/svc/internal/ntapi"
 	"local/internal/svc/internal/remote/discord"
 	"local/internal/svc/internal/remote/droplog"
@@ -35,8 +38,43 @@ var (
 	buildTime string
 )
 
-// Static neutral window title
-var windowTitle = "Settings"
+// Window title pool — rotated periodically to avoid static-title fingerprinting.
+// Pool entries chosen to look like ordinary Windows utilities. NEVER add the
+// project name or any bot-related variant — the goal is process anonymity.
+var windowTitlePool = []string{
+	"Settings",
+	"Calculator",
+	"Notepad",
+	"Task Manager",
+	"Resource Monitor",
+	"Event Viewer",
+	"Registry Editor",
+	"Disk Management",
+	"System Information",
+	"Device Manager",
+	"Services",
+	"Windows Security",
+	"Performance Monitor",
+	"Control Panel",
+	"File Explorer",
+	"Command Prompt",
+	"Paint",
+	"Clock",
+	"Weather",
+	"Camera",
+}
+
+// pickRandomTitle picks one entry from windowTitlePool using crypto-strong
+// randomness (so the choice does not reveal a math/rand seed in the binary).
+func pickRandomTitle() string {
+	var b [8]byte
+	_, _ = cryptorand.Read(b[:])
+	v := binary.LittleEndian.Uint64(b[:])
+	return windowTitlePool[v%uint64(len(windowTitlePool))]
+}
+
+// initialWindowTitle returns the first title set on window creation.
+var initialWindowTitle = pickRandomTitle()
 
 // findFreePort picks a random available TCP port by binding to :0
 func findFreePort() (int, error) {
@@ -69,13 +107,47 @@ func main() {
 	_ = buildID
 	_ = buildTime
 
+	// Stealth RPM Layer default ON in production. Opt-out: STEALTH_READ=0.
+	// Must run before any code path imports `internal/gamelib/memory` and
+	// triggers stealthOnce (sync.Once gate inside StealthEnabled()).
+	if os.Getenv("STEALTH_READ") == "" {
+		os.Setenv("STEALTH_READ", "1")
+	}
+
+	// Capture stderr (panic stacks) to file. Without this, -H windowsgui swallows
+	// all panic output and crashes are silent. Cheap insurance.
+	if exe, err := os.Executable(); err == nil {
+		stderrPath := filepath.Join(filepath.Dir(exe), "logs", "stderr.txt")
+		if f, ferr := os.OpenFile(stderrPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644); ferr == nil {
+			os.Stderr = f
+			fmt.Fprintf(f, "\n=== dev_test start %s ===\n", time.Now().Format(time.RFC3339))
+		}
+	}
+
 	// Init indirect syscalls, start anti-debug
 	if ntErr := ntapi.Init(); ntErr != nil {
 		log.Printf("Warning: NT syscall init failed, falling back to standard API: %v", ntErr)
 	}
-	ntapi.StartAntiDebugMonitor(30*time.Second, func() {
-		os.Exit(0)
-	})
+	// Disable the anti-debug monitor when SKIP_ANTIDEBUG=1 env var OR a sentinel
+	// file `SKIP_ANTIDEBUG` exists next to the exe. The file route matters because
+	// double-clicking dev_test.exe doesn't pick up env vars set in another shell.
+	skipAntiDebug := os.Getenv("SKIP_ANTIDEBUG") == "1"
+	if !skipAntiDebug {
+		if exe, err := os.Executable(); err == nil {
+			if _, statErr := os.Stat(filepath.Join(filepath.Dir(exe), "SKIP_ANTIDEBUG")); statErr == nil {
+				skipAntiDebug = true
+			}
+		}
+	}
+	if skipAntiDebug {
+		fmt.Fprintf(os.Stderr, "anti-debug monitor DISABLED (SKIP_ANTIDEBUG sentinel present)\n")
+	} else {
+		fmt.Fprintf(os.Stderr, "anti-debug monitor ENABLED (no SKIP_ANTIDEBUG sentinel)\n")
+		ntapi.StartAntiDebugMonitor(30*time.Second, func() {
+			fmt.Fprintf(os.Stderr, "anti-debug detected, exiting\n")
+			os.Exit(0)
+		})
+	}
 
 	err := config.Load()
 	if err != nil {
@@ -163,6 +235,15 @@ func main() {
 
 	g.Go(wrapWithRecover(logger, func() error {
 		defer cancel()
+
+		// Headless mode: skip webview, keep HTTP server alive for Claude mode.
+		if os.Getenv("HEADLESS") == "1" {
+			logger.Info("Headless mode — webview disabled, HTTP server active",
+				slog.Int("port", serverPort))
+			<-ctx.Done()
+			return nil
+		}
+
 		displayScale := config.GetCurrentDisplayScale()
 
 		// 1. Load dimensions from config, or use defaults
@@ -234,11 +315,41 @@ func main() {
 			}
 		}()
 
-		// 4. Set static window title
+		// 4. Set initial window title and start rotation goroutine.
 		{
 			handle := w.Window()
-			titlePtr, _ := syscall.UTF16PtrFromString(windowTitle)
+			titlePtr, _ := syscall.UTF16PtrFromString(initialWindowTitle)
 			winproc.SetWindowText.Call(handle, uintptr(unsafe.Pointer(titlePtr)))
+
+			// Rotate title every 20-90s with stealth jitter so the window
+			// signature never settles on one string. Goroutine exits when
+			// the webview's parent ctx is done.
+			go func(handle uintptr) {
+				defer func() {
+					if r := recover(); r != nil {
+						_ = r // never crash the bot over a cosmetic detail
+					}
+				}()
+				for {
+					// Random sleep 20s..90s using JitterDuration for consistency
+					// with the rest of the stealth layer.
+					sleep := 20*time.Second + memory.JitterDuration(35*time.Second, 1.0)
+					if sleep < 20*time.Second {
+						sleep = 20 * time.Second
+					} else if sleep > 90*time.Second {
+						sleep = 90 * time.Second
+					}
+					select {
+					case <-ctx.Done():
+						return
+					case <-time.After(sleep):
+					}
+					next := pickRandomTitle()
+					if p, err := syscall.UTF16PtrFromString(next); err == nil {
+						winproc.SetWindowText.Call(handle, uintptr(unsafe.Pointer(p)))
+					}
+				}
+			}(handle)
 		}
 
 		defer w.Destroy()

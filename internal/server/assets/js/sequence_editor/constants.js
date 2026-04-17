@@ -7,7 +7,7 @@
  */
 
 /**
- * Ordered list of supported Diablo II difficulties.
+ * Ordered list of supported difficulty levels.
  * @type {DifficultyKey[]}
  */
 export const DIFFICULTIES = ["normal", "nightmare", "hell"];

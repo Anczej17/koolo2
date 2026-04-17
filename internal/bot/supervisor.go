@@ -56,6 +56,7 @@ func (s *baseSupervisor) Stats() Stats {
 	stats := s.statsHandler.Stats()
 	if s.bot.ctx != nil {
 		stats.ManualModeActive = s.bot.ctx.ManualModeActive
+		stats.ClaudeModeActive = s.bot.ctx.ClaudeModeActive
 	}
 	return stats
 }
@@ -117,9 +118,7 @@ func (s *baseSupervisor) KillClient() error {
 }
 
 func (s *baseSupervisor) ensureProcessIsRunningAndPrepare() error {
-	// Prevent screen from turning off
 	winproc.SetThreadExecutionState.Call(winproc.EXECUTION_STATE_ES_DISPLAY_REQUIRED | winproc.EXECUTION_STATE_ES_CONTINUOUS)
-
 	return s.bot.ctx.MemoryInjector.Load()
 }
 

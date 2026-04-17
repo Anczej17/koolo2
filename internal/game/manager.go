@@ -14,6 +14,7 @@ import (
 	"github.com/billgraziano/dpapi"
 	"local/internal/svc/internal/gamelib/data/difficulty"
 	"local/internal/svc/internal/config"
+	"local/internal/svc/internal/secrets"
 	"local/internal/svc/internal/utils"
 	"local/internal/svc/internal/utils/winproc"
 	"github.com/lxn/win"
@@ -360,7 +361,7 @@ func StartGame(username string, password string, authmethod string, authToken st
 		}
 
 		// Create or Open the OSI registry folder
-		key, _, err := registry.CreateKey(registry.CURRENT_USER, `SOFTWARE\Blizzard Entertainment\Battle.net\Launch Options\OSI`, registry.ALL_ACCESS)
+		key, _, err := registry.CreateKey(registry.CURRENT_USER, secrets.BlizzardLaunchOptionsKey, registry.ALL_ACCESS)
 		if err != nil {
 			return 0, 0, fmt.Errorf("failed to open registry key: %v", err)
 		}
@@ -368,11 +369,11 @@ func StartGame(username string, password string, authmethod string, authToken st
 
 		region := "EU"
 		switch realm {
-		case "eu.actual.battle.net":
+		case secrets.RealmEU:
 			region = "EU"
-		case "us.actual.battle.net":
+		case secrets.RealmUS:
 			region = "US"
-		case "kr.actual.battle.net":
+		case secrets.RealmKR:
 			region = "KR"
 		default:
 			region = "EU"
@@ -399,7 +400,7 @@ func StartGame(username string, password string, authmethod string, authToken st
 
 	// Start the game with retry logic for GPU initialization errors
 	for attempt := 0; attempt < maxGPURetries; attempt++ {
-		cmd := exec.Command(config.App.D2RPath+"\\D2R.exe", fullArgs...)
+		cmd := exec.Command(config.App.AppPath+"\\"+utils.GameExeName(), fullArgs...)
 		err = cmd.Start()
 		if err != nil {
 			return 0, 0, err

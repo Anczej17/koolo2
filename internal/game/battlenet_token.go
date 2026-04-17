@@ -11,6 +11,8 @@ import (
 	"github.com/go-rod/rod"
 	"github.com/go-rod/rod/lib/launcher"
 	"github.com/go-rod/rod/lib/proto"
+
+	"local/internal/svc/internal/secrets"
 )
 
 // GetBattleNetToken logs in to Battle.net and returns the authentication token.
@@ -256,17 +258,33 @@ func getBattleNetTokenWithUI(ctx context.Context, username, password, realm stri
 }
 
 func getBattleNetLoginURL(realm string) string {
+	// Build URL from garbled constants so neither the scheme+host nor the
+	// query string remain as contiguous plaintext substrings in the binary.
+	const loginPath = "/login/en/?externalChallenge=login&app=OSI"
+	var regionHost string
 	switch realm {
-	case "eu.actual.battle.net":
-		return "https://eu.battle.net/login/en/?externalChallenge=login&app=OSI"
-	case "kr.actual.battle.net":
-		return "https://kr.battle.net/login/en/?externalChallenge=login&app=OSI"
-	case "us.actual.battle.net":
-		return "https://us.battle.net/login/en/?externalChallenge=login&app=OSI"
+	case secrets.RealmEU:
+		regionHost = "https://eu." + stripActual(secrets.RealmEU)
+	case secrets.RealmKR:
+		regionHost = "https://kr." + stripActual(secrets.RealmKR)
+	case secrets.RealmUS:
+		regionHost = "https://us." + stripActual(secrets.RealmUS)
 	default:
-		// Default to US
-		return "https://us.battle.net/login/en/?externalChallenge=login&app=OSI"
+		regionHost = "https://us." + stripActual(secrets.RealmUS)
 	}
+	return regionHost + loginPath
+}
+
+// stripActual converts "eu.actual.battle.net" → "battle.net" by dropping
+// the first two dot-separated segments. Done at runtime so the result is
+// never a literal in the binary.
+func stripActual(s string) string {
+	for i := 0; i < 2; i++ {
+		if idx := strings.IndexByte(s, '.'); idx >= 0 {
+			s = s[idx+1:]
+		}
+	}
+	return s
 }
 
 func maybeLogBrowserDownload(ctx context.Context, logLine func(string, ...any)) {

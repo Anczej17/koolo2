@@ -5,6 +5,19 @@ setlocal enabledelayedexpansion
 :: server: html/template reflection + JSON field names
 :: event: type switches in non-garbled consumers (server, discord)
 set GOGARBLE=!local/internal/svc/internal/server*,!local/internal/svc/internal/event*,!github.com/inkeliz/gowebview*
+set GARBLE_EXPERIMENTAL_CONTROLFLOW=1
+set GOTOOLCHAIN=local
+
+:: R1: build from neutral junction if present — strips folder-name leaks
+:: from Go's panic tables (374+ literals of "Audyt Koolo/koolo2-rebranding"
+:: in dist/AppService.exe otherwise). Create once:
+::   powershell -Command "New-Item -Path 'C:\src\svc' -ItemType Junction -Target '%~dp0'"
+if exist "C:\src\svc\build.bat" (
+    cd /d "C:\src\svc"
+    echo [R1] Building from neutral path C:\src\svc
+) else (
+    echo [R1-WARN] C:\src\svc junction not found — build may leak folder name.
+)
 
 echo Start building application
 echo Cleaning up previous artifacts...

@@ -328,7 +328,7 @@ func clearRoom(room data.Room, filter data.MonsterFilter) error {
 		}
 		if !cachedPathValid {
 			ctx.Logger.Debug("No path to monster, skipping",
-				slog.String("monster", string(targetMonster.Name)),
+				slog.String("monster", fmt.Sprintf("%d", targetMonster.Name)),
 				slog.Any("position", targetMonster.Position))
 
 			// Skip this monster and continue to next

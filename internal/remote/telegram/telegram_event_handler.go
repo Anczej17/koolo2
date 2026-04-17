@@ -1,26 +1,21 @@
 package telegram
 
 import (
-    "bytes"
-    "context"
-    "image/jpeg"
+	"bytes"
+	"context"
+	"image/jpeg"
 
-    tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
-    "local/internal/svc/internal/event"
+	"local/internal/svc/internal/event"
 )
 
-func (b *Bot) Handle(_ context.Context, e event.Event) error {
-    if e.Image() != nil {
-        buf := new(bytes.Buffer)
-        if err := jpeg.Encode(buf, e.Image(), &jpeg.Options{Quality: 90}); err != nil {
-            _, _ = b.bot.Send(tgbotapi.NewMessage(b.chatID, e.Message()+" (screenshot encode failed)"))
-            return err
-        }
-        photo := tgbotapi.NewPhoto(b.chatID, tgbotapi.FileBytes{Name: "screenshot.jpg", Bytes: buf.Bytes()})
-        photo.Caption = e.Message()
-        _, err := b.bot.Send(photo)
-        return err
-    }
-    _, err := b.bot.Send(tgbotapi.NewMessage(b.chatID, e.Message()))
-    return err
+func (b *Bot) Handle(ctx context.Context, e event.Event) error {
+	if e.Image() != nil {
+		buf := new(bytes.Buffer)
+		if err := jpeg.Encode(buf, e.Image(), &jpeg.Options{Quality: 90}); err != nil {
+			_ = b.client.sendMessage(ctx, b.chatID, e.Message()+" (screenshot encode failed)")
+			return err
+		}
+		return b.client.sendPhoto(ctx, b.chatID, e.Message(), "screenshot.jpg", buf.Bytes())
+	}
+	return b.client.sendMessage(ctx, b.chatID, e.Message())
 }

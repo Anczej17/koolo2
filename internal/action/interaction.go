@@ -15,6 +15,7 @@ import (
 	"local/internal/svc/internal/event"
 	"local/internal/svc/internal/game"
 	"local/internal/svc/internal/utils"
+	"github.com/lxn/win"
 )
 
 func InteractNPC(npc npc.ID) error {
@@ -147,6 +148,79 @@ func InteractObjectByID(id data.UnitID, isCompletedFn func() bool) error {
 	}
 
 	return InteractObject(o, isCompletedFn)
+}
+
+// SelectNPCTradeOption sends the "Trade" dialog option via packet 0x38.
+// Falls back to HID KeySequence if packet fails or is not available.
+// tradeIndex: 0 = first option (Jamella), 1 = second option (most vendors).
+func SelectNPCTradeOption(npcID npc.ID) {
+	ctx := context.Get()
+
+	if ctx.CharacterCfg.PacketCasting.UseForNPCInteraction && ctx.PacketSender != nil {
+		townNPC, found := ctx.Data.Monsters.FindOne(npcID, data.MonsterTypeNone)
+		if found {
+			if err := ctx.PacketSender.NPCDialogOption(1, townNPC.UnitID); err == nil {
+				utils.Sleep(100)
+				return
+			}
+			ctx.Logger.Warn("NPC dialog option packet failed, falling back to HID")
+		}
+	}
+
+	// HID fallback
+	if npcID == npc.Jamella {
+		ctx.HID.KeySequence(win.VK_HOME, win.VK_RETURN)
+	} else {
+		ctx.HID.KeySequence(win.VK_HOME, win.VK_DOWN, win.VK_RETURN)
+	}
+}
+
+// CloseNPCDialog sends the NPC close packet 0x30 via packet.
+// Falls back to ESC key if packet fails.
+func CloseNPCDialog(npcID npc.ID) {
+	ctx := context.Get()
+
+	if ctx.CharacterCfg.PacketCasting.UseForNPCInteraction && ctx.PacketSender != nil {
+		townNPC, found := ctx.Data.Monsters.FindOne(npcID, data.MonsterTypeNone)
+		if found {
+			if err := ctx.PacketSender.TerminateNPCChat(townNPC.UnitID); err == nil {
+				utils.Sleep(100)
+				return
+			}
+		}
+	}
+
+	// HID fallback
+	step.CloseAllMenus()
+}
+
+// SelectNPCGambleOption sends the "Gamble" dialog option via packet.
+// Gamble is option=2 for most NPCs, option=1 for Jamella.
+// Falls back to HID KeySequence if packet fails.
+func SelectNPCGambleOption(npcID npc.ID) {
+	ctx := context.Get()
+
+	if ctx.CharacterCfg.PacketCasting.UseForGamble && ctx.PacketSender != nil {
+		townNPC, found := ctx.Data.Monsters.FindOne(npcID, data.MonsterTypeNone)
+		if found {
+			option := uint32(2) // gamble is usually 2nd option
+			if npcID == npc.Jamella {
+				option = 1
+			}
+			if err := ctx.PacketSender.NPCDialogOption(option, townNPC.UnitID); err == nil {
+				utils.Sleep(100)
+				return
+			}
+			ctx.Logger.Warn("NPC gamble option packet failed, falling back to HID")
+		}
+	}
+
+	// HID fallback
+	if npcID == npc.Jamella {
+		ctx.HID.KeySequence(win.VK_HOME, win.VK_DOWN, win.VK_RETURN)
+	} else {
+		ctx.HID.KeySequence(win.VK_HOME, win.VK_DOWN, win.VK_DOWN, win.VK_RETURN)
+	}
 }
 
 func getNPCPosition(npc npc.ID, d *game.Data) (data.Position, bool) {

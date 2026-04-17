@@ -57,8 +57,8 @@ func GetUpstreamPRs(state string, limit int) ([]PullRequest, error) {
 		limit = 30
 	}
 
-	url := fmt.Sprintf("https://api.github.com/repos/%s/%s/pulls?state=%s&per_page=%d&sort=updated&direction=desc",
-		upstreamOwner, upstreamRepo, state, limit)
+	url := fmt.Sprintf("%s/repos/%s/%s/pulls?state=%s&per_page=%d&sort=updated&direction=desc",
+		apiBaseURL(), upstreamOwner, upstreamRepo, state, limit)
 
 	req, err := http.NewRequest(http.MethodGet, url, nil)
 	if err != nil {
@@ -76,9 +76,9 @@ func GetUpstreamPRs(state string, limit int) ([]PullRequest, error) {
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 2048))
 		bodyText := strings.TrimSpace(string(body))
 		if bodyText != "" {
-			return nil, fmt.Errorf("GitHub API returned status %d: %s", resp.StatusCode, bodyText)
+			return nil, fmt.Errorf("API returned status %d: %s", resp.StatusCode, bodyText)
 		}
-		return nil, fmt.Errorf("GitHub API returned status %d", resp.StatusCode)
+		return nil, fmt.Errorf("API returned status %d", resp.StatusCode)
 	}
 
 	var prs []PullRequest
@@ -91,8 +91,8 @@ func GetUpstreamPRs(state string, limit int) ([]PullRequest, error) {
 
 // GetPRCommits fetches all commits for a specific PR
 func GetPRCommits(prNumber int) ([]PRCommit, error) {
-	url := fmt.Sprintf("https://api.github.com/repos/%s/%s/pulls/%d/commits",
-		upstreamOwner, upstreamRepo, prNumber)
+	url := fmt.Sprintf("%s/repos/%s/%s/pulls/%d/commits",
+		apiBaseURL(), upstreamOwner, upstreamRepo, prNumber)
 
 	req, err := http.NewRequest(http.MethodGet, url, nil)
 	if err != nil {
@@ -110,9 +110,9 @@ func GetPRCommits(prNumber int) ([]PRCommit, error) {
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 2048))
 		bodyText := strings.TrimSpace(string(body))
 		if bodyText != "" {
-			return nil, fmt.Errorf("GitHub API returned status %d: %s", resp.StatusCode, bodyText)
+			return nil, fmt.Errorf("API returned status %d: %s", resp.StatusCode, bodyText)
 		}
-		return nil, fmt.Errorf("GitHub API returned status %d", resp.StatusCode)
+		return nil, fmt.Errorf("API returned status %d", resp.StatusCode)
 	}
 
 	var commits []PRCommit

@@ -1,0 +1,114 @@
+//Decompile known send_fn callers found by walk_builder_scan.py
+//@category Analysis
+
+import ghidra.app.decompiler.DecompInterface;
+import ghidra.app.decompiler.DecompileResults;
+import ghidra.app.script.GhidraScript;
+import ghidra.program.model.address.Address;
+import ghidra.program.model.listing.Function;
+import ghidra.program.model.listing.FunctionManager;
+
+import java.io.FileWriter;
+import java.io.PrintWriter;
+
+public class ExtractPackets extends GhidraScript {
+
+    // Known call sites to send_fn found by walk_builder_scan.py
+    // These are RVAs of the CALL instruction itself
+    private static final long[] KNOWN_CALL_RVAS = {
+        0x08058C,  // size=13, opcode 0x6D
+        0x081F9A,  // size=401, main dispatcher (opcodes 0x01,0x03,0x4D,0x67,0xD8)
+        0x1468A7,  // size=85
+        0x146972,  // size=85
+        0x146D5A,  // near send_fn
+        0x146DDB,  // near send_fn
+        0x146E5B,  // near send_fn
+        0x146ED4,  // near send_fn
+    };
+
+    @Override
+    protected void run() throws Exception {
+        long imageBase = currentProgram.getImageBase().getOffset();
+        FunctionManager fm = currentProgram.getFunctionManager();
+
+        DecompInterface decomp = new DecompInterface();
+        decomp.openProgram(currentProgram);
+
+        String outPath = "C:\\Users\\Administrator\\Desktop\\Audyt Koolo\\koolo2-rebranding\\logs\\ghidra_send_fn_callers.txt";
+        PrintWriter out = new PrintWriter(new FileWriter(outPath));
+
+        out.println("========================================");
+        out.println("D2R PACKET BUILDER DECOMPILATION");
+        out.println("Image base: 0x" + Long.toHexString(imageBase));
+        out.println("========================================");
+
+        for (long rva : KNOWN_CALL_RVAS) {
+            Address callAddr = toAddr(imageBase + rva);
+            Function func = fm.getFunctionContaining(callAddr);
+
+            out.println("\n========================================");
+            out.println("CALL SITE RVA: 0x" + Long.toHexString(rva));
+            out.println("CALL SITE VA:  " + callAddr);
+
+            if (func != null) {
+                long funcRva = func.getEntryPoint().getOffset() - imageBase;
+                out.println("FUNCTION: " + func.getName() + " @ " + func.getEntryPoint() + " (RVA 0x" + Long.toHexString(funcRva) + ")");
+                out.println("SIZE: " + func.getBody().getNumAddresses() + " bytes");
+                out.println("========================================");
+
+                DecompileResults results = decomp.decompileFunction(func, 120, monitor);
+                if (results != null && results.decompileCompleted()) {
+                    out.println(results.getDecompiledFunction().getC());
+                } else {
+                    out.println("(decompilation failed)");
+                    if (results != null) {
+                        out.println("Error: " + results.getErrorMessage());
+                    }
+                }
+
+                println("[*] RVA 0x" + Long.toHexString(rva) + " -> " + func.getName() + " (decompiled)");
+            } else {
+                out.println("NO FUNCTION at this address");
+                out.println("========================================");
+
+                // Try to read raw bytes for manual analysis
+                byte[] raw = new byte[64];
+                currentProgram.getMemory().getBytes(callAddr, raw);
+                StringBuilder hex = new StringBuilder();
+                for (byte b : raw) hex.append(String.format("%02x", b & 0xFF));
+                out.println("RAW BYTES (64): " + hex.toString());
+
+                println("[*] RVA 0x" + Long.toHexString(rva) + " -> no function, dumped raw bytes");
+            }
+        }
+
+        // Also decompile the MAIN DISPATCHER at 0x081B40 (request_walk candidate)
+        // and surrounding functions
+        long[] extraFuncs = { 0x081B40, 0x080000, 0x146600 };
+        for (long rva : extraFuncs) {
+            Address addr = toAddr(imageBase + rva);
+            Function func = fm.getFunctionContaining(addr);
+            if (func != null) {
+                long funcRva = func.getEntryPoint().getOffset() - imageBase;
+                out.println("\n========================================");
+                out.println("EXTRA FUNCTION RVA: 0x" + Long.toHexString(funcRva));
+                out.println("FUNCTION: " + func.getName());
+                out.println("========================================");
+
+                DecompileResults results = decomp.decompileFunction(func, 120, monitor);
+                if (results != null && results.decompileCompleted()) {
+                    out.println(results.getDecompiledFunction().getC());
+                } else {
+                    out.println("(decompilation failed)");
+                }
+
+                println("[*] Extra 0x" + Long.toHexString(funcRva) + " -> " + func.getName());
+            }
+        }
+
+        decomp.dispose();
+        out.close();
+        println("[*] Output: " + outPath);
+        println("[*] DONE");
+    }
+}

@@ -3,3 +3,8 @@ Cargo.lock
 \src\
 \target\
 .rs
+\inject_test\
+\pattern_find\
+\scanutil\
+\logs\
+.go

@@ -240,7 +240,12 @@ func equipCTAIfFound(allItems []data.Item) (bool, error) {
 	}
 
 	// Check secondary weapon slot
-	ctx.HID.PressKeyBinding(ctx.Data.KeyBindings.SwapWeapons)
+	if ctx.CharacterCfg.PacketCasting.UseForWeaponSwap && ctx.PacketSender != nil {
+		fL, fR, tL, tR := WeaponSwapGIDs(ctx.Data)
+		ctx.PacketSender.SwapWeapon(fL, fR, tL, tR)
+	} else {
+		ctx.HID.PressKeyBinding(ctx.Data.KeyBindings.SwapWeapons)
+	}
 	utils.Sleep(EquipDelayMS)
 	*ctx.Data = ctx.GameReader.GetData()
 
@@ -272,7 +277,12 @@ func equipCTAIfFound(allItems []data.Item) (bool, error) {
 	}
 
 	// Switch back to primary
-	ctx.HID.PressKeyBinding(ctx.Data.KeyBindings.SwapWeapons)
+	if ctx.CharacterCfg.PacketCasting.UseForWeaponSwap && ctx.PacketSender != nil {
+		fL, fR, tL, tR := WeaponSwapGIDs(ctx.Data)
+		ctx.PacketSender.SwapWeapon(fL, fR, tL, tR)
+	} else {
+		ctx.HID.PressKeyBinding(ctx.Data.KeyBindings.SwapWeapons)
+	}
 	utils.Sleep(EquipDelayMS)
 	*ctx.Data = ctx.GameReader.GetData()
 

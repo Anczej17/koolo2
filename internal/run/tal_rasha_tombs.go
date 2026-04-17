@@ -1,6 +1,8 @@
 package run
 
 import (
+	"log/slog"
+
 	"local/internal/svc/internal/gamelib/data"
 	"local/internal/svc/internal/gamelib/data/area"
 	"local/internal/svc/internal/gamelib/data/quest"
@@ -60,7 +62,7 @@ func (a TalRashaTombs) Run(parameters *RunParameters) error {
 
 		a.ctx.CharacterCfg.Character.ClearPathDist = 20
 		if err := config.SaveSupervisorConfig(a.ctx.CharacterCfg.ConfigFolderName, a.ctx.CharacterCfg); err != nil {
-			a.ctx.Logger.Error("Failed to save character configuration: %s", err.Error())
+			a.ctx.Logger.Error("Failed to save character configuration", slog.Any("error", err))
 		}
 
 		shouldInterrupt := func() bool {

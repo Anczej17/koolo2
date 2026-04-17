@@ -664,10 +664,8 @@ func (s Javazon) chargedStrike(monsterID data.UnitID) {
 		}
 	}
 
-	csKey, found := s.Data.KeyBindings.KeyBindingForSkill(skill.ChargedStrike)
-	if found && s.Data.PlayerUnit.RightSkill != skill.ChargedStrike {
-		ctx.HID.PressKeyBinding(csKey)
-		utils.Sleep(jzDkMinSkillSwapDelayMS)
+	if s.Data.PlayerUnit.RightSkill != skill.ChargedStrike {
+		_ = step.SelectRightSkill(skill.ChargedStrike)
 	}
 
 	screenX, screenY := ctx.PathFinder.GameCoordsToScreenCords(monster.Position.X, monster.Position.Y)
@@ -693,10 +691,8 @@ func (s Javazon) chargedStrikeBossFast(monsterID data.UnitID) {
 		}
 	}
 
-	csKey, found := s.Data.KeyBindings.KeyBindingForSkill(skill.ChargedStrike)
-	if found && s.Data.PlayerUnit.RightSkill != skill.ChargedStrike {
-		ctx.HID.PressKeyBinding(csKey)
-		utils.Sleep(jzDkMinSkillSwapDelayMS)
+	if s.Data.PlayerUnit.RightSkill != skill.ChargedStrike {
+		_ = step.SelectRightSkill(skill.ChargedStrike)
 	}
 
 	screenX, screenY := ctx.PathFinder.GameCoordsToScreenCords(monster.Position.X, monster.Position.Y)
@@ -719,10 +715,8 @@ func (s Javazon) chargedStrikeAccurate(targetID data.UnitID, attacks int) {
 		return
 	}
 
-	csKey, found := s.Data.KeyBindings.KeyBindingForSkill(skill.ChargedStrike)
-	if found && s.Data.PlayerUnit.RightSkill != skill.ChargedStrike {
-		ctx.HID.PressKeyBinding(csKey)
-		utils.Sleep(jzDkMinSkillSwapDelayMS)
+	if s.Data.PlayerUnit.RightSkill != skill.ChargedStrike {
+		_ = step.SelectRightSkill(skill.ChargedStrike)
 	}
 
 	// Use the step routine so range/LoS and click semantics are handled consistently.
@@ -934,10 +928,8 @@ func (s Javazon) jzDkLightningFury(targetID data.UnitID, attacks int) bool {
 		return false
 	}
 
-	lfKey, found := s.Data.KeyBindings.KeyBindingForSkill(skill.LightningFury)
-	if found && s.Data.PlayerUnit.RightSkill != skill.LightningFury {
-		ctx.HID.PressKeyBinding(lfKey)
-		utils.Sleep(jzDkMinSkillSwapDelayMS)
+	if s.Data.PlayerUnit.RightSkill != skill.LightningFury {
+		_ = step.SelectRightSkill(skill.LightningFury)
 	}
 
 	for i := 0; i < attacks; i++ {

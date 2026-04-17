@@ -11,6 +11,8 @@ import (
 	"time"
 	"unsafe"
 
+	"golang.org/x/sys/windows"
+
 	"local/internal/svc/cmd/app/log"
 	"local/internal/svc/internal/character"
 	"local/internal/svc/internal/config"
@@ -18,8 +20,10 @@ import (
 	"local/internal/svc/internal/drop"
 	"local/internal/svc/internal/event"
 	"local/internal/svc/internal/game"
+	"local/internal/svc/internal/gamelib/memory"
 	"local/internal/svc/internal/health"
 	"local/internal/svc/internal/mule"
+	"local/internal/svc/internal/ntapi"
 	"local/internal/svc/internal/pather"
 	"local/internal/svc/internal/presenter"
 	"local/internal/svc/internal/utils"
@@ -60,13 +64,46 @@ func (mng *SupervisorManager) AvailableSupervisors() []string {
 	return availableSupervisors
 }
 
+// StartClaude attaches to an existing D2R process and initializes the bot in
+// Claude mode: no workflow, no automation — just keeps subsystems alive so the
+// PacketSender can be driven via /debug/* HTTP endpoints.
+//
+// Caller MUST run this in a goroutine — it blocks for the supervisor's lifetime.
+func (mng *SupervisorManager) StartClaude(supervisorName string, pid, hwnd uint32) error {
+	return mng.startInternal(supervisorName, true, false, true, pid, hwnd)
+}
+
+// StartClaudeLaunch launches a fresh D2R process for the character and attaches
+// the bot in Claude mode (no workflow, no automation, just packet experiment harness).
+//
+// Caller MUST run this in a goroutine — it blocks for the supervisor's lifetime.
+func (mng *SupervisorManager) StartClaudeLaunch(supervisorName string) error {
+	return mng.startInternal(supervisorName, false, false, true, 0, 0)
+}
+
 func (mng *SupervisorManager) Start(supervisorName string, attachToExisting bool, manualMode bool, pidHwnd ...uint32) error {
+	var pid, hwnd uint32
+	if len(pidHwnd) >= 2 {
+		pid, hwnd = pidHwnd[0], pidHwnd[1]
+	}
+	return mng.startInternal(supervisorName, attachToExisting, manualMode, false, pid, hwnd)
+}
+
+func (mng *SupervisorManager) startInternal(supervisorName string, attachToExisting bool, manualMode bool, claudeMode bool, pid uint32, hwnd uint32) error {
 	// Avoid multiple instances of the supervisor - shitstorm prevention
 	mng.mu.RLock()
 	_, exists := mng.supervisors[supervisorName]
 	mng.mu.RUnlock()
 	if exists {
 		return fmt.Errorf("supervisor %s is already running", supervisorName)
+	}
+
+	// buildSupervisor reads CLAUDE_MODE to decide between rmod.dll and
+	// rmod_sniffer.dll for the in-process presenter. Set the env var now,
+	// BEFORE buildSupervisor runs — setting it later leaves the wrong DLL
+	// injected and the sniffer's Present hook gets overridden.
+	if claudeMode {
+		os.Setenv("CLAUDE_MODE", "1")
 	}
 
 	// Reload config to get the latest local changes before starting the supervisor
@@ -84,10 +121,10 @@ func (mng *SupervisorManager) Start(supervisorName string, attachToExisting bool
 	var optionalHWND win.HWND
 
 	if attachToExisting {
-		if len(pidHwnd) == 2 {
-			mng.logger.Info("Attaching to existing game", "pid", pidHwnd[0], "hwnd", pidHwnd[1])
-			optionalPID = pidHwnd[0]
-			optionalHWND = win.HWND(pidHwnd[1])
+		if pid != 0 && hwnd != 0 {
+			mng.logger.Info("Attaching to existing game", "pid", pid, "hwnd", hwnd)
+			optionalPID = pid
+			optionalHWND = win.HWND(hwnd)
 		} else {
 			return fmt.Errorf("pid and hwnd are required when attaching to an existing game")
 		}
@@ -98,10 +135,14 @@ func (mng *SupervisorManager) Start(supervisorName string, attachToExisting bool
 		return err
 	}
 
-	// Set manual mode flag
+	// Set mode flags
 	ctx := supervisor.GetContext()
 	if ctx != nil {
-		if manualMode {
+		if claudeMode {
+			ctx.ClaudeModeActive = true
+			os.Setenv("CLAUDE_MODE", "1")
+			supervisorLogger.Info("Claude mode enabled")
+		} else if manualMode {
 			ctx.ManualModeActive = true
 			supervisorLogger.Info("Manual mode enabled")
 		} else {
@@ -321,25 +362,175 @@ func (mng *SupervisorManager) buildSupervisor(supervisorName string, logger *slo
 				logger.Error(fmt.Sprintf("PANIC in presenter init: %v", r))
 			}
 		}()
-		presenterDLLPath := filepath.Join("tools", "rmod.dll")
+		presenterDLLName := "rmod.dll"
+		// In Claude mode, use the sniffer-enabled DLL that includes
+		// in-process buf0/buf1 polling with zero detection surface.
+		if os.Getenv("CLAUDE_MODE") == "1" {
+			if _, err := os.Stat(filepath.Join("tools", "rmod_sniffer.dll")); err == nil {
+				presenterDLLName = "rmod_sniffer.dll"
+				logger.Info("Claude mode: using sniffer-enabled DLL")
+			}
+		}
+		presenterDLLPath := filepath.Join("tools", presenterDLLName)
 		if absPath, err := filepath.Abs(presenterDLLPath); err == nil {
 			presenterDLLPath = absPath
 		}
 		if _, statErr := os.Stat(presenterDLLPath); statErr == nil {
-			logger.Info(fmt.Sprintf("Phase8: pid=%d grPID=%d dll=%s", pid, gr.GetPID(), presenterDLLPath))
+			logger.Debug("init presenter", slog.Uint64("pid", uint64(pid)), slog.Uint64("grPid", uint64(gr.GetPID())))
 			fnSendPacket, fnErr := gr.Process.GetD2GSSendPacketFn()
 			if fnErr != nil {
 				logger.Warn("could not resolve dispatch function, using legacy path", slog.Any("error", fnErr))
 			} else {
-				logger.Info(fmt.Sprintf("Phase8: SendPacket=%#x, creating presenter for pid=%d", fnSendPacket, pid))
-				pres := presenter.New(pid, presenterDLLPath)
-				if initErr := pres.Init(fnSendPacket); initErr != nil {
-					logger.Warn("runtime module init failed, using legacy path", slog.Any("error", initErr))
+				// UI NetMan global RVA — required for identify/buy/sell/cube/gamble.
+				// RE'd from D2R image: UI NetMan global @ base + 0x19ED860 (vtable[5]
+				// of struct = the queue inserter at FUN_7ff79d8b81b0).
+				const uiNetManRVA uintptr = 0x19ED860
+				uiNetManAddr := gr.Process.ModuleBaseAddress() + uiNetManRVA
+
+				// Mirror buffer RVA — for dual-send vendor path.
+				// RE'd 2026-04-10: D2R's wrapper at ~RVA 0x117500 does memcpy to
+				// this global before calling send_fn. Resolved from:
+				//   lea rcx, [rip + 0x1e09cf0] at RVA 0x117639 → target RVA 0x1F21330
+				// Mirror buffer used by D2R's dual_send_wrap (vendor trade path).
+				// Verified live 2026-04-12 via memdiff capture — dual_send_wrap at
+				// RVA 0x147639 does `LEA RCX, [rip+disp]` where the target is this
+				// global. The value was 0x1F21330 prior to a recent D2R patch that
+				// shifted it by +0x30000. See logs/capture2_analysis_2026-04-12.md
+				// for the full decode. TODO: resolve this dynamically via a sigscan
+				// that disassembles dual_send_wrap at startup so the next patch
+				// can't silently break the dual-send path again.
+				const mirrorBufRVA uintptr = 0x1F51330
+				mirrorBufAddr := gr.Process.ModuleBaseAddress() + mirrorBufRVA
+
+				// Phase 9: in-process click via real_click_worker.
+				// Failure here is non-fatal — the legacy HID path still works.
+				var realClickFn uintptr
+				if rcFn, rcErr := gr.Process.GetRealClickWorkerFn(); rcErr == nil {
+					realClickFn = rcFn
 				} else {
-					gr.Process.SetExternalSender(pres.SendPacket)
-					gi.SetPresenter(pres)
-					logger.Info("runtime module initialized, using Present hook path")
+					logger.Warn("could not resolve real_click_worker; in-process click disabled", slog.Any("error", rcErr))
 				}
+
+				logger.Debug("resolved runtime addresses",
+					slog.Uint64("send", uint64(fnSendPacket)),
+					slog.Uint64("ui", uint64(uiNetManAddr)),
+					slog.Uint64("click", uint64(realClickFn)),
+					slog.Uint64("mirror", uint64(mirrorBufAddr)))
+				// Claude mode delegates pres.Init to single_supervisor.initClaudePresenter
+				// (runs after game entry). Two pres.Init calls inject two rmod images
+				// whose Present detours chain — image_2's UninstallDetour then restores
+				// image_1's JMP back instead of the original Present prologue, so
+				// SnapshotInit acks time out and D2R dies. Normal/Manual modes still
+				// get their presenter here (they never reach initClaudePresenter).
+				if os.Getenv("MODE2") == "1" && os.Getenv("CLAUDE_MODE") != "1" {
+					pres := presenter.New(pid, presenterDLLPath)
+					if initErr := pres.Init(fnSendPacket, uiNetManAddr, realClickFn, uintptr(hwnd), mirrorBufAddr); initErr != nil {
+						logger.Error("runtime module init FAILED — falling through to APC path", slog.Any("error", initErr))
+					} else {
+						gi.SetPresenter(pres)
+						gr.Process.SetExternalCallFn(pres.CallFn)
+						gr.Process.SetExternalWriteMem(pres.WriteMem)
+						forceMoveAddr := gr.Process.GetModuleBase() + 0x19D25B4 + 0x49C + 4
+						pres.SetForceMoveAddr(forceMoveAddr)
+						if os.Getenv("MODE2") == "1" {
+							gr.Process.SetExternalSender(pres.SendPacket)
+							gr.Process.SetExternalUISender(pres.SendUIPacket)
+							gr.Process.SetExternalDualSender(pres.SendDualPacket)
+							gr.Process.SetExternalClick(func(x, y int32, btn byte) error {
+								return pres.ClickAt(x, y, presenter.ClickButton(btn))
+							})
+							gr.Process.SetExternalForceClick(func(x, y int32) error {
+								return pres.ForceClick(x, y)
+							})
+							logger.Info("runtime module: Present hook path enabled for packet sending")
+						}
+						logger.Info("runtime module initialized")
+
+						// P1-GID Phase B0: wire in-process PlayerUnit snapshot.
+						// Opt-in via SNAPSHOT_ENABLE=1 — default off because Phase-2
+						// dup-injection (manager.go pres.Init + single_supervisor
+						// initClaudePresenter both call loadModule) creates two
+						// rmod images in D2R; the install_detour G_TRAMPOLINE guard
+						// is per-image and doesn't unify them, so SnapshotInit acks
+						// time out and D2R dies. Live test 2026-04-17 16:28 confirmed.
+						// Re-enable after dup-injection is fixed (SetPresenter check).
+						if os.Getenv("SNAPSHOT_ENABLE") != "1" {
+							logger.Info("MODE2: skipping snapshot init (SNAPSHOT_ENABLE not set — presenter-only)")
+						} else {
+							unitTableVA, expansionVA, waypointVA := gr.GameReader.SnapshotInitOffsets()
+							// Hard-fail semantics per P1_GID_PLAN.md, but clean teardown
+							// so rmod restores Present before we exit — otherwise D2R
+							// zombies (see Desktop/reports/RESUME_AFTER_REBOOT_4.md).
+							failSnapshot := func(msg string) {
+								logger.Error(msg)
+								if uerr := pres.UninstallDetour(); uerr != nil {
+									logger.Warn("uninstall detour during hard-fail",
+										slog.Any("error", uerr))
+								}
+								os.Exit(1)
+							}
+							if setErr := pres.WriteSnapshotStatics(gr.GameReader.SnapshotStaticEntries()); setErr != nil {
+								failSnapshot(fmt.Sprintf("snapshot statics write failed: %v", setErr))
+							}
+							if snapErr := pres.SnapshotInit(unitTableVA, expansionVA, waypointVA); snapErr != nil {
+								failSnapshot(fmt.Sprintf("snapshot init failed: %v", snapErr))
+							}
+							sr := memory.NewSnapshotReader(pres.LocalView(), uintptr(presenter.SharedBufSize))
+							if tickErr := sr.WaitForFirstTick(3 * time.Second); tickErr != nil {
+								failSnapshot(fmt.Sprintf("snapshot tick never advanced: %v", tickErr))
+							}
+							gr.GameReader.AttachSnapshot(sr)
+							logger.Info("P1-GID snapshot attached; bot memory reads now in-process via SHM",
+								slog.Uint64("tick", sr.Tick()),
+								slog.Uint64("regions", uint64(sr.RegionCount())),
+								slog.Uint64("data_bytes", uint64(sr.DataBytes())))
+						}
+					}
+				}
+				// Liveness watchdog: tight poll (200 ms) so we can snapshot the
+				// in-process VEH crash record before the supervisor restart
+				// tears down the presenter (and its SHM mapping).
+				go func(watchPID uint32, gi *game.MemoryInjector) {
+					defer func() {
+						if r := recover(); r != nil {
+							logger.Error(fmt.Sprintf("D2R watchdog PANIC: %v", r))
+						}
+					}()
+					const query = 0x0400 // PROCESS_QUERY_LIMITED_INFORMATION
+					h, err := ntapi.OpenProcess(query, watchPID)
+					if err != nil {
+						logger.Warn("D2R watchdog: could not open process", slog.Any("error", err))
+						return
+					}
+					defer ntapi.CloseHandle(h)
+
+					// Cache D2R's module list now so ResolveAddress can map
+					// crash frames to "module+0xRVA" strings.
+					if err := RefreshD2RModules(watchPID); err != nil {
+						logger.Warn("D2R watchdog: module refresh failed", slog.Any("error", err))
+					}
+
+					tick := time.NewTicker(200 * time.Millisecond)
+					defer tick.Stop()
+					var exit uint32
+					var sec int
+					for range tick.C {
+						if err := windows.GetExitCodeProcess(h, &exit); err != nil {
+							logger.Error("D2R watchdog: GetExitCodeProcess failed — D2R gone", slog.Any("error", err), slog.Uint64("pid", uint64(watchPID)))
+							snapshotAndLogCrashDiag(gi, logger, watchPID)
+							return
+						}
+						if exit != 259 { // STILL_ACTIVE
+							logger.Error(fmt.Sprintf("D2R watchdog: D2R EXITED pid=%d exitCode=%#x (%d)", watchPID, exit, exit))
+							snapshotAndLogCrashDiag(gi, logger, watchPID)
+							return
+						}
+						sec++
+						if sec%25 == 0 { // ~5 s heartbeat
+							logger.Info(fmt.Sprintf("D2R watchdog: alive pid=%d", watchPID))
+						}
+					}
+				}(pid, gi)
 			}
 		}
 	}()
@@ -446,7 +637,16 @@ func (mng *SupervisorManager) buildSupervisor(supervisorName string, logger *slo
 			return
 		}
 
-		mng.logger.Info("Restarting supervisor after crash", slog.String("supervisor", supervisorName))
+		wasClaudeMode := false
+		if sup, ok := mng.supervisors[supervisorName]; ok {
+			if ctx := sup.GetContext(); ctx != nil {
+				wasClaudeMode = ctx.ClaudeModeActive
+			}
+		}
+
+		mng.logger.Info("Restarting supervisor after crash",
+			slog.String("supervisor", supervisorName),
+			slog.Bool("claudeMode", wasClaudeMode))
 		mng.Stop(supervisorName)
 		time.Sleep(5 * time.Second) // Wait a bit before restarting
 
@@ -498,7 +698,12 @@ func (mng *SupervisorManager) buildSupervisor(supervisorName string, logger *slo
 		gameTitle := supervisorName
 		winproc.SetWindowText.Call(uintptr(hwnd), uintptr(unsafe.Pointer(syscall.StringToUTF16Ptr(gameTitle))))
 
-		err := mng.Start(supervisorName, false, false)
+		var err error
+		if wasClaudeMode {
+			err = mng.StartClaudeLaunch(supervisorName)
+		} else {
+			err = mng.Start(supervisorName, false, false)
+		}
 		if err != nil {
 			mng.logger.Error("Failed to restart supervisor", slog.String("supervisor", supervisorName), slog.String("Error: ", err.Error()))
 		}
@@ -572,4 +777,54 @@ func (mng *SupervisorManager) rearrangeWindows() {
 			mng.logger.Debug("Window position of supervisor " + sp.Name() + " was not changed, no free space for it")
 		}
 	}
+}
+
+
+// LastCrashDiag is a package-level snapshot of the most recent in-process VEH
+// capture. The watchdog writes here when D2R exits so /debug/crash-info can
+// still serve the data after the supervisor has been torn down.
+var (
+	lastCrashDiagMu sync.RWMutex
+	lastCrashDiag   = make(map[string]presenter.CrashDiag)
+)
+
+// GetLastCrashDiag returns the most recent crash record for the given
+// supervisor (empty struct if none captured this session).
+func GetLastCrashDiag(supervisor string) (presenter.CrashDiag, bool) {
+	lastCrashDiagMu.RLock()
+	defer lastCrashDiagMu.RUnlock()
+	d, ok := lastCrashDiag[supervisor]
+	return d, ok
+}
+
+// snapshotAndLogCrashDiag pulls the in-process VEH crash record (if rmod.dll
+// captured anything) and dumps it to the bot log AND saves to the package
+// snapshot map so the HTTP endpoint can still serve it after restart.
+func snapshotAndLogCrashDiag(gi *game.MemoryInjector, logger *slog.Logger, pid uint32) {
+	if gi == nil {
+		return
+	}
+	pres := gi.GetPresenter()
+	if pres == nil {
+		return
+	}
+	d := pres.ReadCrashDiag()
+	logger.Error(fmt.Sprintf("VEH crash record for pid=%d: valid=%t count=%d code=0x%08X tid=%d fault_type=%d rip=0x%016X (%s) fault_va=0x%016X rsp=0x%016X",
+		pid, d.Valid, d.Count, d.Code, d.TID, d.FaultType, d.RIP, ResolveAddress(uintptr(d.RIP)), d.FaultVA, d.RSP))
+	if d.Valid {
+		logger.Error(fmt.Sprintf(
+			"VEH regs: rax=0x%X rcx=0x%X rdx=0x%X rbx=0x%X rsp=0x%X rbp=0x%X rsi=0x%X rdi=0x%X r8=0x%X r9=0x%X r10=0x%X r11=0x%X r12=0x%X r13=0x%X r14=0x%X r15=0x%X",
+			d.Regs[0], d.Regs[1], d.Regs[2], d.Regs[3], d.Regs[4], d.Regs[5], d.Regs[6], d.Regs[7],
+			d.Regs[8], d.Regs[9], d.Regs[10], d.Regs[11], d.Regs[12], d.Regs[13], d.Regs[14], d.Regs[15]))
+		for i, f := range d.Frames {
+			logger.Error(fmt.Sprintf("VEH stack frame[%02d] = 0x%016X (%s)", i, f, ResolveAddress(uintptr(f))))
+		}
+	}
+	// Snapshot under the supervisor name. We don't have it here directly so
+	// stash by PID; the HTTP handler can iterate over the map and pick the
+	// matching entry. Simpler: also store under "_last".
+	lastCrashDiagMu.Lock()
+	lastCrashDiag[fmt.Sprintf("pid=%d", pid)] = d
+	lastCrashDiag["_last"] = d
+	lastCrashDiagMu.Unlock()
 }

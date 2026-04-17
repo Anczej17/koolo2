@@ -2,6 +2,7 @@ package run
 
 import (
 	"fmt"
+	"log/slog"
 	"time"
 
 	"local/internal/svc/internal/action/step"
@@ -54,7 +55,7 @@ func (a Leveling) act5() error {
 
 			a.ctx.Logger.Info("Low on gold. Initiating gold farm.")
 			if err := NewEldritch().Run(nil); err != nil {
-				a.ctx.Logger.Error("Error during gold farm: %v", err)
+				a.ctx.Logger.Error("Error during gold farm", slog.Any("error", err))
 				return err // Propagate error if farming fails
 			}
 

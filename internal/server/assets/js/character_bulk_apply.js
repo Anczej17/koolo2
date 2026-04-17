@@ -219,6 +219,17 @@ document.addEventListener('DOMContentLoaded', function () {
             useForTeleport: !!document.querySelector('input[name="packetCastingUseForTeleport"]')?.checked,
             useForEntitySkills: !!document.querySelector('input[name="packetCastingUseForEntitySkills"]')?.checked,
             useForSkillSelection: !!document.querySelector('input[name="packetCastingUseForSkillSelection"]')?.checked,
+            useForNPCInteraction: !!document.querySelector('input[name="packetCastingUseForNPCInteraction"]')?.checked,
+            useForWeaponSwap: !!document.querySelector('input[name="packetCastingUseForWeaponSwap"]')?.checked,
+            useForMovement: !!document.querySelector('input[name="packetCastingUseForMovement"]')?.checked,
+            useForBuySell: !!document.querySelector('input[name="packetCastingUseForBuySell"]')?.checked,
+            useForCubeTransmute: !!document.querySelector('input[name="packetCastingUseForCubeTransmute"]')?.checked,
+            useForGamble: !!document.querySelector('input[name="packetCastingUseForGamble"]')?.checked,
+            useForRepair: !!document.querySelector('input[name="packetCastingUseForRepair"]')?.checked,
+            useForIdentify: !!document.querySelector('input[name="packetCastingUseForIdentify"]')?.checked,
+            useForPotionUse: !!document.querySelector('input[name="packetCastingUseForPotionUse"]')?.checked,
+            useForStashManagement: !!document.querySelector('input[name="packetCastingUseForStashManagement"]')?.checked,
+            useForInventoryManagement: !!document.querySelector('input[name="packetCastingUseForInventoryManagement"]')?.checked,
         };
         return JSON.stringify(state);
     }

@@ -11,12 +11,12 @@ import (
 	"strings"
 	"time"
 
-	"github.com/bwmarrin/discordgo"
 	"local/internal/svc/internal/gamelib/data"
 	d2stat "local/internal/svc/internal/gamelib/data/stat"
 	"local/internal/svc/internal/gamelib/data/item"
 	"local/internal/svc/internal/config"
 	"local/internal/svc/internal/event"
+	"local/internal/svc/internal/remote/discord/discordembed"
 	"local/internal/svc/internal/remote/discord/enrichment"
 )
 
@@ -70,39 +70,34 @@ func (b *Bot) Handle(ctx context.Context, e event.Event) error {
 		return b.sendEventMessage(ctx, evt.Message())
 	case event.ItemStashedEvent:
 		if config.App.Discord.DisableItemStashScreenshots {
-			if b.useWebhook {
-				embed := buildItemStashEmbed(evt)
-				// Try to attach item thumbnail from local assets
-				imgData, imgFilename := findItemThumbnail(evt.Item.Item)
-				if imgData != nil {
-					embed.Thumbnail = &discordgo.MessageEmbedThumbnail{
-						URL: "attachment://" + imgFilename,
-					}
+			embed := buildItemStashEmbed(evt)
+			imgData, imgFilename := findItemThumbnail(evt.Item.Item)
+			if imgData != nil {
+				embed.Thumbnail = &discordembed.Thumb{
+					URL: "attachment://" + imgFilename,
 				}
-				// If fancy drops enabled, send with response ID for async enrichment
-				if b.enrichmentService != nil {
-					var msgID string
-					var err error
-					if imgData != nil {
-						msgID, err = b.itemWebhookClient().SendEmbedWithThumbnail(ctx, embed, imgData, imgFilename)
-					} else {
-						msgID, err = b.itemWebhookClient().SendEmbedWithResponse(ctx, embed)
-					}
-					if err != nil {
-						return err
-					}
-					if msgID != "" {
-						b.asyncEnrich(evt, embed.Description, embed.Color, msgID, imgData, imgFilename)
-					}
-					return nil
-				}
+			}
+			if b.enrichmentService != nil {
+				var msgID string
+				var err error
 				if imgData != nil {
-					_, err := b.itemWebhookClient().SendEmbedWithThumbnail(ctx, embed, imgData, imgFilename)
+					msgID, err = b.itemWebhookClient().SendEmbedWithThumbnail(ctx, embed, imgData, imgFilename)
+				} else {
+					msgID, err = b.itemWebhookClient().SendEmbedWithResponse(ctx, embed)
+				}
+				if err != nil {
 					return err
 				}
-				return b.itemWebhookClient().SendEmbed(ctx, embed)
+				if msgID != "" {
+					b.asyncEnrich(evt, embed.Description, embed.Color, msgID, imgData, imgFilename)
+				}
+				return nil
 			}
-			return b.sendItemStashEmbed(evt)
+			if imgData != nil {
+				_, err := b.itemWebhookClient().SendEmbedWithThumbnail(ctx, embed, imgData, imgFilename)
+				return err
+			}
+			return b.itemWebhookClient().SendEmbed(ctx, embed)
 		}
 		if e.Image() == nil {
 			return nil
@@ -130,23 +125,8 @@ func (b *Bot) Handle(ctx context.Context, e event.Event) error {
 	return b.sendScreenshot(ctx, message, buf.Bytes())
 }
 
-func (b *Bot) sendItemStashEmbed(evt event.ItemStashedEvent) error {
-	embed := buildItemStashEmbed(evt)
-	_, err := b.discordSession.ChannelMessageSendEmbed(b.itemChannel(), embed)
-	return err
-}
-
 func (b *Bot) sendItemScreenshot(ctx context.Context, message string, image []byte) error {
-	if b.useWebhook {
-		return b.itemWebhookClient().Send(ctx, message, "Screenshot.jpeg", image)
-	}
-
-	reader := bytes.NewReader(image)
-	_, err := b.discordSession.ChannelMessageSendComplex(b.itemChannel(), &discordgo.MessageSend{
-		File:    &discordgo.File{Name: "Screenshot.jpeg", ContentType: "image/jpeg", Reader: reader},
-		Content: message,
-	})
-	return err
+	return b.itemWebhookClient().Send(ctx, message, "Screenshot.jpeg", image)
 }
 
 func (b *Bot) itemChannel() string {
@@ -163,10 +143,10 @@ func (b *Bot) itemWebhookClient() *webhookClient {
 	return b.webhookClient
 }
 
-func buildItemStashEmbed(evt event.ItemStashedEvent) *discordgo.MessageEmbed {
+func buildItemStashEmbed(evt event.ItemStashedEvent) *discordembed.Embed {
 	item := evt.Item.Item
 	quality := item.Quality.ToString()
-	return &discordgo.MessageEmbed{
+	return &discordembed.Embed{
 		Description: buildItemStashDescription(evt),
 		Color:       getCategoryColor(quality),
 	}
@@ -522,25 +502,11 @@ func tryLoadImage(dir, baseName string) ([]byte, string) {
 }
 
 func (b *Bot) sendEventMessage(ctx context.Context, message string) error {
-	if b.useWebhook {
-		return b.webhookClient.Send(ctx, message, "", nil)
-	}
-
-	_, err := b.discordSession.ChannelMessageSend(b.channelID, message)
-	return err
+	return b.webhookClient.Send(ctx, message, "", nil)
 }
 
 func (b *Bot) sendScreenshot(ctx context.Context, message string, image []byte) error {
-	if b.useWebhook {
-		return b.webhookClient.Send(ctx, message, "Screenshot.jpeg", image)
-	}
-
-	reader := bytes.NewReader(image)
-	_, err := b.discordSession.ChannelMessageSendComplex(b.channelID, &discordgo.MessageSend{
-		File:    &discordgo.File{Name: "Screenshot.jpeg", ContentType: "image/jpeg", Reader: reader},
-		Content: message,
-	})
-	return err
+	return b.webhookClient.Send(ctx, message, "Screenshot.jpeg", image)
 }
 
 // asyncEnrich spawns a goroutine that enriches the item embed with roll quality,
@@ -567,7 +533,7 @@ func (b *Bot) asyncEnrich(evt event.ItemStashedEvent, baseDescription string, ba
 		// Re-attach item thumbnail so it persists after PATCH
 		if len(imgData) > 0 && imgFilename != "" {
 			files = append(files, FileAttachment{Data: imgData, Filename: imgFilename})
-			enrichedEmbed.Thumbnail = &discordgo.MessageEmbedThumbnail{
+			enrichedEmbed.Thumbnail = &discordembed.Thumb{
 				URL: "attachment://" + imgFilename,
 			}
 		}
@@ -585,7 +551,7 @@ func (b *Bot) asyncEnrich(evt event.ItemStashedEvent, baseDescription string, ba
 					if fgValue > 0 {
 						footerText = fmt.Sprintf("Traderie: %s (%d fg)", result.TraderiePrice.AvgPrice, fgValue)
 					}
-					enrichedEmbed.Footer = &discordgo.MessageEmbedFooter{
+					enrichedEmbed.Footer = &discordembed.Footer{
 						Text:    footerText,
 						IconURL: "attachment://" + runeFile,
 					}

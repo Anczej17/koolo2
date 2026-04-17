@@ -472,6 +472,9 @@ function createCharacterCard(key) {
                       <button class="manual-play btn btn-manual" data-character="${key}" title="Manual Play" style="display:none;">
                           M
                       </button>
+                      <button class="claude-play btn btn-manual" data-character="${key}" title="Claude Mode (HTTP-driven packet experiments)" style="display:none;">
+                          C
+                      </button>
                       <button class="stop btn btn-stop" data-character="${key}" style="display:none;" title="Stop">
                           <i class="bi bi-stop-fill"></i>
                       </button>
@@ -809,6 +812,24 @@ function setupEventListeners(card, key) {
         .catch((error) => console.error("Error:", error));
     });
   }
+
+  const claudePlayBtn = card.querySelector(".claude-play");
+  if (claudePlayBtn) {
+    claudePlayBtn.addEventListener("click", function () {
+      // Don't trigger if already running (yellow state)
+      if (this.className.includes("btn-pause")) {
+        return;
+      }
+      fetch(
+        `/start?characterName=${encodeURIComponent(
+          getSupervisorName()
+        )}&claudeMode=true`
+      )
+        .then((response) => response.json())
+        .then((data) => updateDashboard(data))
+        .catch((error) => console.error("Error:", error));
+    });
+  }
 }
 
 function updateStatusPosition(card, isExpanded) {
@@ -837,6 +858,7 @@ function updateCharacterCard(card, key, value, dropCount, schedulerInfo) {
   const stopBtn = card.querySelector(".stop");
   const attachBtn = card.querySelector(".attach-btn");
   const manualPlayBtn = card.querySelector(".manual-play");
+  const claudePlayBtn = card.querySelector(".claude-play");
   const statusDetails = card.querySelector(".status-details");
   const statusBadge = statusDetails.querySelector(".status-badge");
   const statusIndicator = card.querySelector(".status-indicator");
@@ -851,7 +873,7 @@ function updateCharacterCard(card, key, value, dropCount, schedulerInfo) {
   }
 
   if (startPauseBtn && stopBtn && attachBtn && manualPlayBtn) {
-    updateButtons(startPauseBtn, stopBtn, attachBtn, manualPlayBtn, value.SupervisorStatus, value.manualModeActive);
+    updateButtons(startPauseBtn, stopBtn, attachBtn, manualPlayBtn, claudePlayBtn, value.SupervisorStatus, value.manualModeActive, value.claudeModeActive);
   }
 
   // Update party button appearance
@@ -1142,20 +1164,37 @@ function triggerAutoStartOnce() {
     });
 }
 
-function updateButtons(startPauseBtn, stopBtn, attachBtn, manualPlayBtn, status, manualModeActive) {
-  // Manual mode active - show yellow M button
-  if (manualModeActive) {
+function updateButtons(startPauseBtn, stopBtn, attachBtn, manualPlayBtn, claudePlayBtn, status, manualModeActive, claudeModeActive) {
+  if (claudeModeActive) {
     startPauseBtn.style.display = "none";
-    manualPlayBtn.style.display = "flex";
-    manualPlayBtn.className = "manual-play btn btn-pause"; // Yellow
+    manualPlayBtn.style.display = "none";
+    if (claudePlayBtn) {
+      claudePlayBtn.style.display = "flex";
+      claudePlayBtn.className = "claude-play btn btn-pause"; // Yellow
+    }
     stopBtn.style.display = "flex";
     attachBtn.style.display = "none";
     return;
   }
 
-  // Normal mode - reset manual button
+  // Manual mode active - show yellow M button
+  if (manualModeActive) {
+    startPauseBtn.style.display = "none";
+    manualPlayBtn.style.display = "flex";
+    manualPlayBtn.className = "manual-play btn btn-pause"; // Yellow
+    if (claudePlayBtn) claudePlayBtn.style.display = "none";
+    stopBtn.style.display = "flex";
+    attachBtn.style.display = "none";
+    return;
+  }
+
+  // Normal mode - reset manual + claude buttons
   manualPlayBtn.style.display = "none";
   manualPlayBtn.className = "manual-play btn btn-manual"; // Darker green
+  if (claudePlayBtn) {
+    claudePlayBtn.style.display = "none";
+    claudePlayBtn.className = "claude-play btn btn-manual";
+  }
   startPauseBtn.style.display = "flex";
 
   if (status === "Paused") {
@@ -1174,6 +1213,7 @@ function updateButtons(startPauseBtn, stopBtn, attachBtn, manualPlayBtn, status,
     stopBtn.style.display = "none";
     attachBtn.style.display = "flex";
     manualPlayBtn.style.display = "flex"; // Show manual button when not running
+    if (claudePlayBtn) claudePlayBtn.style.display = "flex"; // Show claude button when not running
   }
 }
 
@@ -1250,7 +1290,6 @@ function updateCharacterOverview(card, ui, status, stats) {
   let nextExp = ui.NextExp ?? 0;
 
   // Static XP thresholds table for levels 1–99 (total at level start, XP to next)
-  // Source: classic.battle.net Diablo II: LoD Experience Per Level
   const xpTable = {
     1: [0, 500],
     2: [500, 1000],
@@ -1880,8 +1919,8 @@ function fetchProcessList(characterName) {
 
       if (!processes || processes.length === 0) {
         popup.innerHTML = `
-                        <h3>No D2R Processes Found</h3>
-                        <p>There are no Diablo II: Resurrected processes currently running.</p>
+                        <h3>No target processes found</h3>
+                        <p>There are no application processes currently running.</p>
                         <button onclick="closeAttachPopup()" class="btn btn-primary">Close</button>
                     `;
       } else {

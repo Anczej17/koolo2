@@ -16,7 +16,7 @@ import (
 func (gd *GameReader) Inventory(rawPlayerUnits RawPlayerUnits, hover data.HoverData) data.Inventory {
 	mainPlayer := rawPlayerUnits.GetMainPlayer()
 	baseAddr := gd.Process.moduleBaseAddressPtr + gd.offset.UnitTable + (4 * 1024)
-	unitTableBuffer := gd.Process.ReadBytesFromMemory(baseAddr, 128*8)
+	unitTableBuffer := gd.reader.ReadBytesFromMemory(baseAddr, 128*8)
 
 	// Process shared stash data - build a UnitID→page mapping for ALL shared stash units.
 	// Post-patch D2R has 5 shared stash units (3 original shared tabs + DLC tabs).
@@ -82,10 +82,10 @@ func (gd *GameReader) Inventory(rawPlayerUnits RawPlayerUnits, hover data.HoverD
 		itemUnitPtr := uintptr(ReadUIntFromBuffer(unitTableBuffer, uint(itemOffset), Uint64))
 
 		for itemUnitPtr > 0 {
-			nextItemPtr := uintptr(gd.Process.ReadUInt(itemUnitPtr+0x158, Uint64))
+			nextItemPtr := uintptr(gd.reader.ReadUInt(itemUnitPtr+0x158, Uint64))
 
 			// Read basic item data into pre-allocated buffer
-			if err := gd.Process.ReadIntoBuffer(itemUnitPtr, itemDataBuffer); err != nil {
+			if err := gd.reader.ReadIntoBuffer(itemUnitPtr, itemDataBuffer); err != nil {
 				itemUnitPtr = nextItemPtr
 				continue
 			}
@@ -105,7 +105,7 @@ func (gd *GameReader) Inventory(rawPlayerUnits RawPlayerUnits, hover data.HoverD
 			itemLoc := ReadUIntFromBuffer(itemDataBuffer, 0x0C, Uint32)
 
 			unitDataPtr := uintptr(ReadUIntFromBuffer(itemDataBuffer, 0x10, Uint64))
-			if err := gd.Process.ReadIntoBuffer(unitDataPtr, unitDataBuffer); err != nil {
+			if err := gd.reader.ReadIntoBuffer(unitDataPtr, unitDataBuffer); err != nil {
 				itemUnitPtr = nextItemPtr
 				continue
 			}
@@ -116,10 +116,10 @@ func (gd *GameReader) Inventory(rawPlayerUnits RawPlayerUnits, hover data.HoverD
 			itemOwnerNPC := ReadUIntFromBuffer(unitDataBuffer, 0x0C, Uint32)
 
 			// Link to uniqueitems.txt, setitems.txt
-			txtUniqueSet := int32(gd.Process.ReadUInt(unitDataPtr+0x34, Uint32))
+			txtUniqueSet := int32(gd.reader.ReadUInt(unitDataPtr+0x34, Uint32))
 
 			pathPtr := uintptr(ReadUIntFromBuffer(itemDataBuffer, 0x38, Uint64))
-			if err := gd.Process.ReadIntoBuffer(pathPtr, pathBuffer); err != nil {
+			if err := gd.reader.ReadIntoBuffer(pathPtr, pathBuffer); err != nil {
 				itemUnitPtr = nextItemPtr
 				continue
 			}
@@ -146,16 +146,16 @@ func (gd *GameReader) Inventory(rawPlayerUnits RawPlayerUnits, hover data.HoverD
 			setProperties(itm, uint32(flags))
 
 			// Read rare affixes
-			rarePrefix := int16(gd.Process.ReadUInt(unitDataPtr+0x42, Uint16))
-			rareSuffix := int16(gd.Process.ReadUInt(unitDataPtr+0x44, Uint16))
-			//autoAffix := int16(gd.Process.ReadUInt(unitDataPtr+0x46, Uint16))
+			rarePrefix := int16(gd.reader.ReadUInt(unitDataPtr+0x42, Uint16))
+			rareSuffix := int16(gd.reader.ReadUInt(unitDataPtr+0x44, Uint16))
+			//autoAffix := int16(gd.reader.ReadUInt(unitDataPtr+0x46, Uint16))
 
 			// Read magic affixes
 			var prefixes [3]int16
 			var suffixes [3]int16
 			for i := 0; i < 3; i++ {
-				prefixes[i] = int16(gd.Process.ReadUInt(unitDataPtr+0x48+uintptr(i*2), Uint16))
-				suffixes[i] = int16(gd.Process.ReadUInt(unitDataPtr+0x4E+uintptr(i*2), Uint16))
+				prefixes[i] = int16(gd.reader.ReadUInt(unitDataPtr+0x48+uintptr(i*2), Uint16))
+				suffixes[i] = int16(gd.reader.ReadUInt(unitDataPtr+0x4E+uintptr(i*2), Uint16))
 			}
 
 			itm.Affixes = data.ItemAffixes{
@@ -322,7 +322,7 @@ func (gd *GameReader) Inventory(rawPlayerUnits RawPlayerUnits, hover data.HoverD
 
 			// Set body location if equipped
 			bodyLoc := item.LocNone
-			equipSlotFlags := uint16(gd.Process.ReadUInt(unitDataPtr+uintptr(0x54), Uint16))
+			equipSlotFlags := uint16(gd.reader.ReadUInt(unitDataPtr+uintptr(0x54), Uint16))
 			if equipSlotFlags&0xFF00 == 0xFF00 {
 				equipSlot := uint8(equipSlotFlags & 0xFF)
 				switch equipSlot {
@@ -370,7 +370,7 @@ func (gd *GameReader) Inventory(rawPlayerUnits RawPlayerUnits, hover data.HoverD
 			itm.BaseStats, itm.Stats = gd.getItemStats(statsListExPtr)
 
 			// stack quantity as item property
-			stackQty := gd.Process.ReadUInt(unitDataPtr+0x9C, Uint32)
+			stackQty := gd.reader.ReadUInt(unitDataPtr+0x9C, Uint32)
 			itm.StackedQuantity = int(stackQty)
 
 			// Process socket information
@@ -395,12 +395,12 @@ func (gd *GameReader) Inventory(rawPlayerUnits RawPlayerUnits, hover data.HoverD
 					// Normal socketed items (runes,gems) just use base requirement
 					itm.LevelReq = itm.Desc().RequiredLevel
 				}
-				itemExtraData := uintptr(gd.Process.ReadUInt(unitDataPtr+0xA0, Uint64))
+				itemExtraData := uintptr(gd.reader.ReadUInt(unitDataPtr+0xA0, Uint64))
 				if itemExtraData != 0 {
-					parentInfoPtr := uintptr(gd.Process.ReadUInt(itemExtraData+0x08, Uint64))
+					parentInfoPtr := uintptr(gd.reader.ReadUInt(itemExtraData+0x08, Uint64))
 					if parentInfoPtr != 0 {
 						// Read parent unit ID directly from base item memory structure
-						if err := gd.Process.ReadIntoBuffer(parentInfoPtr, itemDataBuffer); err == nil {
+						if err := gd.reader.ReadIntoBuffer(parentInfoPtr, itemDataBuffer); err == nil {
 							parentUnitID := data.UnitID(ReadUIntFromBuffer(itemDataBuffer, 0x08, Uint32))
 							socketedItemsMap[parentUnitID] = append(socketedItemsMap[parentUnitID], socketInfo{
 								item:     itm,
@@ -530,8 +530,8 @@ func (gd *GameReader) getItemStats(statsListExPtr uintptr) (stat.Stats, stat.Sta
 	}
 
 	// Flags and last stat list pointers
-	flags := gd.Process.ReadUInt(statsListExPtr+0x1C, Uint64)
-	lastStatsList := uintptr(gd.Process.ReadUInt(statsListExPtr+0x90, Uint64))
+	flags := gd.reader.ReadUInt(statsListExPtr+0x1C, Uint64)
+	lastStatsList := uintptr(gd.reader.ReadUInt(statsListExPtr+0x90, Uint64))
 
 	// If the special flag isn't set, return the current base and full stats
 	if (flags & 0x80000000) == 0 {
@@ -545,7 +545,7 @@ func (gd *GameReader) getItemStats(statsListExPtr uintptr) (stat.Stats, stat.Sta
 	// Traverse the stat lists to accumulate additional stats
 	for statListPtr != 0 {
 
-		statListFlags := gd.Process.ReadUInt(statListPtr+0x1C, Uint64)
+		statListFlags := gd.reader.ReadUInt(statListPtr+0x1C, Uint64)
 
 		// If we hit a condition where no further traversal is needed, break
 		if (0x40 & statListFlags & 0xFFFFDFFF) != 0 {
@@ -553,7 +553,7 @@ func (gd *GameReader) getItemStats(statsListExPtr uintptr) (stat.Stats, stat.Sta
 		}
 
 		// Move to the previous stat list
-		statListPtr = uintptr(gd.Process.ReadUInt(statListPtr+0x48, Uint64))
+		statListPtr = uintptr(gd.reader.ReadUInt(statListPtr+0x48, Uint64))
 	}
 
 	// If we found a valid previous stat list
@@ -575,7 +575,7 @@ func (gd *GameReader) getItemStats(statsListExPtr uintptr) (stat.Stats, stat.Sta
 	statListPtr = lastStatsList
 
 	for statListPtr != 0 {
-		statListFlags := gd.Process.ReadUInt(statListPtr+0x1C, Uint64)
+		statListFlags := gd.reader.ReadUInt(statListPtr+0x1C, Uint64)
 
 		if statListFlags != 0 {
 			modifierBaseStats := gd.getStatsList(statListPtr + 0x30)
@@ -598,7 +598,7 @@ func (gd *GameReader) getItemStats(statsListExPtr uintptr) (stat.Stats, stat.Sta
 		}
 
 		// Move to the previous stat list
-		statListPtr = uintptr(gd.Process.ReadUInt(statListPtr+0x48, Uint64))
+		statListPtr = uintptr(gd.reader.ReadUInt(statListPtr+0x48, Uint64))
 	}
 
 	return baseStats, fullStats

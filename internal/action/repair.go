@@ -15,7 +15,6 @@ import (
 	"local/internal/svc/internal/town"
 	"local/internal/svc/internal/ui"
 	"local/internal/svc/internal/utils"
-	"github.com/lxn/win"
 )
 
 func RepairTownRoutine() error {
@@ -145,21 +144,38 @@ func repairAllAtNPC(repairNPC npc.ID) error {
 		return err
 	}
 
-	if repairNPC != npc.Halbu {
-		ctx.HID.KeySequence(win.VK_HOME, win.VK_DOWN, win.VK_RETURN)
-	} else {
-		ctx.HID.KeySequence(win.VK_HOME, win.VK_RETURN)
-	}
+	SelectNPCTradeOption(repairNPC)
 
 	utils.Sleep(100)
+	clickRepairButton(ctx, repairNPC)
+	utils.Sleep(500)
+
+	return step.CloseAllMenus()
+}
+
+// clickRepairButton triggers the "repair all" action. With UseForRepair enabled
+// it sends packet 0x35 via the UI NetMan path; otherwise it falls back to the
+// HID click on the repair button. Packet errors fall back to HID transparently.
+func clickRepairButton(ctx *context.Status, repairNPC npc.ID) {
+	if ctx.CharacterCfg.PacketCasting.UseForRepair && ctx.PacketSender != nil {
+		npcUnit, found := ctx.Data.Monsters.FindOne(repairNPC, data.MonsterTypeNone)
+		if found {
+			ctx.Logger.Debug("Sending repair all via packet", "npc", repairNPC, "gid", npcUnit.UnitID)
+			if err := ctx.PacketSender.RepairAll(ctx.Data.PlayerUnit.ID); err == nil {
+				return
+			} else {
+				ctx.Logger.Warn("Repair packet failed, falling back to HID", "error", err)
+			}
+		} else {
+			ctx.Logger.Warn("Repair packet path: NPC unit not found, falling back to HID", "npc", repairNPC)
+		}
+	}
+
 	if ctx.Data.LegacyGraphics {
 		ctx.HID.Click(game.LeftButton, ui.RepairButtonXClassic, ui.RepairButtonYClassic)
 	} else {
 		ctx.HID.Click(game.LeftButton, ui.RepairButtonX, ui.RepairButtonY)
 	}
-	utils.Sleep(500)
-
-	return step.CloseAllMenus()
 }
 
 func Repair() error {
@@ -226,18 +242,10 @@ func Repair() error {
 				return err
 			}
 
-			if repairNPC != npc.Halbu {
-				ctx.HID.KeySequence(win.VK_HOME, win.VK_DOWN, win.VK_RETURN)
-			} else {
-				ctx.HID.KeySequence(win.VK_HOME, win.VK_RETURN)
-			}
+			SelectNPCTradeOption(repairNPC)
 
 			utils.Sleep(100)
-			if ctx.Data.LegacyGraphics {
-				ctx.HID.Click(game.LeftButton, ui.RepairButtonXClassic, ui.RepairButtonYClassic)
-			} else {
-				ctx.HID.Click(game.LeftButton, ui.RepairButtonX, ui.RepairButtonY)
-			}
+			clickRepairButton(ctx, repairNPC)
 			utils.Sleep(500)
 
 			return step.CloseAllMenus()

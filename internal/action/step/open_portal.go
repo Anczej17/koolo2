@@ -64,7 +64,7 @@ func OpenPortal() error {
 				ctx.Logger.Warn("Town Portal Tome is empty, checking for loose scrolls")
 				tpItemFound = false
 			} else if _, bindingFound := ctx.Data.KeyBindings.KeyBindingForSkill(skill.TomeOfTownPortal); bindingFound {
-				ctx.HID.PressKeyBinding(ctx.Data.KeyBindings.MustKBForSkill(skill.TomeOfTownPortal))
+				_ = SelectRightSkill(skill.TomeOfTownPortal)
 				utils.PingSleep(utils.Medium, 250) // Medium operation: Wait for tome activation
 				ctx.HID.Click(game.RightButton, 300, 300)
 				usedKB = true

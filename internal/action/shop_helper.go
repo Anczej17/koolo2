@@ -9,7 +9,6 @@ import (
 	"local/internal/svc/internal/context"
 	"local/internal/svc/internal/town"
 	"local/internal/svc/internal/utils"
-	"github.com/lxn/win"
 )
 
 // BuyAct2Flails attempts to purchase 3-socket normal Flails from Fara in Act 2 for Barbarian characters.
@@ -57,8 +56,7 @@ func BuyAct2Flails(ctx *context.Status) error {
 			ctx.Logger.Error("Failed to interact with Fara", "error", err)
 			continue
 		}
-		// Trade option for Fara (first option is repair, second is trade)
-		ctx.HID.KeySequence(win.VK_HOME, win.VK_DOWN, win.VK_RETURN)
+		SelectNPCTradeOption(npc.Fara)
 		utils.Sleep(1000)
 
 		ctx.GameReader.GetData()
@@ -163,8 +161,7 @@ func BuyAct2BoneWands(ctx *context.Status) error {
 			ctx.Logger.Error("Failed to interact with Drognan", "error", err)
 			continue
 		}
-		// Trade option for Drognan (first option is trade)
-		ctx.HID.KeySequence(win.VK_HOME, win.VK_DOWN, win.VK_RETURN)
+		SelectNPCTradeOption(npc.Drognan)
 		utils.Sleep(1000)
 
 		ctx.GameReader.GetData()

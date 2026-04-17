@@ -10,6 +10,7 @@ import (
 	"local/internal/svc/internal/game"
 	"local/internal/svc/internal/pather"
 	"local/internal/svc/internal/ui"
+	"local/internal/svc/internal/utils"
 )
 
 func InteractNPC(npcID npc.ID) error {
@@ -22,6 +23,36 @@ func InteractNPC(npcID npc.ID) error {
 		maxDistance     = 15
 		hoverWait       = 800 * time.Millisecond
 	)
+
+	// Packet-based NPC interaction path
+	if ctx.CharacterCfg.PacketCasting.UseForNPCInteraction && ctx.PacketSender != nil {
+		townNPC, found := ctx.Data.Monsters.FindOne(npcID, data.MonsterTypeNone)
+		if found {
+			distance := ctx.PathFinder.DistanceFromMe(townNPC.Position)
+			if distance <= maxDistance {
+				npcX := uint16(townNPC.Position.X)
+				npcY := uint16(townNPC.Position.Y)
+				playerGID := ctx.Data.PlayerUnit.ID
+				ctx.Logger.Debug("Attempting NPC interaction via packet 0x4D+0x2F", "npc", npcID, "unitID", townNPC.UnitID, "npcX", npcX, "npcY", npcY)
+				err := ctx.PacketSender.InteractNPC(townNPC.UnitID, playerGID, npcX, npcY)
+				if err == nil {
+					utils.Sleep(200)
+					// Wait for NPC dialog to open — refresh game data each tick
+					for i := 0; i < 15; i++ {
+						ctx.RefreshGameData()
+						if ctx.Data.OpenMenus.NPCInteract || ctx.Data.OpenMenus.NPCShop {
+							ctx.Logger.Info("NPC dialog opened via packet", "npc", npcID, "waitMs", (i+1)*100+200)
+							return nil
+						}
+						utils.Sleep(100)
+					}
+					ctx.Logger.Warn("Packet NPC interaction: 0x4D+0x2F sent but dialog did not open after 1.7s, falling back to HID", "npc", npcID)
+				} else {
+					ctx.Logger.Warn("Packet NPC interaction failed, falling back to mouse method", "npc", npcID, "error", err.Error())
+				}
+			}
+		}
+	}
 
 	var targetNPCID data.UnitID
 

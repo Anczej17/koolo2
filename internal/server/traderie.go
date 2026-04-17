@@ -11,9 +11,12 @@ import (
 	"strings"
 
 	"local/internal/svc/internal/config"
+	"local/internal/svc/internal/secrets"
 )
 
-const traderieBaseURL = "https://traderie.com/api/diablo2resurrected"
+// traderieBaseURL is materialized from the garbled secrets package at import
+// time so the URL itself never appears as a plaintext literal in server code.
+var traderieBaseURL = secrets.TraderieBaseURL
 
 func traderieJSONError(w http.ResponseWriter, msg string, code int) {
 	w.Header().Set("Content-Type", "application/json")
@@ -32,8 +35,8 @@ func traderieCurl(method, rawURL string, body []byte) ([]byte, int, error) {
 		"-H", "Content-Type: application/json",
 		"-H", "Accept-Language: pl,en;q=0.9",
 		"-H", "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36",
-		"-H", "Referer: https://traderie.com/diablo2resurrected/listings/create",
-		"-H", "Origin: https://traderie.com",
+		"-H", "Referer: " + secrets.TraderieReferer,
+		"-H", "Origin: " + secrets.TraderieOrigin,
 	}
 
 	if config.App != nil {
@@ -84,8 +87,8 @@ func traderieCurlMultipart(rawURL string, formBody []byte) ([]byte, int, error) 
 		"-H", "Accept: application/json",
 		"-H", "Accept-Language: pl,en;q=0.9",
 		"-H", "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36",
-		"-H", "Referer: https://traderie.com/diablo2resurrected/listings/create",
-		"-H", "Origin: https://traderie.com",
+		"-H", "Referer: " + secrets.TraderieReferer,
+		"-H", "Origin: " + secrets.TraderieOrigin,
 		"-F", "body=" + string(formBody),
 	}
 

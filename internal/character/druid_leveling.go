@@ -106,9 +106,7 @@ func (s DruidLeveling) KillMonsterSequence(
 	lastReposition := time.Now()
 
 	defer func() { // Ensures Tornado is set as active skill on exit
-		if kb, found := ctx.Data.KeyBindings.KeyBindingForSkill(skill.Tornado); found {
-			ctx.HID.PressKeyBinding(kb)
-		}
+		_ = step.SelectRightSkill(skill.Tornado)
 	}()
 
 	for {
@@ -184,8 +182,8 @@ func (s DruidLeveling) KillMonsterSequence(
 				}
 			}
 		} else {
-			if kb, found := ctx.Data.KeyBindings.KeyBindingForSkill(skill.Tornado); found {
-				ctx.HID.PressKeyBinding(kb) // Set Tornado as active skill
+			if _, found := ctx.Data.KeyBindings.KeyBindingForSkill(skill.Tornado); found {
+				_ = step.SelectRightSkill(skill.Tornado) // Set Tornado as active skill
 				if err := step.SecondaryAttack(skill.Tornado, currentTargetID, 1, step.Distance(levelingminDistance, levelingmaxDistance)); err == nil {
 					if !s.waitForCastComplete() { // Wait for cast to complete
 						continue
@@ -249,9 +247,9 @@ func (s DruidLeveling) RecastBuffs() {
 	}
 
 	for i, druSkill := range skills {
-		if kb, found := ctx.Data.KeyBindings.KeyBindingForSkill(druSkill); found {
+		if _, found := ctx.Data.KeyBindings.KeyBindingForSkill(druSkill); found {
 			if !ctx.Data.PlayerUnit.States.HasState(states[i]) { // Check if buff is missing
-				ctx.HID.PressKeyBinding(kb)             // Activate skill
+				_ = step.SelectRightSkill(druSkill)     // Activate skill
 				utils.Sleep(180)                        // Small delay
 				s.HID.Click(game.RightButton, 640, 340) // Cast skill at center screen
 				utils.Sleep(100)                        // Delay to ensure cast completes
@@ -259,7 +257,7 @@ func (s DruidLeveling) RecastBuffs() {
 		}
 	}
 
-	if bearKb, found := s.Data.KeyBindings.KeyBindingForSkill(skill.SummonGrizzly); found {
+	if _, found := s.Data.KeyBindings.KeyBindingForSkill(skill.SummonGrizzly); found {
 		needsBear := true
 		for _, monster := range s.Data.Monsters { // Check existing pets
 			if monster.IsPet() {
@@ -270,10 +268,10 @@ func (s DruidLeveling) RecastBuffs() {
 			}
 		}
 		if needsBear {
-			ctx.HID.PressKeyBinding(bearKb)         // Activate skill
-			utils.Sleep(180)                        // Small delay
-			s.HID.Click(game.RightButton, 640, 340) // Cast skill at center screen
-			utils.Sleep(200)                        // Delay to ensure cast completes
+			_ = step.SelectRightSkill(skill.SummonGrizzly) // Activate skill
+			utils.Sleep(180)                               // Small delay
+			s.HID.Click(game.RightButton, 640, 340)        // Cast skill at center screen
+			utils.Sleep(200)                               // Delay to ensure cast completes
 		}
 	}
 }

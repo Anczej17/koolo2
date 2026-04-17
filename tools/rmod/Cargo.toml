@@ -6,10 +6,17 @@ edition = "2021"
 [lib]
 crate-type = ["cdylib"]
 
+[features]
+default = []
+sniffer = []  # In-process buf0/buf1 polling sniffer. Builds rmod_sniffer.dll for Claude mode.
+
 [dependencies]
 # No external dependencies — all Windows FFI is declared inline.
 # This keeps the binary small, avoids feature-flag churn, and ensures
 # we control every type definition exactly.
+
+[profile.dev]
+panic = "abort"
 
 [profile.release]
 opt-level = "s"

@@ -20,11 +20,11 @@ import (
 func GetMapData(seed string, difficulty difficulty.Difficulty) (MapData, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, "./tools/mapsvc.exe", config.App.D2LoDPath, "-s", seed, "-d", getDifficultyAsNum(difficulty))
+	cmd := exec.CommandContext(ctx, "./tools/mapsvc.exe", config.App.LegacyAppPath, "-s", seed, "-d", getDifficultyAsNum(difficulty))
 	cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
 	stdout, err := cmd.Output()
 	if err != nil {
-		return nil, fmt.Errorf("error fetching Map data from Diablo II: LoD 1.13c game: %w", err)
+		return nil, fmt.Errorf("error fetching map data from legacy app: %w", err)
 	}
 
 	stdoutLines := strings.Split(string(stdout), "\r\n")

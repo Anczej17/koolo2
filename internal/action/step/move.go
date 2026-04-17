@@ -299,11 +299,11 @@ func MoveTo(dest data.Position, options ...MoveOption) error {
 				blocked = true
 				if ctx.Data.CanTeleport() && !ctx.Data.AreaData.Area.IsTown() {
 					ctx.Logger.Debug("Round-trip early recovery: attempting random teleport",
-						fmt.Sprintf("elapsed=%v", timeInRoundtrip))
+						"elapsed", fmt.Sprintf("%v", timeInRoundtrip))
 					ctx.PathFinder.RandomTeleport()
 				} else {
 					ctx.Logger.Debug("Round-trip early recovery: attempting random movement",
-						fmt.Sprintf("elapsed=%v", timeInRoundtrip))
+						"elapsed", fmt.Sprintf("%v", timeInRoundtrip))
 					ctx.PathFinder.RandomMovement()
 					time.Sleep(200 * time.Millisecond)
 				}
@@ -356,23 +356,23 @@ func MoveTo(dest data.Position, options ...MoveOption) error {
 		//Handle skills for navigation
 		if ctx.Data.CanTeleport() {
 			if ctx.Data.PlayerUnit.RightSkill != skill.Teleport {
-				ctx.HID.PressKeyBinding(ctx.Data.KeyBindings.MustKBForSkill(skill.Teleport))
+				_ = SelectRightSkill(skill.Teleport)
 			}
 		} else if isDragondin {
 			// Dragondin: keep Conviction active while moving (instead of Vigor).
 			// Fallback to Vigor if Conviction isn't bound.
-			if kb, found := ctx.Data.KeyBindings.KeyBindingForSkill(skill.Conviction); found {
+			if _, found := ctx.Data.KeyBindings.KeyBindingForSkill(skill.Conviction); found {
 				if ctx.Data.PlayerUnit.RightSkill != skill.Conviction {
-					ctx.HID.PressKeyBinding(kb)
+					_ = SelectRightSkill(skill.Conviction)
 				}
-			} else if kb, found := ctx.Data.KeyBindings.KeyBindingForSkill(skill.Vigor); found {
+			} else if _, found := ctx.Data.KeyBindings.KeyBindingForSkill(skill.Vigor); found {
 				if ctx.Data.PlayerUnit.RightSkill != skill.Vigor {
-					ctx.HID.PressKeyBinding(kb)
+					_ = SelectRightSkill(skill.Vigor)
 				}
 			}
-		} else if kb, found := ctx.Data.KeyBindings.KeyBindingForSkill(skill.Vigor); found {
+		} else if _, found := ctx.Data.KeyBindings.KeyBindingForSkill(skill.Vigor); found {
 			if ctx.Data.PlayerUnit.RightSkill != skill.Vigor {
-				ctx.HID.PressKeyBinding(kb)
+				_ = SelectRightSkill(skill.Vigor)
 			}
 		}
 

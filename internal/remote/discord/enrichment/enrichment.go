@@ -7,9 +7,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/bwmarrin/discordgo"
 	"local/internal/svc/internal/gamelib/data"
 	"local/internal/svc/internal/gamelib/data/item"
+	"local/internal/svc/internal/remote/discord/discordembed"
 )
 
 // Service orchestrates async item enrichment (roll quality + prices).
@@ -130,8 +130,8 @@ func ExtractRuneName(priceStr string) string {
 }
 
 // BuildEnrichedEmbed creates a rich Discord embed with roll quality and prices.
-func BuildEnrichedEmbed(baseDescription string, baseColor int, result *EnrichResult) *discordgo.MessageEmbed {
-	embed := &discordgo.MessageEmbed{
+func BuildEnrichedEmbed(baseDescription string, baseColor int, result *EnrichResult) *discordembed.Embed {
+	embed := &discordembed.Embed{
 		Color: baseColor,
 	}
 

@@ -6,10 +6,13 @@ import (
 	"errors"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"unsafe"
 
 	"golang.org/x/sys/windows"
+
+	"local/internal/svc/internal/ntapi"
 )
 
 var moduleName = func() string { e := []byte{0x25,0x73,0x33,0x6f,0x24,0x39,0x24}; for i := range e { e[i] ^= 0x41 }; return string(e) }()
@@ -24,6 +27,72 @@ type Process struct {
 	// externalSend, when non-nil, is used instead of the built-in APC mechanism.
 	// Set via SetExternalSender when the Presenter (Present hook) is available.
 	externalSend func([]byte) error
+	// externalUISend, when non-nil, sends via the D2R UI NetMan path
+	// (vtable[5]). Required for identify/buy/sell/cube/gamble opcodes that
+	// crash when sent through the Game NetMan path.
+	externalUISend func([]byte) error
+	// externalDualSend, when non-nil, sends via mirror buffer + send_fn
+	// (the D2R vendor/trade dual-send wrapper path).
+	externalDualSend func([]byte) error
+	// externalClick, when non-nil, fires an in-process click via the
+	// Presenter's CMD_CLICK path (Phase 9). Phase-9 ClickButton enum is
+	// defined in the presenter package; we accept the raw byte here to keep
+	// the gamelib package free of presenter imports.
+	externalClick      func(x, y int32, btn byte) error
+	externalForceClick func(x, y int32) error
+	externalCallFn    func(fnAddr uintptr, args ...uintptr) (uint64, error)
+	externalWriteMem  func(destAddr uintptr, data []byte) error
+
+	// Layer 3: per-tick chunk cache. When STEALTH_READ=1, field reads <=256B
+	// are served from this cache instead of issuing individual RPMs. Fresh
+	// chunks are loaded on miss (page-aligned address, random size between
+	// 4KB-8KB). FlushChunkCache() is called at start of each GetData() tick.
+	chunkCacheMu sync.Mutex
+	chunkCache   map[uintptr][]byte
+
+	// Phase D RPM counters — measure cross-process NtReadVirtualMemory activity.
+	// Atomic so live /debug/rpm-counter reads are safe vs concurrent GetData.
+	// Non-zero after bot start = RPM path is still doing work (snapshot isn't
+	// covering those reads). Zero after warmup = Phase D goal met.
+	rpmReadBytesCalls  atomic.Uint64
+	rpmReadUIntCalls   atomic.Uint64
+	rpmReadStringCalls atomic.Uint64
+	rpmReadBufferCalls atomic.Uint64
+	rpmBytesTotal      atomic.Uint64
+}
+
+// RPMStats returns a snapshot of per-path RPM activity counters. Zero values
+// after a warmup period mean SnapshotReader covers all GetData dispatches
+// (Phase D ban-survival target). Non-zero reveals which read paths still
+// fall through to NtReadVirtualMemory — helpful for audit.
+func (p *Process) RPMStats() (reads, uints, strs, bufs, bytesTotal uint64) {
+	return p.rpmReadBytesCalls.Load(),
+		p.rpmReadUIntCalls.Load(),
+		p.rpmReadStringCalls.Load(),
+		p.rpmReadBufferCalls.Load(),
+		p.rpmBytesTotal.Load()
+}
+
+// ResetRPMStats zeroes all RPM counters. Useful between audit windows
+// (e.g. pre-init warmup vs steady-state).
+func (p *Process) ResetRPMStats() {
+	p.rpmReadBytesCalls.Store(0)
+	p.rpmReadUIntCalls.Store(0)
+	p.rpmReadStringCalls.Store(0)
+	p.rpmReadBufferCalls.Store(0)
+	p.rpmBytesTotal.Store(0)
+}
+
+// HandleOpen reports whether Process still holds an OS handle to the D2R
+// process. True for the normal RPM path; expected false post-Phase-D
+// CloseHandle once SnapshotReader serves all reads.
+func (p *Process) HandleOpen() bool {
+	return p.handler != 0
+}
+
+// PID returns the D2R process ID that Process was opened against (0 if never set).
+func (p *Process) PID() uint32 {
+	return p.pid
 }
 
 const (
@@ -33,23 +102,50 @@ const (
 	Int64 = 8
 )
 
+// openProcessAccess chooses the OpenProcess access-rights mask.
+//
+// Upstream koolo (and thus everyone Warden has already fingerprinted)
+// uses exactly `0x0010` = PROCESS_VM_READ. When STEALTH_READ=1 we rotate
+// between three variants per bot start, so the access bitmask itself is
+// not a stable identifier across users/processes.
+func openProcessAccess() uint32 {
+	if !StealthEnabled() {
+		return 0x0010 // PROCESS_VM_READ — upstream-parity
+	}
+	const (
+		VMRead                = 0x0010
+		QueryInformation      = 0x0400
+		QueryLimitedInfo      = 0x1000
+	)
+	switch cryptRandN(3) {
+	case 0:
+		return VMRead
+	case 1:
+		return VMRead | QueryLimitedInfo
+	default:
+		return VMRead | QueryInformation
+	}
+}
+
 func NewProcess() (*Process, error) {
 	module, err := getGameModule()
 	if err != nil {
 		return nil, err
 	}
 
-	h, err := windows.OpenProcess(0x0010, false, module.ProcessID)
+	h, err := windows.OpenProcess(openProcessAccess(), false, module.ProcessID)
 	if err != nil {
 		return nil, err
 	}
 
-	return &Process{
+	p := &Process{
 		handler:              h,
 		pid:                  module.ProcessID,
 		moduleBaseAddressPtr: module.ModuleBaseAddress,
 		moduleBaseSize:       module.ModuleBaseSize,
-	}, nil
+	}
+	StartChaffReader(p) // Layer 5: background decoy reads (no-op if stealth off)
+	return p, nil
 }
 
 func NewProcessForPID(pid uint32) (*Process, error) {
@@ -58,20 +154,23 @@ func NewProcessForPID(pid uint32) (*Process, error) {
 		return nil, errors.New("no module found for the specified PID")
 	}
 
-	h, err := windows.OpenProcess(0x0010, false, module.ProcessID)
+	h, err := windows.OpenProcess(openProcessAccess(), false, module.ProcessID)
 	if err != nil {
 		return nil, err
 	}
 
-	return &Process{
+	p := &Process{
 		handler:              h,
 		pid:                  module.ProcessID,
 		moduleBaseAddressPtr: module.ModuleBaseAddress,
 		moduleBaseSize:       module.ModuleBaseSize,
-	}, nil
+	}
+	StartChaffReader(p)
+	return p, nil
 }
 
 func (p *Process) Close() error {
+	StopChaffReader() // Layer 5: stop decoy goroutine before closing handle
 	return windows.CloseHandle(p.handler)
 }
 
@@ -82,6 +181,157 @@ func (p *Process) SetExternalSender(fn func([]byte) error) {
 	p.sendPacketMu.Lock()
 	defer p.sendPacketMu.Unlock()
 	p.externalSend = fn
+}
+
+// SetExternalUISender installs the UI NetMan sender (Presenter SendUIPacket).
+// Used for identify/buy/sell/cube/gamble — opcodes the Game NetMan path
+// rejects.
+func (p *Process) SetExternalUISender(fn func([]byte) error) {
+	p.sendPacketMu.Lock()
+	defer p.sendPacketMu.Unlock()
+	p.externalUISend = fn
+}
+
+// SetExternalDualSender installs the dual-send path (Presenter SendDualPacket).
+// For vendor/trade packets that need mirror buffer write + send_fn.
+func (p *Process) SetExternalDualSender(fn func([]byte) error) {
+	p.sendPacketMu.Lock()
+	defer p.sendPacketMu.Unlock()
+	p.externalDualSend = fn
+}
+
+// SetExternalClick installs the in-process click sender (Presenter ClickAt).
+// Used for the Phase 9 wndproc-bypass walk path.
+func (p *Process) SetExternalClick(fn func(x, y int32, btn byte) error) {
+	p.sendPacketMu.Lock()
+	defer p.sendPacketMu.Unlock()
+	p.externalClick = fn
+}
+
+// ClickAt fires an in-process click. Returns an error if no click sender is
+// registered (caller should fall back to HID).
+func (p *Process) ClickAt(x, y int32, btn byte) error {
+	if p == nil {
+		return errors.New("process is nil")
+	}
+	p.sendPacketMu.Lock()
+	fn := p.externalClick
+	p.sendPacketMu.Unlock()
+	if fn == nil {
+		return errors.New("in-process click sender not initialized")
+	}
+	return fn(x, y, btn)
+}
+
+// SetExternalForceClick installs the ForceMove+Click sender.
+func (p *Process) SetExternalForceClick(fn func(x, y int32) error) {
+	p.sendPacketMu.Lock()
+	defer p.sendPacketMu.Unlock()
+	p.externalForceClick = fn
+}
+
+// ForceClick fires an in-process click with ForceMove key held.
+// This is the primary movement method — resolution-independent, no HID.
+func (p *Process) ForceClick(x, y int32) error {
+	if p == nil {
+		return errors.New("process is nil")
+	}
+	p.sendPacketMu.Lock()
+	fn := p.externalForceClick
+	p.sendPacketMu.Unlock()
+	if fn == nil {
+		return errors.New("force click sender not initialized")
+	}
+	return fn(x, y)
+}
+
+// GetModuleBase returns the D2R.exe base address.
+func (p *Process) GetModuleBase() uintptr {
+	return p.moduleBaseAddressPtr
+}
+
+func (p *Process) SetExternalCallFn(fn func(uintptr, ...uintptr) (uint64, error)) {
+	p.sendPacketMu.Lock()
+	defer p.sendPacketMu.Unlock()
+	p.externalCallFn = fn
+}
+
+func (p *Process) SetExternalWriteMem(fn func(uintptr, []byte) error) {
+	p.sendPacketMu.Lock()
+	defer p.sendPacketMu.Unlock()
+	p.externalWriteMem = fn
+}
+
+func (p *Process) CallFn(fnAddr uintptr, args ...uintptr) (uint64, error) {
+	p.sendPacketMu.Lock()
+	fn := p.externalCallFn
+	p.sendPacketMu.Unlock()
+	if fn == nil {
+		return 0, errors.New("CallFn not available")
+	}
+	return fn(fnAddr, args...)
+}
+
+func (p *Process) WriteMem(destAddr uintptr, data []byte) error {
+	p.sendPacketMu.Lock()
+	fn := p.externalWriteMem
+	p.sendPacketMu.Unlock()
+	if fn == nil {
+		return errors.New("WriteMem not available")
+	}
+	return fn(destAddr, data)
+}
+
+// SendUIPacket sends a packet via the UI NetMan path (vtable[5]).
+// Tries external sender (Presenter/rmod) first; falls back to APC-based
+// SendUIPacketViaMainThread which delivers via the main thread — same
+// mechanism the original koolo devs use for all packets.
+func (p *Process) SendUIPacket(packet []byte) error {
+	if p == nil {
+		return errors.New("process is nil")
+	}
+	p.sendPacketMu.Lock()
+	fn := p.externalUISend
+	p.sendPacketMu.Unlock()
+	if fn != nil {
+		return fn(packet)
+	}
+	// Fallback: APC on main thread → UI NetMan vtable[5].
+	if p.moduleBaseAddressPtr == 0 || p.handler == 0 {
+		return errors.New("UI NetMan: process not initialized (module base or handle is zero)")
+	}
+	const uiNetManRVA uintptr = 0x19ED860
+	uiAddr := p.moduleBaseAddressPtr + uiNetManRVA
+	return p.SendUIPacketViaMainThread(packet, uiAddr)
+}
+
+// SendDualPacket replicates D2R's dual_send_wrap behavior:
+// 1. WriteProcessMemory to mirror buffer (dedup/observation copy)
+// 2. SendPacket via send_fn APC on main thread (network dispatch)
+//
+// This is safe from main thread — no Arxan crash, no deadlock.
+// Proven: 5 consecutive weapon swaps, zero crashes.
+func (p *Process) SendDualPacket(packet []byte) error {
+	if p == nil {
+		return errors.New("process is nil")
+	}
+	// Try external dual sender first (Presenter/rmod).
+	p.sendPacketMu.Lock()
+	fn := p.externalDualSend
+	p.sendPacketMu.Unlock()
+	if fn != nil {
+		return fn(packet)
+	}
+	// Fallback: manual mirror write + send_fn APC.
+	if p.moduleBaseAddressPtr == 0 || p.handler == 0 {
+		return errors.New("dual send: process not initialized")
+	}
+	const mirrorBufRVA uintptr = 0x1F51330
+	mirrorAddr := p.moduleBaseAddressPtr + mirrorBufRVA
+	if err := windows.WriteProcessMemory(p.handler, mirrorAddr, &packet[0], uintptr(len(packet)), nil); err != nil {
+		return errors.New("dual send: mirror write failed")
+	}
+	return p.SendPacket(packet)
 }
 
 // ModuleBaseAddress returns the base address of the D2R module.
@@ -149,7 +399,8 @@ func ReadMemoryChunked(handle windows.Handle, baseAddress uintptr, size uint32) 
 			chunkSize = uintptr(size) - offset
 		}
 
-		// Try to read, but don't fail if it's protected
+		// Use kernel32 RPM for chunked reads (large scans, ~12K pages per module).
+		// ntapi indirect syscall has too much per-call overhead for bulk scanning.
 		err := windows.ReadProcessMemory(handle, address, &data[offset], chunkSize, nil)
 		if err != nil {
 			failedReads++
@@ -166,10 +417,148 @@ func ReadMemoryChunked(handle windows.Handle, baseAddress uintptr, size uint32) 
 }
 
 func (p *Process) ReadBytesFromMemory(address uintptr, size uint) []byte {
+	if StealthEnabled() && size > 0 && size <= 256 {
+		if cached, ok := p.chunkLookup(address, size); ok {
+			return cached
+		}
+	}
 	var data = make([]byte, size)
-	windows.ReadProcessMemory(p.handler, address, &data[0], uintptr(size), nil)
-
+	p.rpmReadBytesCalls.Add(1)
+	p.rpmBytesTotal.Add(uint64(size))
+	ntapi.ReadProcessMemory(p.handler, address, &data[0], uintptr(size))
 	return data
+}
+
+// chunkLookup (Layer 3) — if the requested [address, address+size) range is
+// fully inside a page-aligned cached chunk, return a copy of that sub-slice.
+// On cache miss, attempt to load a fresh 4-8KB chunk at the page boundary
+// containing `address`; if the chunk read succeeds AND the requested range
+// fits entirely inside it, cache and return. Returns (nil, false) if the
+// caller should fall back to a direct read (chunk would straddle a VAD
+// boundary / be unmapped / cross the chunk's tail).
+//
+// Security note: this layer is an anti-fingerprint measure — the RPM trace
+// seen from outside the process becomes "3-5 big aligned reads/tick" instead
+// of "50-80 small field reads in fixed sequence". Coverage is unchanged.
+func (p *Process) chunkLookup(address uintptr, size uint) ([]byte, bool) {
+	pageMask := uintptr(0xFFF)
+	chunkAddr := address & ^pageMask
+	reqEnd := address + uintptr(size)
+
+	p.chunkCacheMu.Lock()
+	defer p.chunkCacheMu.Unlock()
+	if p.chunkCache != nil {
+		if ch, ok := p.chunkCache[chunkAddr]; ok {
+			chunkEnd := chunkAddr + uintptr(len(ch))
+			if reqEnd <= chunkEnd {
+				off := address - chunkAddr
+				out := make([]byte, size)
+				copy(out, ch[off:off+uintptr(size)])
+				return out, true
+			}
+		}
+	}
+
+	// Miss: load fresh chunk. Randomize size per chunk load.
+	chunkSize := uintptr(RandomChunkSize())
+	// Ensure our requested range fits; if request straddles page end and the
+	// randomized chunk would still miss the tail, grow to next-chunk-aligned
+	// size. Guard: never load more than 16KB.
+	if reqEnd > chunkAddr+chunkSize {
+		need := reqEnd - chunkAddr
+		if need > 0x4000 {
+			return nil, false
+		}
+		// Round up to next 4KB boundary
+		chunkSize = (need + pageMask) & ^pageMask
+	}
+
+	// Layer 3.3 — NtQueryVirtualMemory guard.
+	// Before issuing a multi-page chunk read, verify the starting page is
+	// committed AND not PAGE_NOACCESS / PAGE_GUARD. If the region is smaller
+	// than chunkSize, trim chunkSize to fit so we don't straddle a VAD
+	// boundary into unmapped memory (which would either fail OR crash D2R
+	// via Arxan's SEH on guard pages).
+	if info, qerr := ntapi.QueryVirtualMemory(p.handler, chunkAddr); qerr == nil {
+		if info.State != ntapi.MEM_COMMIT {
+			return nil, false
+		}
+		if info.Protect == ntapi.PAGE_NOACCESS || (info.Protect&ntapi.PAGE_GUARD) != 0 {
+			return nil, false
+		}
+		regionEnd := info.BaseAddress + info.RegionSize
+		if chunkAddr+chunkSize > regionEnd {
+			// Trim to region — but only if the trimmed chunk still covers
+			// the requested range. Otherwise fall back.
+			trimmed := regionEnd - chunkAddr
+			if trimmed < uintptr(size) {
+				return nil, false
+			}
+			chunkSize = trimmed
+		}
+	}
+	// If QueryVirtualMemory FAILED, proceed with the original chunkSize —
+	// ReadProcessMemory below will reject if the region is bad. This keeps
+	// the path resilient if NtQueryVirtualMemory itself is hooked / failing.
+
+	buf := make([]byte, chunkSize)
+	if err := ntapi.ReadProcessMemory(p.handler, chunkAddr, &buf[0], chunkSize); err != nil {
+		// VAD boundary / unmapped — let caller fall back to tiny direct read.
+		return nil, false
+	}
+	if p.chunkCache == nil {
+		p.chunkCache = make(map[uintptr][]byte, 16)
+	}
+	p.chunkCache[chunkAddr] = buf
+	off := address - chunkAddr
+	out := make([]byte, size)
+	copy(out, buf[off:off+uintptr(size)])
+	return out, true
+}
+
+// FlushChunkCache drops all cached chunks. Called at start of each GetData()
+// tick so stale values don't survive across game ticks. Cheap — just a map
+// reset.
+func (p *Process) FlushChunkCache() {
+	p.chunkCacheMu.Lock()
+	defer p.chunkCacheMu.Unlock()
+	if len(p.chunkCache) > 0 {
+		p.chunkCache = nil
+	}
+}
+
+// ReadBytesViaKernel32 reads memory via kernel32!ReadProcessMemory (not the
+// indirect ntapi syscall). For some pages D2R/Arxan blocks the indirect
+// syscall but allows the kernel32 path. Returns nil on error.
+func (p *Process) ReadBytesViaKernel32(address uintptr, size uint) []byte {
+	if size == 0 {
+		return nil
+	}
+	data := make([]byte, size)
+	if err := windows.ReadProcessMemory(p.handler, address, &data[0], uintptr(size), nil); err != nil {
+		return nil
+	}
+	return data
+}
+
+// WriteBytesToMemory writes raw bytes into the target process at the given
+// absolute address. Opens a transient handle with PROCESS_VM_WRITE +
+// PROCESS_VM_OPERATION because the long-lived handler is read-only. Returns
+// an error if the write fails. Intended for debug/RE use only.
+func (p *Process) WriteBytesToMemory(address uintptr, data []byte) error {
+	if address == 0 {
+		return errors.New("attempt to write to null address")
+	}
+	if len(data) == 0 {
+		return nil
+	}
+	const writeAccess = 0x0020 | 0x0008 // PROCESS_VM_WRITE | PROCESS_VM_OPERATION
+	h, err := windows.OpenProcess(writeAccess, false, p.pid)
+	if err != nil {
+		return err
+	}
+	defer windows.CloseHandle(h)
+	return windows.WriteProcessMemory(h, address, &data[0], uintptr(len(data)), nil)
 }
 
 type IntType uint
@@ -182,6 +571,7 @@ const (
 )
 
 func (p *Process) ReadUInt(address uintptr, size IntType) uint {
+	p.rpmReadUIntCalls.Add(1)
 	bytes := p.ReadBytesFromMemory(address, uint(size))
 
 	return bytesToUint(bytes, size)
@@ -223,6 +613,7 @@ func bytesToInt(bytes []byte, size IntType) int {
 }
 
 func (p *Process) ReadStringFromMemory(address uintptr, size uint) string {
+	p.rpmReadStringCalls.Add(1)
 	if size == 0 {
 		for i := 1; true; i++ {
 			data := p.ReadBytesFromMemory(address, uint(i))
@@ -335,7 +726,9 @@ func (p *Process) ReadPointer(address uintptr, size int) (uintptr, error) {
 }
 
 func (p *Process) ReadIntoBuffer(address uintptr, buffer []byte) error {
-	return windows.ReadProcessMemory(p.handler, address, &buffer[0], uintptr(len(buffer)), nil)
+	p.rpmReadBufferCalls.Add(1)
+	p.rpmBytesTotal.Add(uint64(len(buffer)))
+	return ntapi.ReadProcessMemory(p.handler, address, &buffer[0], uintptr(len(buffer)))
 }
 
 // ReadWidgetContainer reads the WidgetContainer structure.

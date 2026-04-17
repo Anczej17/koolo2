@@ -12,6 +12,8 @@
 // defeating both inline hooks and syscall-origin checks.
 // If a target stub is hooked, Halo's Gate is used to find the SSN
 // from neighboring clean stubs.
+//
+//garble:controlflow flatten_passes=3 junk_jumps=10 block_splits=5
 package ntapi
 
 import (
@@ -35,6 +37,7 @@ var (
 	fnNtWriteVirtualMemory   uintptr
 	fnNtAllocVirtualMemory   uintptr
 	fnNtProtectVirtualMemory uintptr
+	fnNtQueryVirtualMemory   uintptr
 
 	// Address of a syscall;ret gadget inside ntdll.dll
 	syscallRetGadget uintptr
@@ -58,6 +61,7 @@ const (
 	hashNtWriteVirtualMemory    uint32 = 0x95f3a792 // djb2("NtWriteVirtualMemory")
 	hashNtAllocateVirtualMemory uint32 = 0x6793c34c // djb2("NtAllocateVirtualMemory")
 	hashNtProtectVirtualMemory  uint32 = 0x082962c8 // djb2("NtProtectVirtualMemory")
+	hashNtQueryVirtualMemory    uint32 = 0xe39d8e5d // djb2("NtQueryVirtualMemory")
 )
 
 // djb2 computes the DJB2 hash of a byte slice.
@@ -190,7 +194,7 @@ func resolveSSNByHash(ntdllBase uintptr, nameHash uint32) (uint32, uintptr, erro
 		}
 	}
 
-	return 0, 0, fmt.Errorf("hash 0x%08x: hooked and no clean neighbor found", nameHash)
+	return 0, 0, fmt.Errorf("hash 0x%08x: resolution failed", nameHash)
 }
 
 // --------------------------------------------------------------------------
@@ -294,6 +298,14 @@ func generateJunkInstruction() []byte {
 	}
 }
 
+// GenerateJunkBlock is the exported variant — used by sibling packages
+// (presenter/inject.go) to share the same polymorphism primitive.
+func GenerateJunkBlock() []byte { return generateJunkBlock() }
+
+// CryptRandN exposes the same cryptographically-random integer source used
+// internally by the ntapi polymorphism routines.
+func CryptRandN(n int) int { return cryptRandN(n) }
+
 // generateJunkBlock returns 1-4 random junk instructions concatenated.
 func generateJunkBlock() []byte {
 	count := cryptRandN(4) + 1
@@ -366,34 +378,32 @@ func emitMovR11Gadget(addr uintptr) []byte {
 	}
 }
 
-// emitJmpR11 generates "jmp r11" with one of several encodings.
+// emitJmpR11 emits "jmp r11" (41 FF E3). Only the direct form: the alternative
+// "push r11; ret" variant ran afoul of the CPU Return Stack Buffer predictor
+// and was a suspect in the sporadic first-boot trampoline crash, so we pin to
+// the deterministic encoding.
 func emitJmpR11() []byte {
-	switch cryptRandN(2) {
-	case 0:
-		// jmp r11: 41 FF E3
-		return []byte{0x41, 0xFF, 0xE3}
-	default:
-		// push r11; ret: 41 53 C3
-		return []byte{0x41, 0x53, 0xC3}
-	}
+	return []byte{0x41, 0xFF, 0xE3}
 }
 
 // buildPolymorphicTrampoline builds a fully polymorphic indirect syscall trampoline.
 // Each invocation produces unique byte patterns through:
 // - Random junk instructions between every real instruction (1-4 per gap)
 // - Multiple encoding variants for each of the 4 real instructions
-// Total unique combinations: 3 × 4 × 2 × 2 × (30^~8 junk patterns) = effectively infinite
+// NOTE: no junk between mov r11, gadget and the final dispatch — a prior sporadic
+// crash had r11 observed as a small garbage value on entry to the gadget, and
+// any junk instruction in that gap is a candidate for the corruption even when
+// its encoding "shouldn't" touch r11.
 func buildPolymorphicTrampoline(ssn uint32, gadget uintptr) ([]byte, error) {
 	var code []byte
 
-	// [junk] mov r10, rcx [junk] mov eax, SSN [junk] mov r11, gadget [junk] jmp r11
+	// [junk] mov r10, rcx [junk] mov eax, SSN [junk] mov r11, gadget jmp r11
 	code = append(code, generateJunkBlock()...)
 	code = append(code, emitMovR10Rcx()...)
 	code = append(code, generateJunkBlock()...)
 	code = append(code, emitMovEaxSSN(ssn)...)
 	code = append(code, generateJunkBlock()...)
 	code = append(code, emitMovR11Gadget(gadget)...)
-	code = append(code, generateJunkBlock()...)
 	code = append(code, emitJmpR11()...)
 
 	return code, nil
@@ -489,14 +499,25 @@ func getNtdllBase() (uintptr, error) {
 	count := 0
 	for current := flink; current != listHead && count < 256; {
 		count++
-		// LDR_DATA_TABLE_ENTRY.InMemoryOrderLinks is at the start
-		// DllBase is at offset 0x20 from InMemoryOrderLinks (0x30 from entry start)
+		// `current` points to LDR_DATA_TABLE_ENTRY.InMemoryOrderLinks (entry+0x10).
+		// LDR_DATA_TABLE_ENTRY layout on x64:
+		//   +0x00 InLoadOrderLinks (LIST_ENTRY, 16B)
+		//   +0x10 InMemoryOrderLinks     ← current points here
+		//   +0x20 InInitializationOrderLinks
+		//   +0x30 DllBase                  → offset 0x20 from current
+		//   +0x38 EntryPoint
+		//   +0x40 SizeOfImage
+		//   +0x48 FullDllName (UNICODE_STRING, 16B: Length u16, MaxLength u16, pad u32, Buffer u64)
+		//   +0x58 BaseDllName (UNICODE_STRING, 16B)   → offset 0x48 from current
+		// The buffer pointer inside a UNICODE_STRING is at +8 (after Length/MaxLength/pad).
+		// Previously this code used +0x50 for BaseDllName, which was off by 8 bytes
+		// and read into FullDllName's Buffer pointer high half — the length looked
+		// like garbage and ntdll was never found. The LoadLibrary fallback masked it.
 		dllBase := *(*uintptr)(unsafe.Pointer(current + 0x20))
 
-		// FullDllName is at offset 0x40 from InMemoryOrderLinks
-		// BaseDllName is at offset 0x50 from InMemoryOrderLinks
-		nameLen := *(*uint16)(unsafe.Pointer(current + 0x50))
-		nameBuf := *(*uintptr)(unsafe.Pointer(current + 0x50 + 8))
+		const baseDllNameOff = 0x48
+		nameLen := *(*uint16)(unsafe.Pointer(current + baseDllNameOff))
+		nameBuf := *(*uintptr)(unsafe.Pointer(current + baseDllNameOff + 8))
 
 		if nameLen > 0 && nameBuf != 0 {
 			// Read UTF-16 name
@@ -536,35 +557,10 @@ func matchesNtdll(name []uint16) bool {
 	return true
 }
 
-// getPEB reads PEB base address from the current process.
+// getPEB reads PEB base address directly from GS:[0x60] via assembly
+// (see peb_windows_amd64.s). No syscall, no API string in the binary.
 func getPEB() uintptr {
-	// On x64 Windows, PEB is at GS:[0x60]
-	// We use NtCurrentPeb via assembly or the ProcessBasicInformation trick
-	type processBasicInfo struct {
-		ExitStatus                   uintptr
-		PebBaseAddress               uintptr
-		AffinityMask                 uintptr
-		BasePriority                 int32
-		UniqueProcessId              uintptr
-		InheritedFromUniqueProcessId uintptr
-	}
-
-	ntdll := windows.NewLazySystemDLL("ntdll.dll")
-	ntQueryInfo := ntdll.NewProc("NtQueryInformationProcess")
-
-	var pbi processBasicInfo
-	var returnLen uint32
-	r1, _, _ := ntQueryInfo.Call(
-		uintptr(^uintptr(0)), // current process
-		0,                     // ProcessBasicInformation
-		uintptr(unsafe.Pointer(&pbi)),
-		unsafe.Sizeof(pbi),
-		uintptr(unsafe.Pointer(&returnLen)),
-	)
-	if r1 != 0 {
-		return 0
-	}
-	return pbi.PebBaseAddress
+	return getPEBDirect()
 }
 
 // --------------------------------------------------------------------------
@@ -573,16 +569,20 @@ func getPEB() uintptr {
 
 func initialize() {
 	initOnce.Do(func() {
-		// Step 1: Get ntdll base address via PEB walk
+		// Step 1: Get ntdll base address via PEB walk. LoadLibrary("ntdll.dll")
+		// is a last-resort fallback — if PEB walk returns a bogus base we still
+		// want the bot to work, and garble -literals obfuscates the string in
+		// the release binary so it's not a visible signature. The fallback is
+		// ETW-monitored but the chain is: PEB walk first, only fall through on
+		// hard failure, so production builds should never take this path.
 		ntdllBase, err := getNtdllBase()
-		if err != nil {
-			// Fallback to LoadLibrary — less stealthy but functional
-			ntdll, loadErr := windows.LoadLibrary("ntdll.dll")
+		if err != nil || ntdllBase == 0 {
+			ntdllHandle, loadErr := windows.LoadLibrary("ntdll.dll")
 			if loadErr != nil {
-				initErr = fmt.Errorf("load ntdll: %w", loadErr)
+				initErr = fmt.Errorf("ntdll PEB walk: %v; LoadLibrary fallback: %w", err, loadErr)
 				return
 			}
-			ntdllBase = uintptr(ntdll)
+			ntdllBase = uintptr(ntdllHandle)
 		}
 
 		// Step 2: Find syscall;ret gadget
@@ -623,6 +623,8 @@ func initialize() {
 			{hashNtReadVirtualMemory, &fnNtReadVirtualMemory},
 			{hashNtWriteVirtualMemory, &fnNtWriteVirtualMemory},
 			{hashNtAllocateVirtualMemory, &fnNtAllocVirtualMemory},
+			{hashNtProtectVirtualMemory, &fnNtProtectVirtualMemory},
+			{hashNtQueryVirtualMemory, &fnNtQueryVirtualMemory},
 		}
 
 		for _, e := range entries {
@@ -696,6 +698,61 @@ func WriteProcessMemory(handle windows.Handle, addr uintptr, buf *byte, size uin
 		return fmt.Errorf("write failed: status 0x%X", r1)
 	}
 	return nil
+}
+
+// MemoryBasicInformation mirrors the Win32 MEMORY_BASIC_INFORMATION
+// returned by NtQueryVirtualMemory(MemoryBasicInformation = 0).
+type MemoryBasicInformation struct {
+	BaseAddress       uintptr
+	AllocationBase    uintptr
+	AllocationProtect uint32
+	_pad1             uint32 // alignment for x64
+	RegionSize        uintptr
+	State             uint32
+	Protect           uint32
+	Type              uint32
+	_pad2             uint32 // alignment for x64
+}
+
+// Memory page state/protect constants (subset matching Win32 headers).
+const (
+	MEM_COMMIT      uint32 = 0x1000
+	MEM_FREE        uint32 = 0x10000
+	MEM_RESERVE     uint32 = 0x2000
+	PAGE_NOACCESS   uint32 = 0x01
+	PAGE_READONLY   uint32 = 0x02
+	PAGE_READWRITE  uint32 = 0x04
+	PAGE_EXECUTE    uint32 = 0x10
+	PAGE_GUARD      uint32 = 0x100
+)
+
+// QueryVirtualMemory queries the page state of a remote address via indirect
+// syscall. Returns the MEMORY_BASIC_INFORMATION for the region containing
+// `addr`. Returns (zero, error) if the syscall fails — callers MUST treat
+// failure as "page not safely readable" and fall back to a tiny direct read.
+//
+// Used by Layer 3 chunk cache to avoid blind 4-8KB reads that would straddle
+// VAD boundaries / unmapped pages — those crash D2R or trip Arxan via SEH.
+func QueryVirtualMemory(handle windows.Handle, addr uintptr) (MemoryBasicInformation, error) {
+	initialize()
+	if initErr != nil {
+		return MemoryBasicInformation{}, fmt.Errorf("syscall not available: %w", initErr)
+	}
+	var info MemoryBasicInformation
+	var returnLen uintptr
+	r1, _, _ := rawSyscallN(
+		fnNtQueryVirtualMemory,
+		uintptr(handle),
+		addr,
+		0, // MemoryInformationClass = 0 = MemoryBasicInformation
+		uintptr(unsafe.Pointer(&info)),
+		unsafe.Sizeof(info),
+		uintptr(unsafe.Pointer(&returnLen)),
+	)
+	if r1 != 0 {
+		return MemoryBasicInformation{}, fmt.Errorf("query failed: status 0x%X", r1)
+	}
+	return info, nil
 }
 
 // ProtectVirtualMemory changes memory protection in a remote process via indirect syscall.

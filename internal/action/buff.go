@@ -1,7 +1,6 @@
 package action
 
 import (
-	"fmt"
 	"log/slog"
 	"time"
 
@@ -142,6 +141,7 @@ func Buff() {
 	// Swaps to each weapon set, refreshes data, reads bonuses, caches results.
 	// Must run BEFORE any buff casting so the cache is ready.
 	if !ctx.WeaponCacheReady {
+		ctx.RefreshGameData()
 		ctx.Logger.Info("Probing weapon sets for buff skill bonuses...")
 		probeBestWeaponSlots()
 	}
@@ -343,7 +343,7 @@ func castPostCTABuffs(isBarbarian bool) {
 
 // probeBestWeaponSlots physically swaps to each weapon set and reads +skill bonuses
 // from equipped weapon/shield items. D2R memory only has complete stats for the ACTIVE
-// weapon set, so we must swap to each slot before reading.
+// weapon set, so we MUST physically swap before reading each slot.
 func probeBestWeaponSlots() {
 	ctx := context.Get()
 	ctx.BestWeaponSlotCache = make(map[skill.ID]int)
@@ -368,47 +368,49 @@ func probeBestWeaponSlots() {
 
 	playerClass := int(ctx.Data.PlayerUnit.Class)
 
-	// ByLocation(LocationEquipped) returns ALL equipped items at once.
-	// BodyLocation is permanent — primary = LocLeftArm/LocRightArm,
-	// secondary = LocLeftArmSecondary/LocRightArmSecondary.
-	// No need to swap — both slots' items are always visible.
+	// Remember original slot to restore after probing.
+	ctx.RefreshGameData()
+	originalSlot := ctx.Data.ActiveWeaponSlot
+
+	// --- Read slot 0 ---
+	ensureWeaponSlot(0)
 	ctx.RefreshGameData()
 
-	var primaryWeapons []data.Item
-	var secondaryWeapons []data.Item
+	var slot0Weapons []data.Item
 	for _, itm := range ctx.Data.Inventory.ByLocation(item.LocationEquipped) {
-		switch itm.Location.BodyLocation {
-		case item.LocLeftArm, item.LocRightArm:
-			primaryWeapons = append(primaryWeapons, itm)
-			ctx.Logger.Debug("Probe: primary slot item",
+		if itm.Location.BodyLocation == item.LocLeftArm || itm.Location.BodyLocation == item.LocRightArm {
+			slot0Weapons = append(slot0Weapons, itm)
+			ctx.Logger.Debug("Probe: slot 0 item",
 				slog.String("name", string(itm.Name)),
-				slog.String("bodyLoc", string(itm.Location.BodyLocation)),
 				slog.Int("totalStats", len(itm.Stats)))
-			logItemSkillStats(itm)
-		case item.LocLeftArmSecondary, item.LocRightArmSecondary:
-			secondaryWeapons = append(secondaryWeapons, itm)
-			ctx.Logger.Debug("Probe: secondary slot item",
-				slog.String("name", string(itm.Name)),
-				slog.String("bodyLoc", string(itm.Location.BodyLocation)),
-				slog.Int("totalStats", len(itm.Stats)))
-			logItemSkillStats(itm)
 		}
 	}
 
-	ctx.Logger.Debug("Probe weapon items found",
-		slog.Int("primaryWeapons", len(primaryWeapons)),
-		slog.Int("secondaryWeapons", len(secondaryWeapons)))
+	// --- Read slot 1 ---
+	ensureWeaponSlot(1)
+	ctx.RefreshGameData()
 
-	slot0Bonuses := make(map[skill.ID]int)
-	slot1Bonuses := make(map[skill.ID]int)
-	for _, sk := range probeSkills {
-		slot0Bonuses[sk] = sumSkillBonusFromItems(primaryWeapons, sk, playerClass)
-		slot1Bonuses[sk] = sumSkillBonusFromItems(secondaryWeapons, sk, playerClass)
+	var slot1Weapons []data.Item
+	for _, itm := range ctx.Data.Inventory.ByLocation(item.LocationEquipped) {
+		if itm.Location.BodyLocation == item.LocLeftArm || itm.Location.BodyLocation == item.LocRightArm {
+			slot1Weapons = append(slot1Weapons, itm)
+			ctx.Logger.Debug("Probe: slot 1 item",
+				slog.String("name", string(itm.Name)),
+				slog.Int("totalStats", len(itm.Stats)))
+		}
 	}
 
+	// --- Restore original slot ---
+	ensureWeaponSlot(originalSlot)
+
+	ctx.Logger.Debug("Probe weapon items found",
+		slog.Int("slot0Weapons", len(slot0Weapons)),
+		slog.Int("slot1Weapons", len(slot1Weapons)))
+
+	// Calculate bonuses using complete stats from each active slot.
 	for _, sk := range probeSkills {
-		b0 := slot0Bonuses[sk]
-		b1 := slot1Bonuses[sk]
+		b0 := sumSkillBonusFromItems(slot0Weapons, sk, playerClass)
+		b1 := sumSkillBonusFromItems(slot1Weapons, sk, playerClass)
 
 		if b1 > b0 {
 			ctx.BestWeaponSlotCache[sk] = 1
@@ -474,21 +476,6 @@ func sumSkillBonusFromItems(items []data.Item, sk skill.ID, playerClass int) int
 		bonus += itemBonus
 	}
 	return bonus
-}
-
-// logItemSkillStats dumps all skill-related stats from an item for debugging the probe.
-func logItemSkillStats(itm data.Item) {
-	ctx := context.Get()
-	skillStatIDs := []stat.ID{stat.AllSkills, stat.AddClassSkills, stat.NonClassSkill, stat.SingleSkill, stat.AddSkillTab}
-	for _, s := range itm.Stats {
-		for _, target := range skillStatIDs {
-			if s.ID == target {
-				ctx.Logger.Debug(fmt.Sprintf("  -> stat %s (id=%d layer=%d) = %d",
-					s.ID.String(), int(s.ID), s.Layer, s.Value),
-					slog.String("item", string(itm.Name)))
-			}
-		}
-	}
 }
 
 // castBuffWithBestWeapon uses the cached weapon slot probe to select the best set,
@@ -583,7 +570,7 @@ func doCast() {
 
 	if ctx.PacketSender != nil {
 		pos := ctx.Data.PlayerUnit.Position
-		if err := ctx.PacketSender.CastSkillAtLocation(pos); err == nil {
+		if err := ctx.PacketSender.CastSkillAtLocation(pos, ctx.Data.PlayerUnit.Position); err == nil {
 			utils.Sleep(postCastBaseDelay)
 			return
 		}
@@ -627,15 +614,11 @@ func restoreRightSkill(sk skill.ID) {
 		return
 	}
 
-	kb, found := ctx.Data.KeyBindings.KeyBindingForSkill(sk)
-	if !found {
-		ctx.Logger.Debug("Cannot restore right skill - no keybinding",
+	if err := step.SelectRightSkill(sk); err != nil {
+		ctx.Logger.Debug("Cannot restore right skill",
 			slog.String("skill", skill.SkillNames[sk]))
 		return
 	}
-
-	ctx.HID.PressKeyBinding(kb)
-	utils.Sleep(150)
 
 	ctx.Logger.Debug("Restored right skill", slog.String("skill", skill.SkillNames[sk]))
 }
@@ -647,7 +630,20 @@ func restoreRightSkill(sk skill.ID) {
 // pressSwapWeapons toggles between primary/secondary weapon sets.
 func pressSwapWeapons() {
 	ctx := context.Get()
-	ctx.HID.PressKeyBinding(ctx.Data.KeyBindings.SwapWeapons)
+	swapped := false
+	if ctx.CharacterCfg.PacketCasting.UseForWeaponSwap && ctx.PacketSender != nil {
+		fL, fR, tL, tR := WeaponSwapGIDs(ctx.Data)
+		if fL != 0 || fR != 0 || tL != 0 || tR != 0 {
+			if err := ctx.PacketSender.SwapWeapon(fL, fR, tL, tR); err == nil {
+				swapped = true
+			} else {
+				ctx.Logger.Warn("Packet weapon swap failed, falling back to HID", slog.String("error", err.Error()))
+			}
+		}
+	}
+	if !swapped {
+		ctx.HID.PressKeyBinding(ctx.Data.KeyBindings.SwapWeapons)
+	}
 }
 
 // waitForWeaponSlot waits until the desired weapon slot is reported by game data.

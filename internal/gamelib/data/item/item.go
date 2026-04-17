@@ -26,6 +26,30 @@ type Description struct {
 	RequiredLevel     int
 	MaxSockets        int
 	Type              string
+	BaseCost          int // base vendor cost from txt (sell = BaseCost/4 for normal items)
+}
+
+// SellPrice returns approximate vendor sell price.
+func (d Description) SellPrice(quality Quality) int {
+	if d.BaseCost == 0 {
+		return 1
+	}
+	m := 1
+	switch quality {
+	case QualityMagic:
+		m = 2
+	case QualityRare:
+		m = 3
+	case QualitySet:
+		m = 4
+	case QualityUnique:
+		m = 5
+	}
+	p := d.BaseCost * m / 4
+	if p < 1 {
+		return 1
+	}
+	return p
 }
 
 func (d Description) Tier() Tier {

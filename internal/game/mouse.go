@@ -37,9 +37,10 @@ func (hid *HID) MovePointer(x, y int) {
 // Click just does a single mouse click at current pointer position
 func (hid *HID) Click(btn MouseButton, x, y int) {
 	hid.MovePointer(x, y)
-	x = hid.gr.WindowLeftX + x
-	y = hid.gr.WindowTopY + y
-
+	// lParam for WM_LBUTTONDOWN must be CLIENT coords (window-relative),
+	// not screen coords. MovePointer already moved the real cursor to the
+	// screen position. D2R's WndProc reads lParam for UI button hit-testing
+	// in menus, so wrong coords = missed clicks on char select/difficulty.
 	lParam := calculateLparam(x, y)
 	buttonDown := uint32(win.WM_LBUTTONDOWN)
 	buttonUp := uint32(win.WM_LBUTTONUP)

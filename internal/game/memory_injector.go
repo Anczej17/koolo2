@@ -1,5 +1,19 @@
 package game
 
+// ⚠️ AUDIT_E finding 2026-04-11:
+// Live-process scan of 121 modules in D2R confirmed D2R.exe does NOT import
+// or call GetKeyState, GetAsyncKeyState, GetKeyboardState, GetCursorPos,
+// SetCursorPos, PeekMessage*, GetMessage*, TranslateMessage, DispatchMessage*.
+// D2R buffers its own keystate at 0x7ff7(605d)eda25b0 and cursor at
+// 0x7ff7(605d)ec3bb8/0xec3bbc via internal helpers. The USER32 trampolines
+// in this file are DEAD FROM D2R'S PERSPECTIVE — they only intercept reads
+// by other loaded modules (NVIDIA overlays, Discord overlay, Steam overlay,
+// Blizzard UI). For driving D2R itself, use:
+//   - FUN_7ff7(605d)d52e400 set_cursor_screen_xy(x, y) via CmdCallFn
+//   - real_click_worker @ RVA 0xBA95D0 via CmdCallFn
+//   - keystate table @ keyBindings + action_offset direct write via CmdWriteMem
+// Full analysis: logs/AUDIT_E_forcemove.md + logs/MOVEMENT_INPROCESS_SPEC.md.
+
 import (
 	"bytes"
 	"crypto/rand"
@@ -11,9 +25,9 @@ import (
 	"strings"
 	"sync"
 	"syscall"
+	"unsafe"
 
 	"local/internal/svc/internal/gamelib/memory"
-	"local/internal/svc/internal/ntapi"
 	"local/internal/svc/internal/presenter"
 	"golang.org/x/sys/windows"
 )
@@ -21,8 +35,8 @@ import (
 const fullAccess = windows.PROCESS_VM_OPERATION | windows.PROCESS_VM_WRITE | windows.PROCESS_VM_READ
 
 // writeCodePage writes to a code page (.text) in the remote process.
-// Uses standard WriteProcessMemory which handles page protection internally.
-// Reads and RW data writes still go through indirect syscalls.
+// Uses kernel32 WriteProcessMemory which handles page protection automatically.
+// This is a one-time init write (not hot path), so kernel32 call is acceptable.
 func writeCodePage(handle windows.Handle, addr uintptr, buf *byte, size uintptr) error {
 	return windows.WriteProcessMemory(handle, addr, buf, size, nil)
 }
@@ -53,7 +67,6 @@ type MemoryInjector struct {
 
 	// Data buffers in remote process (RW pages, allocated via VirtualAllocEx)
 	cursorDataBuf uintptr // 8 bytes: [X:uint32][Y:uint32]
-	keyDataBuf    uintptr // 4 bytes: [targetKey:byte][activeFlag:byte][pad:2]
 
 	// presenter, when set, handles cursor/key writes via shared memory
 	// instead of the USER32 trampoline hooks.
@@ -71,21 +84,63 @@ func InjectorInit(logger *slog.Logger, pid uint32) (*MemoryInjector, error) {
 	return i, nil
 }
 
-// SetPresenter installs a Presenter and re-points the GetCursorPos trampoline
-// to read cursor data from the presenter's remote buffer instead of cursorDataBuf.
-// This makes CursorPos() write to the same buffer the trampoline reads from.
+// GetPresenter returns the installed Presenter (or nil).
+func (i *MemoryInjector) GetPresenter() *presenter.Presenter {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	return i.presenter
+}
+
+// SetPresenter installs a Presenter and re-points the GetCursorPos and GetKeyState
+// trampolines to read from the presenter's shared mapped view.
 func (i *MemoryInjector) SetPresenter(p *presenter.Presenter) {
 	i.mu.Lock()
 	defer i.mu.Unlock()
 	i.presenter = p
 
-	// Re-install trampoline to read from presenter's remote cursor area.
-	if p != nil && p.IsReady() && i.isLoaded {
-		cursorAddr := p.CursorBufAddr()
-		if cursorAddr != 0 {
-			code := buildCursorPosTrampoline(cursorAddr)
-			_ = writeCodePage(i.handle, i.getCursorPosAddr, &code[0], uintptr(len(code)))
-			i.cursorDataBuf = cursorAddr // CursorPos() writes here now
+	if p == nil || !p.IsReady() || !i.isLoaded {
+		return
+	}
+
+	i.reapplyPresenterTrampolines()
+}
+
+// reapplyPresenterTrampolines re-installs cursor and key trampolines
+// to read from the presenter's shared mapped view. Called from SetPresenter
+// (under lock) and from Load() (single-threaded init, no concurrent access).
+func (i *MemoryInjector) reapplyPresenterTrampolines() {
+	p := i.presenter
+
+	// Re-install cursor trampoline to read from presenter's shared buffer.
+	cursorAddr := p.CursorBufAddr()
+	if cursorAddr != 0 {
+		code := buildCursorPosTrampoline(cursorAddr)
+		writeCodePage(i.handle, i.getCursorPosAddr, &code[0], uintptr(len(code)))
+		i.cursorDataBuf = cursorAddr
+	}
+
+	// Install permanent GetKeyState trampoline reading from shared buffer.
+	keyAddr := p.KeyDataBufAddr()
+	if keyAddr != 0 {
+		body := buildKeyStateMappedTrampoline(keyAddr, i.getKeyStateOrigBytes[:])
+		if len(body) > 0 {
+			returnAddr := i.getKeyStateAddr + uintptr(len(i.getKeyStateOrigBytes))
+			body = appendAbsJmp(body, returnAddr)
+
+			trampolineAddr, allocErr := i.allocRemoteRWX(uintptr(len(body)))
+			if allocErr == nil {
+				wpmErr := windows.WriteProcessMemory(i.handle, trampolineAddr, &body[0], uintptr(len(body)), nil)
+				if wpmErr == nil {
+					// Seal as RX
+					var oldProtect uint32
+					kernel32 := windows.NewLazySystemDLL("kernel32.dll")
+					vpEx := kernel32.NewProc("VirtualProtectEx")
+					vpEx.Call(uintptr(i.handle), trampolineAddr, uintptr(len(body)), 0x20, uintptr(unsafe.Pointer(&oldProtect)))
+					// Overwrite GetKeyState with jmp to trampoline
+					jmp := buildAbsJmp(trampolineAddr)
+					writeCodePage(i.handle, i.getKeyStateAddr, &jmp[0], uintptr(len(jmp)))
+				}
+			}
 		}
 	}
 }
@@ -108,6 +163,40 @@ func (i *MemoryInjector) allocRemoteRW(size uintptr) (uintptr, error) {
 	return addr, nil
 }
 
+// allocRemoteRWX allocates a RW page, writes code to it, then marks it RX.
+// Never leaves a persistent RWX region in the target (avoids VAD scan detection).
+func (i *MemoryInjector) allocRemoteRWX(size uintptr) (uintptr, error) {
+	kernel32 := windows.NewLazySystemDLL("kernel32.dll")
+	procVirtualAllocEx := kernel32.NewProc("VirtualAllocEx")
+
+	addr, _, err := procVirtualAllocEx.Call(
+		uintptr(i.handle),
+		0,
+		size,
+		windows.MEM_COMMIT|windows.MEM_RESERVE,
+		windows.PAGE_READWRITE,
+	)
+	if addr == 0 {
+		return 0, fmt.Errorf("alloc remote page: %w", err)
+	}
+	return addr, nil
+}
+
+// buildAbsJmp builds a 14-byte absolute jmp: ff 25 00 00 00 00 [8-byte addr]
+func buildAbsJmp(target uintptr) []byte {
+	jmp := make([]byte, 14)
+	jmp[0] = 0xFF
+	jmp[1] = 0x25
+	// jmp[2..5] = 0 (rip-relative offset to next 8 bytes)
+	binary.LittleEndian.PutUint64(jmp[6:], uint64(target))
+	return jmp
+}
+
+// appendAbsJmp appends a 14-byte absolute jmp to the code buffer.
+func appendAbsJmp(code []byte, target uintptr) []byte {
+	return append(code, buildAbsJmp(target)...)
+}
+
 func (i *MemoryInjector) Load() error {
 	if i.isLoaded {
 		return nil
@@ -127,7 +216,7 @@ func (i *MemoryInjector) Load() error {
 			i.trackMouseEventAddr, _ = syscall.GetProcAddress(module.ModuleHandle, "TrackMouseEvent")
 			i.setCursorPosAddr, _ = syscall.GetProcAddress(module.ModuleHandle, "SetCursorPos")
 
-			err = ntapi.ReadProcessMemory(i.handle, i.getCursorPosAddr, &i.getCursorPosOrigBytes[0], uintptr(len(i.getCursorPosOrigBytes)))
+			err = windows.ReadProcessMemory(i.handle, i.getCursorPosAddr, &i.getCursorPosOrigBytes[0], uintptr(len(i.getCursorPosOrigBytes)), nil)
 			if err != nil {
 				return fmt.Errorf("error reading memory: %w", err)
 			}
@@ -137,7 +226,7 @@ func (i *MemoryInjector) Load() error {
 				return err
 			}
 
-			err = ntapi.ReadProcessMemory(i.handle, i.setCursorPosAddr, &i.setCursorPosOrigBytes[0], uintptr(len(i.setCursorPosOrigBytes)))
+			err = windows.ReadProcessMemory(i.handle, i.setCursorPosAddr, &i.setCursorPosOrigBytes[0], uintptr(len(i.setCursorPosOrigBytes)), nil)
 			if err != nil {
 				return fmt.Errorf("error reading setcursor memory: %w", err)
 			}
@@ -147,7 +236,7 @@ func (i *MemoryInjector) Load() error {
 				return err
 			}
 
-			err = ntapi.ReadProcessMemory(i.handle, i.getKeyStateAddr, &i.getKeyStateOrigBytes[0], uintptr(len(i.getKeyStateOrigBytes)))
+			err = windows.ReadProcessMemory(i.handle, i.getKeyStateAddr, &i.getKeyStateOrigBytes[0], uintptr(len(i.getKeyStateOrigBytes)), nil)
 			if err != nil {
 				return fmt.Errorf("error reading memory: %w", err)
 			}
@@ -163,20 +252,16 @@ func (i *MemoryInjector) Load() error {
 		return fmt.Errorf("alloc cursor buf: %w", err)
 	}
 
-	i.keyDataBuf, err = i.allocRemoteRW(16)
-	if err != nil {
-		return fmt.Errorf("alloc key buf: %w", err)
-	}
-
 	if err := i.installCursorPosTrampoline(); err != nil {
 		return fmt.Errorf("install cursor trampoline: %w", err)
 	}
 
-	if err := i.installKeyStateTrampoline(); err != nil {
-		return fmt.Errorf("install keystate trampoline: %w", err)
-	}
-
 	i.isLoaded = true
+
+	// If presenter was set before Load(), re-install trampolines to use shared buffer.
+	if i.presenter != nil && i.presenter.IsReady() {
+		i.reapplyPresenterTrampolines()
+	}
 
 	return nil
 }
@@ -250,6 +335,7 @@ func buildCursorPosTrampoline(dataBufAddr uintptr) []byte {
 
 // CursorPos updates the cursor data buffer only (RW page, NOT code page).
 // This is called hundreds of times per second — but never writes to .text.
+// When presenter is available, writes to the shared mapped view (no WPM).
 func (i *MemoryInjector) CursorPos(x, y int) error {
 	i.mu.Lock()
 	defer i.mu.Unlock()
@@ -262,76 +348,97 @@ func (i *MemoryInjector) CursorPos(x, y int) error {
 	i.lastCursorY = y
 	i.cursorOverrideActive = true
 
-	// Write 8 bytes to RW data page — not to code page
+	// Prefer presenter's mapped view — zero cross-process writes.
+	if i.presenter != nil && i.presenter.IsReady() {
+		i.presenter.SetCursor(int32(x), int32(y))
+		return nil
+	}
+
+	// Fallback: write via WPM to remote data page.
 	buf := make([]byte, 8)
 	binary.LittleEndian.PutUint32(buf[0:4], uint32(x))
 	binary.LittleEndian.PutUint32(buf[4:8], uint32(y))
 
-	return ntapi.WriteProcessMemory(i.handle, i.cursorDataBuf, &buf[0], 8)
+	return windows.WriteProcessMemory(i.handle, i.cursorDataBuf, &buf[0], 8, nil)
 }
 
 // --------------------------------------------------------------------------
 // Write-once GetKeyState trampoline + data buffer
 // --------------------------------------------------------------------------
 
-// installKeyStateTrampoline writes a polymorphic trampoline to GetKeyState
-// that checks the keyDataBuf for active simulation.
-// Written ONCE, never changed. Runtime calls update data buffer only.
-func (i *MemoryInjector) installKeyStateTrampoline() error {
-	code := buildKeyStateTrampoline(i.keyDataBuf, i.getKeyStateAddr)
-	if len(code) == 0 {
-		return nil // no permanent hook — override done per keypress
-	}
-	return writeCodePage(i.handle, i.getKeyStateAddr, &code[0], uintptr(len(code)))
-}
-
-// buildKeyStateTrampoline generates polymorphic code for GetKeyState override.
-// Checks dataBuf[1] (active flag). If 0, falls through to original code.
-// If 1, compares cl with dataBuf[0] (target key). If match, returns 0x8000.
+// buildKeyStateMappedTrampoline generates a permanent GetKeyState trampoline
+// that reads key/active from the presenter's shared mapped view.
 //
-// Layout: [our trampoline][saved original bytes patched to work]
-func buildKeyStateTrampoline(dataBufAddr uintptr, origAddr uintptr) []byte {
-	addr := uint64(dataBufAddr)
+// Layout (allocated in remote RWX page):
+//   [check logic ~40 bytes]
+//   [saved original 18 bytes]
+//   [jmp back to GetKeyState+18, 14 bytes]
+//
+// At GetKeyState itself: 14-byte absolute jmp to this page.
+// Runtime: OverrideGetKeyState/RestoreGetKeyState only write to mapped view.
+func buildKeyStateMappedTrampoline(keyDataAddr uintptr, origBytes []byte) []byte {
 	addrBytes := [8]byte{}
-	binary.LittleEndian.PutUint64(addrBytes[:], addr)
+	binary.LittleEndian.PutUint64(addrBytes[:], uint64(keyDataAddr))
 
-	// Simple approach: compare and return, no complex multi-path
-	// This fits in the 18-byte space we have (original bytes saved)
-	//
-	// cmp cl, key    -> Compare key byte (set at runtime in data buf)
-	// sete al        -> Set al to 1 if equal
-	// shl ax, 15     -> Shift left by 15 to create 0x8000 if was 1
-	// ret
-	//
-	// But this doesn't check the "active" flag. We need a different approach.
-	// Since we only have 18 bytes of saved original, we use the simple
-	// approach: when key override is active, write the comparison stub;
-	// when inactive, restore original bytes. This is 2 writes per key event
-	// (activate + deactivate) instead of hundreds per cursor move.
-	// GetKeyState is called much less frequently than GetCursorPos.
+	var code []byte
 
-	// For now, return a no-op stub that passes through to original behavior.
-	// The actual override is done via OverrideGetKeyState/RestoreGetKeyState.
-	// This is acceptable because GetKeyState writes are rare (per keypress, not per frame).
+	// push rax
+	code = append(code, 0x50)
+	// mov rax, keyDataAddr (10 bytes)
+	code = append(code, 0x48, 0xB8)
+	code = append(code, addrBytes[:]...)
+	// cmp byte [rax+1], 0  — check active flag
+	code = append(code, 0x80, 0x78, 0x01, 0x00)
+	// je .original (forward jump — patched below)
+	code = append(code, 0x74, 0x00) // placeholder offset
+	jeOffset := len(code) - 1       // index of the offset byte
 
-	// Return the original bytes — no permanent hook installed.
-	// The write-once architecture applies to GetCursorPos (the main offender).
-	return nil
+	// Active path: compare requested key (cl) with target key [rax]
+	// cmp cl, [rax]
+	code = append(code, 0x3A, 0x08)
+	// pop rax
+	code = append(code, 0x58)
+	// jne .original_after_pop (non-target key → call real GetKeyState)
+	code = append(code, 0x75, 0x05) // placeholder, patched below
+	jneOffset := len(code) - 1
+	// mov eax, 0x8000; ret (target key matched)
+	code = append(code, 0xB8, 0x00, 0x80, 0x00, 0x00)
+	code = append(code, 0xC3)
+
+	// .original: pop rax, fall through to saved original bytes
+	// (reached when active=0 via je)
+	origStart := len(code)
+	code[jeOffset] = byte(origStart - jeOffset - 1) // patch je offset
+	// pop rax (needed for active=0 path where rax is still pushed)
+	code = append(code, 0x58)
+	// .original_after_pop: saved original bytes
+	// (jne from active path lands here — rax already popped)
+	origAfterPop := len(code)
+	code[jneOffset] = byte(origAfterPop - jneOffset - 1) // patch jne offset
+	// Saved original bytes (18 bytes of GetKeyState prologue)
+	code = append(code, origBytes...)
+
+	return code
 }
 
 // OverrideGetKeyState temporarily patches GetKeyState to return 0x8000 for the given key.
-// This is called rarely (per keypress event) so writing to .text is acceptable.
+// With presenter: writes to shared mapped view (no cross-process .text patching).
+// Without presenter: falls back to per-keypress .text patching.
 func (i *MemoryInjector) OverrideGetKeyState(key byte) error {
 	i.mu.Lock()
 	defer i.mu.Unlock()
-
-	// Phase 8D (future): in-process key state via Present hook.
 
 	if !i.isLoaded {
 		return nil
 	}
 
-	// Polymorphic shellcode: compare key, set result
+	// If presenter has a permanent trampoline, just set the key in shared buffer.
+	if i.presenter != nil && i.presenter.IsReady() && i.presenter.KeyDataBufAddr() != 0 {
+		i.presenter.SetKeyState(key, true)
+		return nil
+	}
+
+	// Fallback: per-keypress polymorphic shellcode written to .text.
 	code := buildKeyStateOverride(key)
 	return writeCodePage(i.handle, i.getKeyStateAddr, &code[0], uintptr(len(code)))
 }
@@ -407,7 +514,8 @@ func (i *MemoryInjector) RestoreMemory() error {
 	}
 	i.cursorOverrideActive = false
 
-	return i.RestoreGetKeyState()
+	// Always restore original .text bytes during full cleanup.
+	return i.restoreGetKeyStateBytes()
 }
 
 func (i *MemoryInjector) DisableCursorOverride() error {
@@ -440,8 +548,19 @@ func (i *MemoryInjector) EnableCursorOverride() error {
 	return i.CursorPos(i.lastCursorX, i.lastCursorY)
 }
 
+// RestoreGetKeyState clears the key override. With presenter, just clears the flag.
+// Without presenter or during unload, restores original .text bytes.
 func (i *MemoryInjector) RestoreGetKeyState() error {
-	// Phase 8D (future): in-process key state via Present hook.
+	if i.presenter != nil && i.presenter.IsReady() && i.presenter.KeyDataBufAddr() != 0 {
+		i.presenter.SetKeyState(0, false)
+		return nil
+	}
+	return i.restoreGetKeyStateBytes()
+}
+
+// restoreGetKeyStateBytes unconditionally writes original bytes back to GetKeyState.
+// Used during Unload/RestoreMemory to fully clean up.
+func (i *MemoryInjector) restoreGetKeyStateBytes() error {
 	return writeCodePage(i.handle, i.getKeyStateAddr, &i.getKeyStateOrigBytes[0], uintptr(len(i.getKeyStateOrigBytes)))
 }
 
@@ -470,7 +589,7 @@ func (i *MemoryInjector) OverrideSetCursorPos() error {
 // --------------------------------------------------------------------------
 
 func (i *MemoryInjector) stopTrackingMouseLeaveEvents() error {
-	err := ntapi.ReadProcessMemory(i.handle, i.trackMouseEventAddr, &i.trackMouseEventBytes[0], uintptr(len(i.trackMouseEventBytes)))
+	err := windows.ReadProcessMemory(i.handle, i.trackMouseEventAddr, &i.trackMouseEventBytes[0], uintptr(len(i.trackMouseEventBytes)), nil)
 	if err != nil {
 		return err
 	}

@@ -1,6 +1,8 @@
 package presenter
 
 import (
+	cryptorand "crypto/rand"
+	"encoding/binary"
 	"fmt"
 	"sync/atomic"
 	"unsafe"
@@ -8,10 +10,44 @@ import (
 	"golang.org/x/sys/windows"
 )
 
+// sessionShmPrefix is an 8-character random alphanumeric prefix generated
+// once per process invocation. All shared-memory section names — main bot
+// SHM, sniffer SHM, tracer SHM — derive from this prefix. The prefix is
+// also passed to the rmod DLL via APC shellcode so the in-D2R DLL creates
+// matching section names.
+//
+// Static signatures like "DispCache_" are easy YARA targets. Per-session
+// randomization breaks that static fingerprint completely.
+var sessionShmPrefix = generateSessionPrefix()
+
+func generateSessionPrefix() string {
+	const alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZabcdefghjkmnpqrstuvwxyz23456789"
+	const prefixLen = 8
+	var seed [16]byte
+	if _, err := cryptorand.Read(seed[:]); err != nil {
+		// Failsafe — should never happen; fall back to a process-unique
+		// derivation so we never panic at init time.
+		v := uint64(windows.GetCurrentProcessId())
+		binary.LittleEndian.PutUint64(seed[:], v*0x9E3779B97F4A7C15)
+	}
+	out := make([]byte, prefixLen)
+	for i := 0; i < prefixLen; i++ {
+		out[i] = alphabet[seed[i]%byte(len(alphabet))]
+	}
+	return string(out)
+}
+
+// SessionShmPrefix returns the per-process random prefix used in all SHM
+// section names. Other packages (presenter sniffer/tracer) and the injector
+// (when forwarding the prefix to the rmod DLL) read this value.
+func SessionShmPrefix() string {
+	return sessionShmPrefix
+}
+
 // sectionName returns the named file mapping identifier for the given PID.
-// Uses a neutral naming convention that blends with system services.
+// Format: "{prefix}_{pid}" where prefix is per-process random.
 func sectionName(pid uint32) string {
-	return fmt.Sprintf("SvcRt_%d", pid)
+	return fmt.Sprintf("%s_%d", sessionShmPrefix, pid)
 }
 
 // createSharedMemory creates a named file mapping backed by the page file,
@@ -135,6 +171,16 @@ func readU32(base unsafe.Pointer, offset uintptr) uint32 {
 func writeU32(base unsafe.Pointer, offset uintptr, val uint32) {
 	addr := (*atomic.Uint32)(unsafe.Pointer(uintptr(base) + offset))
 	addr.Store(val)
+}
+
+// readU8 reads a single byte at base+offset.
+func readU8(base unsafe.Pointer, offset uintptr) byte {
+	return *(*byte)(unsafe.Pointer(uintptr(base) + offset))
+}
+
+// writeU8 writes a single byte at base+offset.
+func writeU8(base unsafe.Pointer, offset uintptr, val byte) {
+	*(*byte)(unsafe.Pointer(uintptr(base) + offset)) = val
 }
 
 // readU64 reads a uint64 at base+offset (non-atomic; caller serialises).

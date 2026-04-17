@@ -268,7 +268,7 @@ func (s *Scheduler) checkDurationSchedule(supervisorName string, cfg *config.Cha
 			// Bot is running - check if it just resumed after being stopped
 			if state.LastSeenRunning.IsZero() || now.Sub(state.LastSeenRunning) > 2*time.Minute {
 				// Bot was stopped and just restarted - reset phase timing
-				s.logger.Info("Detected bot resume after manual stop, resetting phase timing",
+				s.logger.Info("Detected resume after manual stop, resetting phase timing",
 					"supervisor", supervisorName,
 					"lastSeen", state.LastSeenRunning,
 					"accumulatedMinutes", state.PlayedMinutes)

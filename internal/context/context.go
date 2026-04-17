@@ -72,6 +72,7 @@ type Context struct {
 	PacketSender              *game.PacketSender
 	IsLevelingCharacter       *bool
 	ManualModeActive          bool          // Manual play mode: stops after character selection
+	ClaudeModeActive          bool          // Claude mode: attach + init + sit idle for HTTP-driven packet experiments
 	LastPortalTick            time.Time     // NEW FIELD: Tracks last portal creation for spam prevention
 	IsBossEquipmentActive     bool          // flag for barb leveling
 	Drop                      *drop.Manager // Drop: Per-supervisor Drop manager
@@ -80,6 +81,7 @@ type Context struct {
 	CompletedRuns              []string      // Runs completed in current game (survives bot.Run() reset)
 	CompletedGameID            string        // Game name for which CompletedRuns is valid
 	completedRunsMu            sync.Mutex
+	refreshMu                  sync.Mutex    // serialises RefreshGameData — GameReader.GetData mutates unprotected caches (monsters/inventory/objects); two concurrent callers (supervisor Start + /debug/gamestate) race → fatal concurrent map access → SIGSEGV
 	CurrentRunName             string        // Name of the currently executing run (for failed run tracking)
 	AbortBonusRun              atomic.Bool   // Signal long-running actions (gambling) to abort during bonus runs
 	FailedToCreateGameAttempts int           // Consecutive lobby game creation failures (survives bot.Run() reset)
@@ -209,6 +211,13 @@ func getGoroutineID() uint64 {
 }
 
 func (ctx *Context) RefreshGameData() {
+	// Serialise: GameReader.GetData() mutates unprotected cache maps
+	// (cachedMonsters, cachedInventory, cachedObjects) and builds the 18
+	// dispatch result structs. Supervisor.Start() and HTTP /debug/gamestate
+	// (and any other caller) race otherwise — concurrent map access raises
+	// a Go fatal (not a panic), killing the whole process with SIGSEGV.
+	ctx.refreshMu.Lock()
+	defer ctx.refreshMu.Unlock()
 	*ctx.Data = ctx.GameReader.GetData()
 	if ctx.IsLevelingCharacter == nil {
 		_, isLevelingCharacter := ctx.Char.(LevelingCharacter)
@@ -287,7 +296,7 @@ func (s *Status) PauseIfNotPriority() {
 
 	for s.Priority != s.GetPriority() {
 		if s.GetPriority() == PriorityStop {
-			panic("Bot is stopped")
+			panic("instance stopped")
 		}
 
 		time.Sleep(time.Millisecond * 10)

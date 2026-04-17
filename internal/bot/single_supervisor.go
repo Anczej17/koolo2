@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"log/slog"
 	"math/rand"
+	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -14,6 +16,7 @@ import (
 	"local/internal/svc/internal/gamelib/data/item"
 	"local/internal/svc/internal/gamelib/data/skill"
 	"local/internal/svc/internal/gamelib/data/stat"
+	"local/internal/svc/internal/gamelib/memory"
 	"local/internal/svc/internal/action"
 	"local/internal/svc/internal/config"
 	ct "local/internal/svc/internal/context"
@@ -21,6 +24,7 @@ import (
 	"local/internal/svc/internal/event"
 	"local/internal/svc/internal/game"
 	"local/internal/svc/internal/health"
+	"local/internal/svc/internal/presenter"
 	"local/internal/svc/internal/run"
 	"local/internal/svc/internal/utils"
 )
@@ -161,6 +165,98 @@ func (s *SinglePlayerSupervisor) Start() error {
 		return err
 	}
 
+	// CLAUDE MODE: auto-enter game then idle for HTTP-driven tests.
+	if s.bot.ctx.ClaudeModeActive {
+		// If already in game (e.g., attached to a running D2R mid-game), skip entry.
+		s.bot.ctx.RefreshGameData()
+		if s.bot.ctx.Manager.InGame() && s.bot.ctx.Data.PlayerUnit.Area != 0 {
+			s.bot.ctx.Logger.Info("Claude mode: already in game, skipping entry...")
+			s.initClaudePresenter()
+			s.bot.ctx.SwitchPriority(ct.PriorityPause)
+			event.Send(event.GamePaused(event.Text(s.name, "Claude mode active"), true))
+			s.bot.ctx.Logger.Info("Claude mode: READY — use /debug/* endpoints")
+			for {
+				select {
+				case <-ctx.Done():
+					return nil
+				default:
+					utils.Sleep(1000)
+				}
+			}
+		}
+
+		s.bot.ctx.Logger.Info("Claude mode: waiting for D2R to reach char select (30s)...")
+
+		var charSelectReady bool
+		for i := 0; i < 120; i++ { // 120 × 250ms = 30s max
+			s.bot.ctx.HID.Click(game.LeftButton, 100, 100)
+			utils.Sleep(250)
+			if s.bot.ctx.GameReader.IsInCharacterSelectionScreen() {
+				charSelectReady = true
+				break
+			}
+		}
+		if !charSelectReady {
+			s.bot.ctx.Logger.Warn("Claude mode: char select not detected after 30s, proceeding anyway...")
+		} else {
+			s.bot.ctx.Logger.Info("Claude mode: char select detected, creating game...")
+		}
+
+		for attempt := 0; attempt < 8; attempt++ {
+			s.bot.ctx.Logger.Info("Claude mode: NewGame attempt", "n", attempt+1)
+			if attempt%2 == 0 {
+				gameErr := s.bot.ctx.Manager.NewGame()
+				if gameErr == nil {
+					break
+				}
+				s.bot.ctx.Logger.Warn("Claude mode: mouse NewGame failed, trying Enter", "error", gameErr)
+			}
+			s.bot.ctx.HID.PressKey(0x0D)
+			utils.Sleep(1500)
+			s.bot.ctx.HID.PressKey(0x0D)
+			utils.Sleep(4000)
+			s.bot.ctx.RefreshGameData()
+			if s.bot.ctx.Manager.InGame() {
+				break
+			}
+		}
+
+		// Wait until in-game
+		for i := 0; i < 50; i++ {
+			s.bot.ctx.RefreshGameData()
+			if s.bot.ctx.Manager.InGame() && s.bot.ctx.Data.PlayerUnit.Area != 0 {
+				break
+			}
+			utils.Sleep(200)
+		}
+
+		if !s.bot.ctx.Manager.InGame() {
+			s.bot.ctx.Logger.Error("Claude mode: failed to enter game")
+			return fmt.Errorf("claude mode: failed to enter game after retries")
+		}
+
+		s.bot.ctx.Logger.Info("Claude mode: IN GAME — switching to legacy mode...")
+		utils.Sleep(1000)
+		s.bot.ctx.HID.PressKey(0x47) // VK_G = toggle legacy graphics
+		utils.Sleep(500)
+
+		s.bot.ctx.Logger.Info("Claude mode: injecting presenter...")
+		s.initClaudePresenter()
+
+		s.bot.ctx.SwitchPriority(ct.PriorityPause)
+		event.Send(event.GamePaused(event.Text(s.name, "Claude mode active"), true))
+		s.bot.ctx.Logger.Info("Claude mode: READY — use /debug/* endpoints")
+
+		for {
+			select {
+			case <-ctx.Done():
+				return nil
+			default:
+				utils.Sleep(1000)
+			}
+		}
+	}
+
 	// MANUAL MODE: Early exit - handle before normal game loop
 	if s.bot.ctx.ManualModeActive {
 		s.bot.ctx.Logger.Info("Manual mode: reaching character selection...")
@@ -246,7 +342,7 @@ func (s *SinglePlayerSupervisor) Start() error {
 			// This outer timer is the ultimate watchdog. If the bot is out of game for too long,
 			// for any reason (including a frozen state read), this will trigger.
 			if time.Since(timeSpentNotInGameStart) > maxTimeNotInGame {
-				s.bot.ctx.Logger.Error(fmt.Sprintf("Bot has been outside of a game for more than %s. Forcing client restart.", maxTimeNotInGame))
+				s.bot.ctx.Logger.Error(fmt.Sprintf("Has been outside of a game for more than %s. Forcing client restart.", maxTimeNotInGame))
 				if killErr := s.KillClient(); killErr != nil {
 					s.bot.ctx.Logger.Error(fmt.Sprintf("Error killing client after timeout: %s", killErr.Error()))
 				}
@@ -390,7 +486,12 @@ func (s *SinglePlayerSupervisor) Start() error {
 
 		if s.bot.ctx.Data.IsLevelingCharacter && s.bot.ctx.Data.ActiveWeaponSlot != 0 {
 			for attempt := 0; attempt < 3 && s.bot.ctx.Data.ActiveWeaponSlot != 0; attempt++ {
-				s.bot.ctx.HID.PressKeyBinding(s.bot.ctx.Data.KeyBindings.SwapWeapons)
+				if s.bot.ctx.CharacterCfg.PacketCasting.UseForWeaponSwap && s.bot.ctx.PacketSender != nil {
+					fL, fR, tL, tR := action.WeaponSwapGIDs(s.bot.ctx.Data)
+					s.bot.ctx.PacketSender.SwapWeapon(fL, fR, tL, tR)
+				} else {
+					s.bot.ctx.HID.PressKeyBinding(s.bot.ctx.Data.KeyBindings.SwapWeapons)
+				}
 				utils.PingSleep(utils.Light, 150)
 				s.bot.ctx.RefreshGameData()
 			}
@@ -421,7 +522,7 @@ func (s *SinglePlayerSupervisor) Start() error {
 					for _, v := range missingKeybindings {
 						missingKeybindingsText += fmt.Sprintf("\n%s", skill.SkillNames[v])
 					}
-					missingKeybindingsText += "\nPlease bind the skills. Pausing bot..."
+					missingKeybindingsText += "\nPlease bind the skills. Pausing..."
 
 					utils.ShowDialog("Missing keybindings for "+s.name, missingKeybindingsText)
 					s.TogglePause()
@@ -638,9 +739,9 @@ func (s *SinglePlayerSupervisor) Start() error {
 				s.bot.ctx.Logger.Info("Party: all members done after death idle, now exiting game")
 			} else {
 				if errors.Is(err, context.DeadlineExceeded) {
-					// We don't log the generic "Bot run finished with error" message if it was a planned timeout
+					// We don't log the generic "run finished with error" message if it was a planned timeout
 				} else {
-					s.bot.ctx.Logger.Info(fmt.Sprintf("Bot run finished with error: %s. Initiating game exit and cooldown.", err.Error()))
+					s.bot.ctx.Logger.Info(fmt.Sprintf("Run finished with error: %s. Initiating game exit and cooldown.", err.Error()))
 				}
 
 				// Party: mark done on non-death errors (chicken/timeout) so others don't wait forever
@@ -1101,6 +1202,10 @@ func (s *SinglePlayerSupervisor) ensureSkillKeyBindingsReady() error {
 		s.bot.ctx.Logger.Debug("Skipping key binding check: manual mode active")
 		return nil
 	}
+	if s.bot.ctx.ClaudeModeActive {
+		s.bot.ctx.Logger.Debug("Skipping key binding check: claude mode active")
+		return nil
+	}
 	if s.bot.ctx.Manager.InGame() {
 		s.bot.ctx.Logger.Debug("Skipping key binding check: already in game")
 		return nil
@@ -1457,4 +1562,141 @@ func (s *SinglePlayerSupervisor) dumpArmory() error {
 
 	gameName := s.bot.ctx.GameReader.LastGameName()
 	return dumpArmoryData(s.name, s.bot.ctx.Data, gameName)
+}
+
+func (s *SinglePlayerSupervisor) initClaudePresenter() {
+	defer func() {
+		if r := recover(); r != nil {
+			s.bot.ctx.Logger.Error(fmt.Sprintf("PANIC in claude presenter init: %v", r))
+		}
+	}()
+
+	// Defence-in-depth: if manager.go's buildSupervisor already wired up a
+	// presenter (pre-Claude-gate flow or future regression), a second pres.Init
+	// injects a second rmod image into D2R with chained Present detours. That
+	// kills SnapshotInit/UninstallDetour acks. Manager.go now skips its init
+	// for CLAUDE_MODE; this guard surfaces any drift back to double-init.
+	if s.bot.ctx.MemoryInjector != nil && s.bot.ctx.MemoryInjector.GetPresenter() != nil {
+		s.bot.ctx.Logger.Warn("Claude mode: presenter already initialized — skipping duplicate init")
+		return
+	}
+
+	// In Claude mode, prefer the sniffer-enabled DLL (in-process buf0/buf1
+	// polling). Falls back to rmod.dll if rmod_sniffer.dll is missing.
+	presenterDLLName := "rmod.dll"
+	if os.Getenv("CLAUDE_MODE") == "1" {
+		if _, err := os.Stat(filepath.Join("tools", "rmod_sniffer.dll")); err == nil {
+			presenterDLLName = "rmod_sniffer.dll"
+			s.bot.ctx.Logger.Info("Claude mode: using sniffer-enabled DLL (initClaudePresenter)")
+		}
+	}
+	presenterDLLPath := filepath.Join("tools", presenterDLLName)
+	if absPath, err := filepath.Abs(presenterDLLPath); err == nil {
+		presenterDLLPath = absPath
+	}
+	if _, statErr := os.Stat(presenterDLLPath); statErr != nil {
+		s.bot.ctx.Logger.Error("presenter DLL not found", slog.String("path", presenterDLLPath))
+		return
+	}
+
+	gr := s.bot.ctx.GameReader
+	gi := s.bot.ctx.MemoryInjector
+	pid := gr.GetPID()
+	hwnd := gr.HWND
+
+	fnSendPacket, fnErr := gr.Process.GetD2GSSendPacketFn()
+	if fnErr != nil {
+		s.bot.ctx.Logger.Warn("could not resolve dispatch function", slog.Any("error", fnErr))
+		return
+	}
+
+	const uiNetManRVA uintptr = 0x19ED860
+	uiNetManAddr := gr.Process.ModuleBaseAddress() + uiNetManRVA
+
+	const mirrorBufRVA uintptr = 0x1F51330
+	mirrorBufAddr := gr.Process.ModuleBaseAddress() + mirrorBufRVA
+
+	const dualSendWrapRVA uintptr = 0x147110
+	dualSendWrapAddr := gr.Process.ModuleBaseAddress() + dualSendWrapRVA
+
+	var realClickFn uintptr
+	if rcFn, rcErr := gr.Process.GetRealClickWorkerFn(); rcErr == nil {
+		realClickFn = rcFn
+	}
+
+	pres := presenter.New(pid, presenterDLLPath)
+	if initErr := pres.Init(fnSendPacket, uiNetManAddr, realClickFn, uintptr(hwnd), mirrorBufAddr, dualSendWrapAddr); initErr != nil {
+		s.bot.ctx.Logger.Error("presenter init FAILED", slog.Any("error", initErr))
+		return
+	}
+
+	gi.SetPresenter(pres)
+	gr.Process.SetExternalCallFn(pres.CallFn)
+	gr.Process.SetExternalWriteMem(pres.WriteMem)
+	// Keep classic APC for SendPacket (game-state opcodes like 0x3C).
+	// UI sender: DON'T use rmod (render thread crashes D2R).
+	// Instead, Process.SendUIPacket falls back to APC-based SendUIPacketViaMainThread.
+	// gr.Process.SetExternalSender(pres.SendPacket)
+	// gr.Process.SetExternalUISender(pres.SendUIPacket) // DISABLED: render thread crash
+	gr.Process.SetExternalDualSender(pres.SendDualPacket)
+	forceMoveAddr := gr.Process.GetModuleBase() + 0x19D25B4 + 0x49C + 4
+	pres.SetForceMoveAddr(forceMoveAddr)
+	s.bot.ctx.Logger.Info("Claude mode: presenter initialized (rmod.dll injected, all send paths)")
+
+	// P1-GID snapshot wiring is opt-in via SNAPSHOT_ENABLE=1 AND MODE2=1.
+	// Phase 1 (CLAUDE_MODE) is for game entry only and must NEVER trigger
+	// snapshot init (game state not stable until in-area; AV storm in walker
+	// → Arxan VEH overflow → STATUS_STACK_OVERFLOW). Phase 2 (MODE2=1) is
+	// the post-attach steady state where snapshot init runs.
+	if os.Getenv("SNAPSHOT_ENABLE") != "1" || os.Getenv("MODE2") != "1" {
+		s.bot.ctx.Logger.Info("Claude mode: skipping snapshot init (require MODE2=1 AND SNAPSHOT_ENABLE=1 — presenter-only mode)")
+		// Auto-unlock cursor in Claude mode so user can interact with D2R.
+		if s.bot.ctx.MemoryInjector != nil {
+			if err := s.bot.ctx.MemoryInjector.DisableCursorOverride(); err != nil {
+				s.bot.ctx.Logger.Warn("Claude mode: failed to auto-unlock cursor", "error", err)
+			} else {
+				s.bot.ctx.Logger.Info("Claude mode: cursor auto-unlocked")
+			}
+		}
+		return
+	}
+
+	// P1-GID Phase B0: wire in-process PlayerUnit snapshot. Hard-fail per
+	// P1_GID_PLAN.md user directive — no silent regression to RPM — but with
+	// a clean teardown so rmod restores Present before we exit. Skipping the
+	// teardown is what produced the "HasExited but VM reboot required"
+	// zombies documented in Desktop/reports/RESUME_AFTER_REBOOT_4.md.
+	unitTableVA, expansionVA, waypointVA := gr.GameReader.SnapshotInitOffsets()
+	failSnapshot := func(msg string) {
+		s.bot.ctx.Logger.Error(msg)
+		if uerr := pres.UninstallDetour(); uerr != nil {
+			s.bot.ctx.Logger.Warn("uninstall detour during hard-fail",
+				slog.Any("error", uerr))
+		}
+		os.Exit(1)
+	}
+	// Phase B2: publish simple static regions BEFORE init.
+	if setErr := pres.WriteSnapshotStatics(gr.GameReader.SnapshotStaticEntries()); setErr != nil {
+		failSnapshot(fmt.Sprintf("snapshot statics write failed: %v", setErr))
+	}
+	if snapErr := pres.SnapshotInit(unitTableVA, expansionVA, waypointVA); snapErr != nil {
+		failSnapshot(fmt.Sprintf("snapshot init failed: %v", snapErr))
+	}
+	sr := memory.NewSnapshotReader(pres.LocalView(), uintptr(presenter.SharedBufSize))
+	if tickErr := sr.WaitForFirstTick(3 * time.Second); tickErr != nil {
+		failSnapshot(fmt.Sprintf("snapshot tick never advanced: %v", tickErr))
+	}
+	gr.GameReader.AttachSnapshot(sr)
+	s.bot.ctx.Logger.Info("P1-GID snapshot attached; memory reads now in-process via SHM",
+		slog.Uint64("tick", sr.Tick()),
+		slog.Uint64("regions", uint64(sr.RegionCount())))
+
+	// Auto-unlock cursor in Claude mode so user can interact with D2R.
+	if s.bot.ctx.MemoryInjector != nil {
+		if err := s.bot.ctx.MemoryInjector.DisableCursorOverride(); err != nil {
+			s.bot.ctx.Logger.Warn("Claude mode: failed to auto-unlock cursor", "error", err)
+		} else {
+			s.bot.ctx.Logger.Info("Claude mode: cursor auto-unlocked")
+		}
+	}
 }

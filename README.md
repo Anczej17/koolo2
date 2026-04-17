@@ -1,14 +1,14 @@
-This fork is dedicated to completing the leveling feature and improving the bot.
-We're happy to announce that all classes are now supported for leveling!
+This fork is dedicated to completing the leveling feature and improving the application.
+All classes are now supported for leveling.
 
-While we're still ironing a few things out in the leveling feature, we have already made major changes to other parts of the bot like:
+Major changes include:
 
 * Optional usage of packets
 * Leveling sequencer + editor (customizable leveling)
 * Complete movement overhaul
 * Torch-System (Ubers)
 * Terror zones rework
-* Shopping bot
+* Shopping
 * Dropper
 * Auto-Mule
 * Barb improvements
@@ -18,13 +18,7 @@ While we're still ironing a few things out in the leveling feature, we have alre
 * Buff rework
 * Many qol features like mass-profile-management, improved class-selection, auto-char-creation, mass-auto-starting, etc.
 
-To name only a few!
-
-If you're interested in more features or want to give us your feedback, you can join our Discord server: https://discord.gg/5GCdFDbJnx
-
-Please know that this project is still in development, so you may encounter bugs. Please report them if you do. While we can't give you any direct support, we will eventually pick them up and resolve them. You are of course also very much invited to add possible fixes or new features via pull requests yourself.
-
-Quick video tutorial "full setup & start leveling": https://www.youtube.com/watch?v=lgWgHzbO2l4
+Please know that this project is still in development, so you may encounter issues. You are invited to add possible fixes or new features via pull requests.
 
 Important information:
 
@@ -33,7 +27,7 @@ As written more detailed below you need to install:
 - Go (1.24, not 1.25!)
 - Garble (0.14.2, not 0.15.x)
 
-Make sure the game is set to English to prevent any language-related bugs.
+Make sure the game is set to English to prevent any language-related issues.
 
 Use better_build.bat to build the application.
 
@@ -43,7 +37,7 @@ Use better_build.bat to build the application.
 
 ---
 <div style="background-color: #FFFACD; padding: 10px; border-radius: 5px; text-align: center">
-  <h2 style="margin: 0;">⚠️ Warning: People using this tool have been reporting bans. Do not use it.</h2>
+  <h2 style="margin: 0;">Warning: Use at your own risk.</h2>
 </div>
 <p align="center">
   <img src="assets/app.webp" alt="Application" width="150">
@@ -52,23 +46,20 @@ Use better_build.bat to build the application.
 
 ---
 
-App is a small bot for Diablo II: Resurrected (Expansion). App project was built for informational and educational purposes
-only, it's not intended for online usage. Feel free to contribute opening pull requests with new features or bugfixes.
-App reads game memory and interacts with the game injecting clicks/keystrokes to the game window. As good as it can.
-
-Feel free to join our Discord community to report bugs, ask for help or just to chat: [Application Discord]( https://discord.gg/zgFMyzAFHE)
+App is a tool for Diablo II: Resurrected (Expansion). Built for informational and educational purposes
+only, it's not intended for online usage. Feel free to contribute opening pull requests with new features or fixes.
+App reads game memory and interacts with the game window. As good as it can.
 
 ## Disclaimer
-Can I get banned for using App? The answer is a crystal clear yes, you can get banned although at this point I'm
-not aware of any ban for using it. I'm not responsible for any ban or any other consequence that may arise from it.
+Can I get banned for using App? Yes, you can get banned. I'm not responsible for any ban or any other consequence that may arise from it.
 
 ## Features
 - Blizzard Sorceress, Nova Sorceress, FoH, Berserk Barbarian Hork (Travincal), Mosaic are currently supported. Hammerdin, Javazon and Winddruid are WIP
 - Supported runs: Countess, Andariel, Ancient Tunnels, Summoner, Mephisto, Council, Eldritch-Shenk, Endugu, Drifter Cavern, Pindleskin, Nihlathak,
   Tristram, Lower Kurast and Superchests, Stony Tomb, The Pit, Arachnid Lair, Baal, Duriel, Tal Rasha Tombs, Diablo, Cows, Treshsocket
-- Multi window support (run multiple bots at the same time)
-- Bot integration for Discord and Telegram
-- "Companion mode" one leader bot will be creating games and the rest of the bots will join the game... (not working currently)
+- Multi window support (run multiple instances at the same time)
+- Integration for Discord and Telegram
+- "Companion mode" one leader will be creating games and the rest will join the game... (not working currently)
 - Pickit based on NIP files
 - Auto potion for health and mana (also mercenary)
 - Chicken when low health
@@ -99,14 +90,14 @@ not aware of any ban for using it. I'm not responsible for any ban or any other 
 
 ### Running the tool
 - If you haven't done yet, install **Diablo II: LOD 1.13c** (required)
-- [Download](https://github.com/user/app/releases) the latest App release (recommended for most users), or alternatively you can [build it from source](#development-environment)
+- Download the latest release (recommended for most users), or alternatively you can [build it from source](#development-environment)
 - Extract the zip file in a directory of your choice.
-- Run `app.exe`.
-- Follow the setup wizard, it will guide you through the process of setting up the bot, you will need to setup some directories and character configuration.
-- If you want to back up/restore your configuration, and for manual setup, you can find the configuration files in the `config` directory.
+- Run the executable.
+- Follow the setup wizard, it will guide you through the process of setting up the application. You will need to configure some directories and character settings.
+- If you want to back up/restore your configuration, you can find the configuration files in the `config` directory.
 
 ## Pickit rules
-Item pickit is based on [NIP files](https://github.com/blizzhackers/pickits/blob/master/NipGuide.md), you can find them in the `config/{character}/pickit` directory.
+Item pickit is based on NIP files, you can find them in the `config/{character}/pickit` directory.
 
 All the .nip files contained in the pickit directory will be loaded, so you can have multiple pickit files.
 
@@ -117,12 +108,12 @@ There are some considerations to take into account:
 - Pickit rules can not be changed in runtime (yet), you will need to restart App to apply changes.
 
 ## Development environment
-**Note:** This is only required if you want to build the project from source. If you want to run the bot, you can just download the [latest release](https://github.com/user/app/releases).
+**Note:** This is only required if you want to build the project from source.
 
 Setting the development environment is pretty straightforward, but the following dependencies are **required** to build the project.
 
 ### Dependencies
-- [Download Go 1.24](https://go.dev/dl/) <ins>⚠️**not the version 1.25**⚠️</ins> 
+- [Download Go 1.24](https://go.dev/dl/) <ins>**not the version 1.25**</ins> 
 - [Install git](https://gitforwindows.org/)
 
 ### Building from source
@@ -134,8 +125,6 @@ go install mvdan.cc/garble@v0.14.2
 
 Next, run the following commands in project root directory:
 ```shell
-git clone https://github.com/user/app.git
-cd app
 better_build.bat
 ```
 This will produce the "build" directory with the executable file and all the required assets.

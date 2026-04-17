@@ -3,6 +3,7 @@ package run
 import (
 	"errors"
 	"fmt"
+	"log/slog"
 
 	"local/internal/svc/internal/gamelib/data/area"
 	"local/internal/svc/internal/gamelib/data/difficulty"
@@ -134,7 +135,7 @@ func (a Leveling) AdjustGameDifficulty() error {
 	}
 
 	if difficultyChanged {
-		a.ctx.Logger.Info("Difficulty changed to %s. Saving character configuration...", a.ctx.CharacterCfg.Game.Difficulty)
+		a.ctx.Logger.Info("Difficulty changed, saving character configuration", slog.String("difficulty", string(a.ctx.CharacterCfg.Game.Difficulty)))
 		// Use the new ConfigFolderName field here!
 		if err := config.SaveSupervisorConfig(a.ctx.CharacterCfg.ConfigFolderName, a.ctx.CharacterCfg); err != nil {
 			return fmt.Errorf("failed to save character configuration: %w", err)

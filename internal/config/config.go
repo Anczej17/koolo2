@@ -52,8 +52,8 @@ type AppCfg struct {
 	UseCustomSettings     bool   `yaml:"useCustomSettings"`
 	GameWindowArrangement bool   `yaml:"gameWindowArrangement"`
 	LogSaveDirectory      string `yaml:"logSaveDirectory"`
-	D2LoDPath             string `yaml:"D2LoDPath"`
-	D2RPath               string `yaml:"D2RPath"`
+	LegacyAppPath         string `yaml:"legacyAppPath"`
+	AppPath               string `yaml:"appPath"`
 	CentralizedPickitPath string `yaml:"centralizedPickitPath"`
 	WindowWidth           int    `yaml:"windowWidth"`
 	WindowHeight          int    `yaml:"windowHeight"`
@@ -255,6 +255,26 @@ type CharacterCfg struct {
 		UseForTeleport            bool `yaml:"useForTeleport"`
 		UseForEntitySkills        bool `yaml:"useForEntitySkills"`
 		UseForSkillSelection      bool `yaml:"useForSkillSelection"`
+		UseForNPCInteraction      bool `yaml:"useForNPCInteraction"`
+		UseForWeaponSwap          bool `yaml:"useForWeaponSwap"`
+		UseForMovement            bool `yaml:"useForMovement"`
+		UseForBuySell             bool `yaml:"useForBuySell"`
+		UseForCubeTransmute       bool `yaml:"useForCubeTransmute"`
+		UseForGamble              bool `yaml:"useForGamble"`
+		UseForRepair              bool `yaml:"useForRepair"`
+		UseForIdentify            bool `yaml:"useForIdentify"`
+		UseForPotionUse           bool `yaml:"useForPotionUse"`
+		UseForStashManagement     bool `yaml:"useForStashManagement"`
+		UseForInventoryManagement bool `yaml:"useForInventoryManagement"`
+		// Phase 9 EXPERIMENTAL — in-process click via rmod.dll PostMessageW.
+		// DEFAULT FALSE. The canonical movement path is HID (game/mouse.go),
+		// which already integrates Phase 8C cursor trampoline + cross-process
+		// SendMessage and works background / multi-instance / no kernel input
+		// queue. Phase 9 is kept as a research opt-in but offers no advantage
+		// over HID once Phase 8C is installed — and breaks for non-foreground
+		// D2R because it bypasses gi.CursorPos. Do NOT enable in production
+		// until the gi.CursorPos handshake is wired into the click path.
+		UseInProcClickForMovement bool `yaml:"useInProcClickForMovement"`
 	} `yaml:"packetCasting"`
 
 	Scheduler Scheduler `yaml:"scheduler"`
@@ -1115,15 +1135,15 @@ func UpdateWindowSize(width, height int) {
 }
 
 func ValidateAndSaveConfig(config AppCfg) error {
-	config.D2LoDPath = strings.ReplaceAll(strings.ToLower(config.D2LoDPath), "game.exe", "")
-	config.D2RPath = strings.ReplaceAll(strings.ToLower(config.D2RPath), "d2r.exe", "")
+	config.LegacyAppPath = strings.ReplaceAll(strings.ToLower(config.LegacyAppPath), "game.exe", "")
+	config.AppPath = strings.ReplaceAll(strings.ToLower(config.AppPath), strings.ToLower(utils.GameExeName()), "")
 
-	if _, err := os.Stat(config.D2LoDPath + "/d2data.mpq"); os.IsNotExist(err) {
-		return errors.New("D2LoDPath is not valid")
+	if _, err := os.Stat(config.LegacyAppPath + "/d2data.mpq"); os.IsNotExist(err) {
+		return errors.New("legacyAppPath is not valid")
 	}
 
-	if _, err := os.Stat(config.D2RPath + "/d2r.exe"); os.IsNotExist(err) {
-		return errors.New("D2RPath is not valid")
+	if _, err := os.Stat(config.AppPath + "/" + utils.GameExeName()); os.IsNotExist(err) {
+		return errors.New("appPath is not valid")
 	}
 
 	if config.Discord.Enabled {

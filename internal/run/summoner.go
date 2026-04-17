@@ -2,6 +2,7 @@ package run
 
 import (
 	"errors"
+	"log/slog"
 	"math"
 
 	"local/internal/svc/internal/gamelib/data"
@@ -80,11 +81,11 @@ func (s Summoner) runTerrorZone() error {
 
 	// Clear all 4 lanes
 	for lane := 0; lane < 4; lane++ {
-		s.ctx.Logger.Info("Clearing Arcane Sanctuary TZ - Lane %d/4", lane+1)
+		s.ctx.Logger.Info("Clearing Arcane Sanctuary TZ", slog.Int("lane", lane+1), slog.Int("total", 4))
 
 		// Clear this lane to End Point (one side)
 		if err := lanes.ClearLane(s.clearMonsterFilter, summonerNPC, summonerFound); err != nil {
-			s.ctx.Logger.Warn("Lane %d clearing issue: %v", lane+1, err)
+			s.ctx.Logger.Warn("Lane clearing issue", slog.Int("lane", lane+1), slog.Any("error", err))
 		}
 
 		// Open chests at end of lane
@@ -94,7 +95,7 @@ func (s Summoner) runTerrorZone() error {
 
 		// Return to center via the other side
 		if err := lanes.ReturnToCenter(s.clearMonsterFilter); err != nil {
-			s.ctx.Logger.Warn("Lane %d return path issue: %v", lane+1, err)
+			s.ctx.Logger.Warn("Lane return path issue", slog.Int("lane", lane+1), slog.Any("error", err))
 		}
 
 		// Move on to next lane
@@ -255,7 +256,7 @@ func (al *ArcaneLanes) ClearLane(filter data.MonsterFilter, summonerNPC data.NPC
 			al.clearRange,
 			filter,
 		); err != nil {
-			al.ctx.Logger.Debug("ClearThroughPath error at checkpoint %d: %v", idx, err)
+			al.ctx.Logger.Debug("ClearThroughPath error at checkpoint", slog.Int("checkpoint", idx), slog.Any("error", err))
 			// Continue even on error
 		}
 
@@ -270,9 +271,9 @@ func (al *ArcaneLanes) ClearLane(filter data.MonsterFilter, summonerNPC data.NPC
 			)
 
 			if summonerDistance < 20 {
-				al.ctx.Logger.Info("Summoner detected on this lane (distance: %d) - killing...", summonerDistance)
+				al.ctx.Logger.Info("Summoner detected on this lane, killing", slog.Int("distance", summonerDistance))
 				if err := al.ctx.Char.KillSummoner(); err != nil {
-					al.ctx.Logger.Warn("Failed to kill Summoner: %v", err)
+					al.ctx.Logger.Warn("Failed to kill Summoner", slog.Any("error", err))
 				} else {
 					al.ctx.Logger.Info("Summoner killed successfully")
 					action.ItemPickup(30)
@@ -308,7 +309,7 @@ func (al *ArcaneLanes) ReturnToCenter(filter data.MonsterFilter) error {
 			al.clearRange,
 			filter,
 		); err != nil {
-			al.ctx.Logger.Debug("ClearThroughPath error at checkpoint %d during return: %v", idx, err)
+			al.ctx.Logger.Debug("ClearThroughPath error at checkpoint during return", slog.Int("checkpoint", idx), slog.Any("error", err))
 			// Continue even on error
 		}
 
@@ -336,7 +337,7 @@ func (al *ArcaneLanes) OpenChestsAtEnd() {
 		}
 
 		if err := action.MoveToCoords(obj.Position); err != nil {
-			al.ctx.Logger.Debug("Failed to move to chest at distance %d: %v", distance, err)
+			al.ctx.Logger.Debug("Failed to move to chest", slog.Int("distance", distance), slog.Any("error", err))
 			continue
 		}
 
@@ -344,14 +345,14 @@ func (al *ArcaneLanes) OpenChestsAtEnd() {
 			chest, found := al.ctx.Data.Objects.FindByID(obj.ID)
 			return found && !chest.Selectable
 		}); err != nil {
-			al.ctx.Logger.Debug("Failed to open chest Name=%d: %v", obj.Name, err)
+			al.ctx.Logger.Debug("Failed to open chest", slog.Any("name", obj.Name), slog.Any("error", err))
 		} else {
 			chestsOpened++
 		}
 	}
 
 	if chestsOpened > 0 {
-		al.ctx.Logger.Info("Opened %d chests at lane end", chestsOpened)
+		al.ctx.Logger.Info("Opened chests at lane end", slog.Int("count", chestsOpened))
 	}
 }
 

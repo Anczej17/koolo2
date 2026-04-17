@@ -4,14 +4,34 @@ setlocal enabledelayedexpansion
 :: Preserve only packages that break under obfuscation
 :: server: html/template reflection + JSON field names
 :: event: type switches in non-garbled consumers (server, discord)
-set GOGARBLE=!local/internal/svc/internal/server*,!local/internal/svc/internal/event*,!github.com/inkeliz/gowebview*
+set GOGARBLE=*,!local/internal/svc/internal/server*,!local/internal/svc/internal/event*,!github.com/inkeliz/gowebview*
+set GARBLE_EXPERIMENTAL_CONTROLFLOW=1
+set GOTOOLCHAIN=local
 
 :: Required versions
-set REQUIRED_GO_VERSION=1.24
-set REQUIRED_GARBLE_VERSION=0.14.2
+set REQUIRED_GO_VERSION=1.25
+set REQUIRED_GARBLE_VERSION=0.15.0
 
-:: Change to the script's directory
-cd /d "%~dp0"
+:: Change to the script's directory (via neutral junction if present)
+::
+:: R1 mitigation: Go embeds absolute source-file paths into the runtime panic
+:: tables even with -trimpath when the module lives outside GOPATH. If the
+:: folder name contains "Audyt Koolo / koolo2-rebranding", those literals end
+:: up in dist/AppService.exe — 374+ leaks, trivial to YARA-signature.
+::
+:: Solution: build from a neutral junction at C:\src\svc\. Create once:
+::   powershell -Command "New-Item -Path 'C:\src\svc' -ItemType Junction -Target 'C:\Users\Administrator\Desktop\Audyt Koolo\koolo2-rebranding'"
+::
+:: If the junction exists, cd there; otherwise fall back to script dir and
+:: warn so the operator knows to create it.
+if exist "C:\src\svc\better_build.bat" (
+    cd /d "C:\src\svc"
+    echo [R1] Building from neutral path C:\src\svc
+) else (
+    cd /d "%~dp0"
+    echo [R1-WARN] C:\src\svc junction not found — build may leak folder name.
+    echo [R1-WARN] Create it with: powershell -Command "New-Item -Path 'C:\src\svc' -ItemType Junction -Target '%~dp0'"
+)
 
 :: Use a static build folder to avoid temp paths being flagged by AV
 set "STATIC_BUILD_DIR=%cd%\build\tmp"

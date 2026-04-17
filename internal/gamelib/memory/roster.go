@@ -6,16 +6,16 @@ import (
 )
 
 func (gd *GameReader) getRoster(rawPlayerUnits RawPlayerUnits) (roster []data.RosterMember) {
-	partyStruct := uintptr(gd.Process.ReadUInt(gd.Process.moduleBaseAddressPtr+gd.offset.RosterOffset, Uint64))
+	partyStruct := uintptr(gd.reader.ReadUInt(gd.Process.moduleBaseAddressPtr+gd.offset.RosterOffset, Uint64))
 
 	// We skip the first position because it's the main player, and we already have the information (+0x148 is the next party member)
-	partyStruct = uintptr(gd.Process.ReadUInt(partyStruct+0x148, Uint64))
+	partyStruct = uintptr(gd.reader.ReadUInt(partyStruct+0x148, Uint64))
 	for partyStruct > 0 {
-		name := gd.Process.ReadStringFromMemory(partyStruct, 16)
-		a := area.ID(gd.Process.ReadUInt(partyStruct+0x5C, Uint32))
+		name := gd.reader.ReadStringFromMemory(partyStruct, 16)
+		a := area.ID(gd.reader.ReadUInt(partyStruct+0x5C, Uint32))
 
-		xPos := int(gd.Process.ReadUInt(partyStruct+0x60, Uint32))
-		yPos := int(gd.Process.ReadUInt(partyStruct+0x64, Uint32))
+		xPos := int(gd.reader.ReadUInt(partyStruct+0x60, Uint32))
+		yPos := int(gd.reader.ReadUInt(partyStruct+0x64, Uint32))
 
 		// When the player is in town, roster data is not updated, so we need to get the area from the player unit that match the same name
 		for _, pu := range rawPlayerUnits {
@@ -32,7 +32,7 @@ func (gd *GameReader) getRoster(rawPlayerUnits RawPlayerUnits) (roster []data.Ro
 			Area:     a,
 			Position: data.Position{X: xPos, Y: yPos},
 		})
-		partyStruct = uintptr(gd.Process.ReadUInt(partyStruct+0x148, Uint64))
+		partyStruct = uintptr(gd.reader.ReadUInt(partyStruct+0x148, Uint64))
 	}
 
 	mainPlayerUnit := rawPlayerUnits.GetMainPlayer()

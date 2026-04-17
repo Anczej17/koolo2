@@ -3,6 +3,7 @@ package run
 import (
 	"errors"
 	"fmt"
+	"log/slog"
 
 	"local/internal/svc/internal/gamelib/data"
 	"local/internal/svc/internal/gamelib/data/area"
@@ -163,7 +164,7 @@ func (rc RescueCain) Run(parameters *RunParameters) error {
 func (rc RescueCain) gatherInfussScroll() error {
 	rc.ctx.CharacterCfg.Character.ClearPathDist = 20
 	if err := config.SaveSupervisorConfig(rc.ctx.CharacterCfg.ConfigFolderName, rc.ctx.CharacterCfg); err != nil {
-		rc.ctx.Logger.Error("Failed to save character configuration: %s", err.Error())
+		rc.ctx.Logger.Error("Failed to save character configuration", slog.Any("error", err))
 	}
 
 	err := action.WayPoint(area.DarkWood)
@@ -173,7 +174,7 @@ func (rc RescueCain) gatherInfussScroll() error {
 
 	rc.ctx.CharacterCfg.Character.ClearPathDist = 30
 	if err := config.SaveSupervisorConfig(rc.ctx.CharacterCfg.ConfigFolderName, rc.ctx.CharacterCfg); err != nil {
-		rc.ctx.Logger.Error("Failed to save character configuration: %s", err.Error())
+		rc.ctx.Logger.Error("Failed to save character configuration", slog.Any("error", err))
 	}
 
 	// Find the Inifuss Tree position.

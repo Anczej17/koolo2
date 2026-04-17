@@ -224,7 +224,7 @@ func attack(settings attackSettings) error {
 
 		// Handle aura activation
 		if settings.aura != 0 && lastRunAt.IsZero() {
-			ctx.HID.PressKeyBinding(ctx.Data.KeyBindings.MustKBForSkill(settings.aura))
+			_ = SelectRightSkill(settings.aura)
 		}
 
 		// Attack timing check
@@ -385,7 +385,7 @@ func performAttack(ctx *context.Status, settings attackSettings, targetID data.U
 		}
 
 		// Send packet to cast Blizzard at location
-		if err := ctx.PacketSender.CastSkillAtLocation(monsterPos); err != nil {
+		if err := ctx.PacketSender.CastSkillAtLocation(monsterPos, ctx.Data.PlayerUnit.Position); err != nil {
 			ctx.Logger.Warn("Failed to cast Blizzard via packet, falling back to mouse", "error", err)
 			// Fall back to regular mouse casting
 			performMouseAttack(ctx, settings, x, y)

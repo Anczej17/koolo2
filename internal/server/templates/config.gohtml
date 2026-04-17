@@ -354,19 +354,19 @@
         <form method="post">
             <fieldset>
                 <label>
-                    Diablo II Resurrected Path
+                    Application install path
                     <input
-                            name="d2rpath"
-                            placeholder="C:\Program Files (x86)\Diablo II Resurrected"
-                            value="{{.D2RPath}}"
+                            name="apppath"
+                            placeholder="C:\Program Files\App"
+                            value="{{.AppPath}}"
                     />
                 </label>
                 <label>
-                    Diablo II: LoD 1.13c Path (MUST BE 1.13c, otherwise it won't work)
+                    Legacy app path (1.13c reference data — required)
                     <input
-                            name="d2lodpath"
-                            placeholder="E:\games\Diablo II"
-                            value="{{.D2LoDPath}}"
+                            name="legacyapppath"
+                            placeholder="E:\games\legacy"
+                            value="{{.LegacyAppPath}}"
                     />
                 </label>
                 <label>

@@ -171,8 +171,7 @@ func (n *NecromancerLeveling) castCorpseSkill(skillID skill.ID, corpse *data.Mon
 	}
 
 	if ctx.Data.PlayerUnit.RightSkill != skillID {
-		ctx.HID.PressKeyBinding(ctx.Data.KeyBindings.MustKBForSkill(skillID))
-		utils.Sleep(50)
+		_ = step.SelectRightSkill(skillID)
 	}
 
 	ctx.HID.KeyDown(ctx.Data.KeyBindings.StandStill)

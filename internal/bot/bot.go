@@ -13,6 +13,7 @@ import (
 	"local/internal/svc/internal/gamelib/data/area"
 	"local/internal/svc/internal/gamelib/data/skill"
 	"local/internal/svc/internal/gamelib/data/stat"
+	"local/internal/svc/internal/gamelib/memory"
 	"local/internal/svc/internal/action"
 	"local/internal/svc/internal/action/step"
 	botCtx "local/internal/svc/internal/context"
@@ -27,7 +28,7 @@ import (
 // Sentinel errors for run finish reasons
 var (
 	errPlayerIdle   = errors.New("player idle for too long, quitting game")
-	errGlobalIdle   = errors.New("bot globally idle for too long (no movement), quitting game")
+	errGlobalIdle   = errors.New("globally idle for too long (no movement), quitting game")
 	errPlayerStuck  = errors.New("player stuck in an unrecoverable movement loop, quitting")
 )
 
@@ -127,17 +128,18 @@ func (b *Bot) Run(ctx context.Context, firstRun bool, runs []run.Run) error {
 
 	b.updateActivityAndPosition() // Initial update for activity and position
 
-	// This routine is in charge of refreshing the game data and handling cancellation, will work in parallel with any other execution
+	// This routine is in charge of refreshing the game data and handling cancellation, will work in parallel with any other execution.
+	// Layer 4: timing jitter — replace fixed 100ms ticker with jittered After
+	// pulse (±15% when STEALTH_READ=1, exact 100ms otherwise).
 	g.Go(func() error {
 		b.ctx.AttachRoutine(botCtx.PriorityBackground)
-		ticker := time.NewTicker(100 * time.Millisecond)
 		for {
 			select {
 			case <-ctx.Done():
 				cancel()
 				b.Stop()
 				return nil
-			case <-ticker.C:
+			case <-time.After(memory.TickerInterval(100 * time.Millisecond)):
 				if b.ctx.GetPriority() == botCtx.PriorityPause {
 					continue
 				}
@@ -148,10 +150,10 @@ func (b *Bot) Run(ctx context.Context, firstRun bool, runs []run.Run) error {
 		}
 	})
 
-	// This routine is in charge of handling the health/chicken of the bot, will work in parallel with any other execution
+	// This routine is in charge of handling the health/chicken of the bot, will work in parallel with any other execution.
+	// Layer 4: jittered pulse same as the refresh loop above.
 	g.Go(func() error {
 		b.ctx.AttachRoutine(botCtx.PriorityBackground)
-		ticker := time.NewTicker(100 * time.Millisecond)
 
 		const globalLongTermIdleThreshold = 2 * time.Minute // From move.go example
 		const minMovementThreshold = 30                     // From move.go example
@@ -161,7 +163,7 @@ func (b *Bot) Run(ctx context.Context, firstRun bool, runs []run.Run) error {
 			case <-ctx.Done():
 				b.Stop()
 				return nil
-			case <-ticker.C:
+			case <-time.After(memory.TickerInterval(100 * time.Millisecond)):
 				if b.ctx.GetPriority() == botCtx.PriorityPause {
 					continue
 				}
@@ -177,7 +179,7 @@ func (b *Bot) Run(ctx context.Context, firstRun bool, runs []run.Run) error {
 
 				err = b.ctx.HealthManager.HandleHealthAndMana()
 				if err != nil {
-					b.ctx.Logger.Info("HealthManager: Detected critical error (chicken/death), stopping bot.", "error", err.Error())
+					b.ctx.Logger.Info("HealthManager: Detected critical error (chicken/death), stopping.", "error", err.Error())
 					cancel()
 					b.Stop()
 					return err
@@ -197,12 +199,12 @@ func (b *Bot) Run(ctx context.Context, firstRun bool, runs []run.Run) error {
 					if distanceFromLastKnown > float64(minMovementThreshold) {
 						// Player has moved significantly, reset position-based idle timer
 						b.updateActivityAndPosition() // This will update lastKnownPosition and lastPositionCheckTime
-						b.ctx.Logger.Debug(fmt.Sprintf("Bot: Player moved significantly (%.2f units), resetting global idle timer.", distanceFromLastKnown))
+						b.ctx.Logger.Debug(fmt.Sprintf("Player moved significantly (%.2f units), resetting global idle timer.", distanceFromLastKnown))
 					} else if time.Since(lastPosCheckTime) > globalLongTermIdleThreshold {
 						// Player hasn't moved much for the long-term threshold, quit the game
-						b.ctx.Logger.Error(fmt.Sprintf("Bot: Player has been globally idle (no significant movement) for more than %v, quitting game.", globalLongTermIdleThreshold))
+						b.ctx.Logger.Error(fmt.Sprintf("Player has been globally idle (no significant movement) for more than %v, quitting game.", globalLongTermIdleThreshold))
 						b.Stop()
-						return errors.New("bot globally idle for too long (no movement), quitting game")
+						return errors.New("globally idle for too long (no movement), quitting game")
 					}
 				} else {
 					// If for some reason positions are invalid, just update activity to prevent immediate idle.
@@ -232,13 +234,13 @@ func (b *Bot) Run(ctx context.Context, firstRun bool, runs []run.Run) error {
 		}()
 
 		b.ctx.AttachRoutine(botCtx.PriorityHigh)
-		ticker := time.NewTicker(time.Millisecond * 100)
+		// Layer 4: jittered pulse.
 
 		for {
 			select {
 			case <-ctx.Done():
 				return nil
-			case <-ticker.C:
+			case <-time.After(memory.TickerInterval(time.Millisecond * 100)):
 				if b.ctx.GetPriority() == botCtx.PriorityPause {
 					continue
 				}
@@ -409,7 +411,7 @@ func (b *Bot) Run(ctx context.Context, firstRun bool, runs []run.Run) error {
 			if r := recover(); r != nil {
 				if e, ok := r.(error); ok && errors.Is(e, health.ErrChicken) {
 					returnErr = e
-				} else if fmt.Sprintf("%v", r) != "Bot is stopped" {
+				} else if fmt.Sprintf("%v", r) != "instance stopped" {
 					b.ctx.Logger.Error("Run goroutine panic (recovered)",
 						slog.String("panic", fmt.Sprintf("%v", r)),
 						slog.String("stack", string(debug.Stack())))

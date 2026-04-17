@@ -1042,6 +1042,50 @@
                         <input type="checkbox" name="packetCastingUseForSkillSelection" {{ if .Config.PacketCasting.UseForSkillSelection }}checked{{ end }}/>
                         Use packets for skill selection
                     </label>
+                    <label>
+                        <input type="checkbox" name="packetCastingUseForNPCInteraction" {{ if .Config.PacketCasting.UseForNPCInteraction }}checked{{ end }}/>
+                        Use packets for NPC interaction
+                    </label>
+                    <label>
+                        <input type="checkbox" name="packetCastingUseForWeaponSwap" {{ if .Config.PacketCasting.UseForWeaponSwap }}checked{{ end }}/>
+                        Use packets for weapon swap
+                    </label>
+                    <label>
+                        <input type="checkbox" name="packetCastingUseForMovement" {{ if .Config.PacketCasting.UseForMovement }}checked{{ end }}/>
+                        Use packets for movement
+                    </label>
+                    <label>
+                        <input type="checkbox" name="packetCastingUseForBuySell" {{ if .Config.PacketCasting.UseForBuySell }}checked{{ end }}/>
+                        Use packets for NPC buy/sell
+                    </label>
+                    <label>
+                        <input type="checkbox" name="packetCastingUseForCubeTransmute" {{ if .Config.PacketCasting.UseForCubeTransmute }}checked{{ end }}/>
+                        Use packets for Horadric Cube transmute
+                    </label>
+                    <label>
+                        <input type="checkbox" name="packetCastingUseForGamble" {{ if .Config.PacketCasting.UseForGamble }}checked{{ end }}/>
+                        Use packets for gambling
+                    </label>
+                    <label>
+                        <input type="checkbox" name="packetCastingUseForRepair" {{ if .Config.PacketCasting.UseForRepair }}checked{{ end }}/>
+                        Use packets for repair
+                    </label>
+                    <label>
+                        <input type="checkbox" name="packetCastingUseForIdentify" {{ if .Config.PacketCasting.UseForIdentify }}checked{{ end }}/>
+                        Use packets for identify
+                    </label>
+                    <label>
+                        <input type="checkbox" name="packetCastingUseForPotionUse" {{ if .Config.PacketCasting.UseForPotionUse }}checked{{ end }}/>
+                        Use packets for potion use
+                    </label>
+                    <label>
+                        <input type="checkbox" name="packetCastingUseForStashManagement" {{ if .Config.PacketCasting.UseForStashManagement }}checked{{ end }}/>
+                        Use packets for stash management
+                    </label>
+                    <label>
+                        <input type="checkbox" name="packetCastingUseForInventoryManagement" {{ if .Config.PacketCasting.UseForInventoryManagement }}checked{{ end }}/>
+                        Use packets for inventory management
+                    </label>
                 </fieldset>
             </article>
 
@@ -1079,9 +1123,9 @@
                 <label>
                     Realm
                     <select name="realm">
-                        <option value="eu.actual.battle.net" {{ if eq .Config.Realm "eu.actual.battle.net" }}selected{{ end }}>Europe</option>
-                        <option value="us.actual.battle.net" {{ if eq .Config.Realm "us.actual.battle.net" }}selected{{ end }}>America</option>
-                        <option value="kr.actual.battle.net" {{ if eq .Config.Realm "kr.actual.battle.net" }}selected{{ end }}>Korea</option>
+                        {{ range .Realms }}
+                        <option value="{{ .Value }}" {{ if eq $.Config.Realm .Value }}selected{{ end }}>{{ .Label }}</option>
+                        {{ end }}
                     </select>
                 </label>
                 <label>
@@ -1197,7 +1241,7 @@
                 let errorMsg = '';
 
                 try {
-                    const response = await fetch('/api/generate-battlenet-token', {
+                    const response = await fetch('/api/gen-session-token', {
                         method: 'POST',
                         headers: {'Content-Type': 'application/json'},
                         body: JSON.stringify({

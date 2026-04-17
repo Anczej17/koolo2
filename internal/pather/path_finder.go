@@ -266,6 +266,9 @@ func (pf *PathFinder) GetClosestWalkablePathFrom(from, dest data.Position) (Path
 }
 
 func (pf *PathFinder) findNearbyWalkablePositionInGrid(grid *game.Grid, target data.Position) (data.Position, bool) {
+	if grid == nil {
+		return data.Position{}, false
+	}
 	// Search in expanding squares around the target position
 	for radius := 1; radius <= 3; radius++ {
 		for x := -radius; x <= radius; x++ {

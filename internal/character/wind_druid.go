@@ -83,9 +83,7 @@ func (s WindDruid) KillMonsterSequence(
 	var currentTargetID data.UnitID
 
 	defer func() { // Ensures Tornado is set as active skill on exit
-		if kb, found := ctx.Data.KeyBindings.KeyBindingForSkill(skill.Tornado); found {
-			ctx.HID.PressKeyBinding(kb)
-		}
+		_ = step.SelectRightSkill(skill.Tornado)
 	}()
 
 	attackOpts := []step.AttackOption{
@@ -126,8 +124,8 @@ func (s WindDruid) KillMonsterSequence(
 
 		s.RecastBuffs() // Refresh buffs before attacking
 
-		if kb, found := ctx.Data.KeyBindings.KeyBindingForSkill(skill.Tornado); found {
-			ctx.HID.PressKeyBinding(kb) // Set Tornado as active skill
+		if _, found := ctx.Data.KeyBindings.KeyBindingForSkill(skill.Tornado); found {
+			_ = step.SelectRightSkill(skill.Tornado) // Set Tornado as active skill
 			if err := step.PrimaryAttack(currentTargetID, 1, true, attackOpts...); err == nil {
 				if !s.waitForCastComplete() { // Wait for cast to complete
 					continue
@@ -159,9 +157,9 @@ func (s WindDruid) RecastBuffs() {
 	states := []state.State{state.Hurricane, state.Oaksage, state.Cyclonearmor}
 
 	for i, druSkill := range skills {
-		if kb, found := ctx.Data.KeyBindings.KeyBindingForSkill(druSkill); found {
+		if _, found := ctx.Data.KeyBindings.KeyBindingForSkill(druSkill); found {
 			if !ctx.Data.PlayerUnit.States.HasState(states[i]) { // Check if buff is missing
-				ctx.HID.PressKeyBinding(kb)             // Activate skill
+				_ = step.SelectRightSkill(druSkill)     // Activate skill
 				utils.Sleep(180)                        // Small delay
 				s.HID.Click(game.RightButton, 640, 340) // Cast skill at center screen
 				utils.Sleep(100)                        // Delay to ensure cast completes
