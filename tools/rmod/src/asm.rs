@@ -296,6 +296,20 @@ pub unsafe fn decode_insn(ip: *const u8, max_bytes: usize) -> Option<InsnInfo> {
         0xB8..=0xBF => (false, 8, false),         // mov r64, imm64 (with REX.W)
         0xCC => (false, 0, false),                // int3
         0xF4 => (false, 0, false),                // hlt
+        // String ops — these are the memcpy / memset / stosb / lodsb / scasb
+        // primitives. REP / REPE prefixes are consumed above as 0xF2/0xF3; the
+        // string op itself is a 1-byte no-ModR/M opcode. ROP gadgets like
+        // `rep movsb; ret` (F3 A4 C3) need these to classify correctly.
+        0xA4 => (false, 0, false),                // movsb
+        0xA5 => (false, 0, false),                // movsw / movsd / movsq (REX.W)
+        0xA6 => (false, 0, false),                // cmpsb
+        0xA7 => (false, 0, false),                // cmpsw / cmpsd / cmpsq
+        0xAA => (false, 0, false),                // stosb
+        0xAB => (false, 0, false),                // stosw / stosd / stosq
+        0xAC => (false, 0, false),                // lodsb
+        0xAD => (false, 0, false),                // lodsw / lodsd / lodsq
+        0xAE => (false, 0, false),                // scasb
+        0xAF => (false, 0, false),                // scasw / scasd / scasq
 
         // One-byte opcodes WITH ModR/M and 0 immediate.
         0x01 | 0x03 | 0x09 | 0x0B | 0x21 | 0x23 | 0x29 | 0x2B
