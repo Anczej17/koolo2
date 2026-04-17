@@ -1244,7 +1244,30 @@ unsafe fn install_detour(present_addr: usize, shm: *mut SharedBuffer) -> Result<
     shm_write_u32(shm, OFF_DEBUG_STEP, 0x0D); // VirtualProtect OK
     G_PRESENT_ORIG_PROT = old_protect; // save for DLL_PROCESS_DETACH restore
 
-    write_abs_jmp(present_ptr as *mut u8, handler_thunk as usize);
+    // Write a polymorphic MOV+JMP at Present instead of the classic
+    // `FF 25 00 00 00 00 <u64>` abs-indirect pattern. Per GID analysis
+    // (Misc64.dll → PresentProxyHookAssembleInsteadOfBytes), Arxan sigscans
+    // known JMP byte patterns at hooked function entries; a MOV r64, imm64
+    // + JMP r64 sequence (12 bytes for low regs, 13 for R8-R15) produces
+    // a different signature per session — we randomise the scratch reg
+    // via rdtsc low bits. 14-byte DETOUR_SIZE is preserved by padding
+    // with NOP tail; original bytes saved in G_PRESENT_ORIG_BYTES for restore.
+    let reg_choices = [
+        asm::Reg64::Rax,
+        asm::Reg64::Rcx,
+        asm::Reg64::Rdx,
+        asm::Reg64::R10,
+        asm::Reg64::R11,
+    ];
+    let reg = reg_choices[(rdtsc_u64() as usize) % reg_choices.len()];
+    let mut emitter = asm::Emitter::new(present_ptr as *mut u8, DETOUR_SIZE);
+    emitter.jmp_abs_via_reg(reg, handler_thunk as usize);
+    // Pad any remaining bytes (within DETOUR_SIZE) with NOPs so the tail
+    // stays instruction-aligned — decoding past our patch lands on valid NOPs
+    // until control returns via the trampoline's jmp_back.
+    while emitter.len() < DETOUR_SIZE {
+        emitter.nop();
+    }
 
     FlushInstructionCache(GetCurrentProcess(), present_ptr as _, DETOUR_SIZE);
     shm_write_u32(shm, OFF_DEBUG_STEP, 0x0E); // detour written

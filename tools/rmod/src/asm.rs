@@ -138,6 +138,29 @@ impl Emitter {
         self.byte(0x58 | reg.low3());
     }
 
+    /// `JMP reg64` (2-3 bytes): `FF E0+r` or `REX.B FF E0+r`.
+    /// Absolute jump to the value in the register — companion to
+    /// `mov_reg64_imm64` for the MOV+JMP long-jump pattern.
+    #[inline]
+    pub unsafe fn jmp_reg64(&mut self, reg: Reg64) {
+        if reg.rex_b() { self.byte(0x41); }
+        self.byte(0xFF);
+        self.byte(0xE0 | reg.low3());
+    }
+
+    /// Polymorphic MOV+JMP to absolute target. 12-13 bytes depending on reg:
+    ///   `REX.W  B8+rd  <64-bit target>  [REX.B]  FF  E0+r`
+    ///
+    /// Distinct byte pattern from `jmp_abs_indirect` (FF 25) and `jmp_rel32`
+    /// (E9). Intended for Present hook where a static pattern at function
+    /// entry is a common Arxan sigscan target. Caller picks a non-RSP, non-
+    /// RBP register (RSP/RBP have encoding quirks we avoid).
+    #[inline]
+    pub unsafe fn jmp_abs_via_reg(&mut self, reg: Reg64, target: usize) {
+        self.mov_reg64_imm64(reg, target as u64);
+        self.jmp_reg64(reg);
+    }
+
     /// `RET` (1 byte).
     #[inline]
     pub unsafe fn ret(&mut self) { self.byte(0xC3); }
