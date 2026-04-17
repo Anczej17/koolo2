@@ -11,8 +11,17 @@ func TestStealthEnabled_Default(t *testing.T) {
 	// Reset once
 	stealthOnce = sync.Once{}
 	os.Unsetenv("STEALTH_READ")
+	if !StealthEnabled() {
+		t.Fatal("expected stealth ON by default (opt-out via STEALTH_READ=0)")
+	}
+}
+
+func TestStealthEnabled_Off(t *testing.T) {
+	stealthOnce = sync.Once{}
+	os.Setenv("STEALTH_READ", "0")
+	defer os.Unsetenv("STEALTH_READ")
 	if StealthEnabled() {
-		t.Fatal("expected stealth OFF by default")
+		t.Fatal("expected stealth OFF with env=0")
 	}
 }
 
@@ -66,7 +75,8 @@ func TestShufflePermutation_EdgeCases(t *testing.T) {
 
 func TestJitterDuration_StealthOff(t *testing.T) {
 	stealthOnce = sync.Once{}
-	os.Unsetenv("STEALTH_READ")
+	os.Setenv("STEALTH_READ", "0")
+	defer os.Unsetenv("STEALTH_READ")
 	base := 100 * time.Millisecond
 	d := JitterDuration(base, 0.15)
 	if d != base {
@@ -102,7 +112,8 @@ func TestJitterDuration_StealthOn(t *testing.T) {
 
 func TestDispatchOrder_StealthOff(t *testing.T) {
 	stealthOnce = sync.Once{}
-	os.Unsetenv("STEALTH_READ")
+	os.Setenv("STEALTH_READ", "0")
+	defer os.Unsetenv("STEALTH_READ")
 	for n := 1; n <= 20; n++ {
 		order := dispatchOrder(n)
 		if len(order) != n {

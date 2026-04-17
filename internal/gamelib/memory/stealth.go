@@ -26,14 +26,18 @@ var (
 
 func initStealthFlags() {
 	stealthOnce.Do(func() {
-		stealthFlag.Store(os.Getenv("STEALTH_READ") == "1")
+		// Stealth RPM is ON by default — user running Icarius normally gets
+		// shuffled dispatches, chunked cache, jitter, access-flag rotation,
+		// and chaff reads. Opt-out with STEALTH_READ=0 for upstream-parity
+		// behaviour (only useful when diffing against koolo for debugging).
+		stealthFlag.Store(os.Getenv("STEALTH_READ") != "0")
 		stealthTrace.Store(os.Getenv("STEALTH_TRACE") == "1")
 	})
 }
 
-// StealthEnabled returns true if STEALTH_READ=1 was set at startup.
-// When false, all stealth layers are bypassed and the reader behaves
-// identically to upstream koolo.
+// StealthEnabled returns true unless STEALTH_READ=0 was set at startup.
+// Default true — stealth layers are the baseline. Set STEALTH_READ=0 to
+// revert to upstream koolo read pattern for comparison/debugging.
 func StealthEnabled() bool {
 	initStealthFlags()
 	return stealthFlag.Load()
