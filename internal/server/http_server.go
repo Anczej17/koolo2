@@ -7792,7 +7792,14 @@ func (s *HttpServer) debugRopScan(w http.ResponseWriter, r *http.Request) {
 		fmt.Fprintf(w, `{"ok":false,"error":%q,"base":"0x%X","len":"0x%X"}`, err.Error(), baseVA, lenVal)
 		return
 	}
-	fmt.Fprintf(w, `{"ok":true,"base":"0x%X","len":"0x%X","gadgets":%d,"ready":%d}`, baseVA, lenVal, count, ready)
+	// Also include gadget-kind breakdown so caller can diagnose why
+	// subsequent build_memcpy might fail.
+	pool, _ := pres.RopPool()
+	fmt.Fprintf(w, `{"ok":true,"base":"0x%X","len":"0x%X","gadgets":%d,"ready":%d,`+
+		`"pool":{"Unknown":%d,"PopReg":%d,"MovRegMem":%d,"MovMemReg":%d,"RepMovsb":%d,"RepMovsq":%d,"XchgReg":%d,"Ret":%d,"PopRegMask":"0x%X"}}`,
+		baseVA, lenVal, count, ready,
+		pool.Unknown, pool.PopReg, pool.MovRegMem, pool.MovMemReg,
+		pool.RepMovsb, pool.RepMovsq, pool.XchgReg, pool.Ret, pool.PopRegMask)
 }
 
 // debugRopRead triggers CMD_ROP_READ — ROP-chain memcpy(src, dst, len). Currently

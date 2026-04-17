@@ -322,6 +322,8 @@ const (
 	OffRopReadStatus  = 0x3030 // u32 — out: 0=ok, 1=pool-miss, 2=exec-fail
 	OffRopReady       = 0x3034 // u32 — 1 when ROP executor ready post-scan
 	OffRopDbg         = 0x3038 // u32 — step marker (0xAAAA00xx); read on timeout to locate hang
+	OffRopKindCounts  = 0x303C // u32[8] — [Unknown,PopReg,MovRegMem,MovMemReg,RepMovsb,RepMovsq,XchgReg,Ret]
+	OffRopPopRegMask  = 0x305C // u32 — bitmask of popable regs in pool (bit0=rax..bit15=r15)
 
 	OffSnapRegions     = 0x4200 // RegionEntry[1024] × 16 B  (B3: grown 256→1024 for monster/object/entrance walker budget)
 	SnapRegionMax      = 1024

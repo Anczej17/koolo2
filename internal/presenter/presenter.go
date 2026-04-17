@@ -503,6 +503,41 @@ func (p *Presenter) RopScan(baseVA uint64, length uint64) (count uint32, ready u
 	return count, ready, fmt.Errorf("rop scan overall timeout (ready=0 after deadline, count=%d)", count)
 }
 
+// RopPoolBreakdown returns the current gadget-kind distribution in the
+// harvested pool. Used by callers to decide whether the pool supports
+// specific chains (e.g., build_memcpy needs at least one PopReg rsi/rdi/rcx
+// + RepMovsb). Must be called after at least one RopScan ready=1.
+type RopPoolBreakdown struct {
+	Unknown    uint32
+	PopReg     uint32
+	MovRegMem  uint32
+	MovMemReg  uint32
+	RepMovsb   uint32
+	RepMovsq   uint32
+	XchgReg    uint32
+	Ret        uint32
+	PopRegMask uint32 // bit n = `pop r<n>; ret` gadget present
+}
+
+func (p *Presenter) RopPool() (RopPoolBreakdown, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if !p.initialized || p.localView == nil {
+		return RopPoolBreakdown{}, fmt.Errorf("presenter not initialized")
+	}
+	return RopPoolBreakdown{
+		Unknown:    readU32(p.localView, uintptr(OffRopKindCounts+0)),
+		PopReg:     readU32(p.localView, uintptr(OffRopKindCounts+4)),
+		MovRegMem:  readU32(p.localView, uintptr(OffRopKindCounts+8)),
+		MovMemReg:  readU32(p.localView, uintptr(OffRopKindCounts+12)),
+		RepMovsb:   readU32(p.localView, uintptr(OffRopKindCounts+16)),
+		RepMovsq:   readU32(p.localView, uintptr(OffRopKindCounts+20)),
+		XchgReg:    readU32(p.localView, uintptr(OffRopKindCounts+24)),
+		Ret:        readU32(p.localView, uintptr(OffRopKindCounts+28)),
+		PopRegMask: readU32(p.localView, uintptr(OffRopPopRegMask)),
+	}, nil
+}
+
 // RopRead asks rmod to execute a ROP-chain memcpy: copy `length` bytes
 // from `srcVA` (a D2R virtual address) to `dstVA` (typically a scratch VA
 // allocated in our SHM so we can read back). Returns the rmod-reported

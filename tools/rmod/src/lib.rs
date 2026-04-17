@@ -387,6 +387,8 @@ const OFF_ROP_READ_LEN:     usize = 0x3028;  // u64 — bytes to copy
 const OFF_ROP_READ_STATUS:  usize = 0x3030;  // u32 — out: 0=ok, 1=gadget-pool-missing, 2=exec-failed
 const OFF_ROP_READY:        usize = 0x3034;  // u32 — 1 when G_ROP_EXECUTOR/G_ROP_STACK/G_ROP_TRIGGER ready post-scan
 const OFF_ROP_DBG:          usize = 0x3038;  // u32 — step marker (0xAAAA00xx); Go reads on timeout to see where handler got stuck
+const OFF_ROP_KIND_COUNTS:  usize = 0x303C;  // u32[8] — GadgetKind breakdown: [Unknown,PopReg,MovRegMem,MovMemReg,RepMovsb,RepMovsq,XchgReg,Ret]
+const OFF_ROP_POPREG_MASK:  usize = 0x305C;  // u16 — bitmask of popable regs in pool (bit0=rax..bit15=r15)
 
 // HWBP commands — match Go protocol.go (CmdHwbpInstall=6 etc).
 const CMD_HWBP_INSTALL:   u32 = 6;          // install DR0=target on every D2R thread
@@ -1730,6 +1732,31 @@ unsafe fn dispatch_commands() {
             }
 
             shm_write_u32(shm, OFF_ROP_SCAN_COUNT, G_ROP_GADGETS.count as u32);
+
+            // Emit gadget-kind breakdown + pop-reg mask so the bot can see
+            // at a glance whether the pool is suitable for build_memcpy
+            // (needs PopReg rsi/rdi/rcx + RepMovsb).
+            let mut kind_counts = [0u32; 8];
+            let mut pop_mask: u16 = 0;
+            for i in 0..G_ROP_GADGETS.count {
+                let g = &G_ROP_GADGETS.pool[i];
+                let idx = match g.kind {
+                    rop_gadgets::GadgetKind::Unknown    => 0,
+                    rop_gadgets::GadgetKind::PopReg     => { pop_mask |= g.regs_touched; 1 },
+                    rop_gadgets::GadgetKind::MovRegMem  => 2,
+                    rop_gadgets::GadgetKind::MovMemReg  => 3,
+                    rop_gadgets::GadgetKind::RepMovsb   => 4,
+                    rop_gadgets::GadgetKind::RepMovsq   => 5,
+                    rop_gadgets::GadgetKind::XchgReg    => 6,
+                    rop_gadgets::GadgetKind::Ret        => 7,
+                };
+                kind_counts[idx] += 1;
+            }
+            for i in 0..8 {
+                shm_write_u32(shm, OFF_ROP_KIND_COUNTS + i * 4, kind_counts[i]);
+            }
+            shm_write_u32(shm, OFF_ROP_POPREG_MASK, pop_mask as u32);
+
             let ready = G_ROP_SCAN_COMPLETE
                 && G_ROP_EXECUTOR.is_some()
                 && G_ROP_STACK.is_some()
