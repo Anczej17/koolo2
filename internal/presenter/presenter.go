@@ -411,9 +411,14 @@ func (p *Presenter) SnapshotInit(unitTableVA, expansionVA, waypointTableVA uint6
 
 // RopScan asks rmod to scan [baseVA..baseVA+length) for ROP gadgets
 // (ret-ending useful sequences) and populate its internal pool, plus
-// allocate Executor/Stack/Trigger buffers near the target. Returns the
-// number of gadgets harvested this call + ready flag. Safe to run live —
-// does not execute any D2R code, just reads memory.
+// allocate Executor/Stack/Trigger buffers near the target.
+//
+// Uses chunked scanning: rmod handles at most 4 KB per Present frame so
+// Present callback never blocks long enough to trigger d3d12 hang-watchdog.
+// We loop issuing the command until ready=1 (scan complete).
+//
+// Returns final gadget count + ready flag. Safe to run live — does not
+// execute any D2R code, just reads memory.
 func (p *Presenter) RopScan(baseVA uint64, length uint64) (count uint32, ready uint32, err error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -423,25 +428,51 @@ func (p *Presenter) RopScan(baseVA uint64, length uint64) (count uint32, ready u
 
 	writeU64(p.localView, uintptr(OffRopScanBase), baseVA)
 	writeU64(p.localView, uintptr(OffRopScanLen), length)
-	writeU32(p.localView, uintptr(offCommandType), CmdRopScan)
-	writeU32(p.localView, uintptr(offStatusFlag), StatusBusy)
-	writeU32(p.localView, uintptr(offCommandFlag), 1)
 
-	deadline := time.Now().Add(5 * time.Second) // scan can touch many pages
-	for time.Now().Before(deadline) {
-		status := readU32(p.localView, uintptr(offStatusFlag))
-		if status == StatusDone {
-			count = readU32(p.localView, uintptr(OffRopScanCount))
-			ready = readU32(p.localView, uintptr(OffRopReady))
+	// Per-chunk timeout: rmod scans 4 KB ≪ 1 Present frame. Allow 2 s each
+	// call to tolerate a stalled frame (GPU retry / Arxan page-fault) before
+	// giving up.
+	const (
+		chunkTimeout = 2 * time.Second
+		// Total chunk count the scanner CAN need = length / 4 KB. Wall-clock
+		// bound per chunk is one Present frame, so completion at 60 fps is
+		// ~ length/4KB * 16 ms; at 180 fps ~5 ms. For 1 MB that's ~4 s best
+		// case. Give generous overall deadline.
+		overallMultiplier = 4
+	)
+	chunks := int(length/0x1000) + 1
+	overallDeadline := time.Now().Add(time.Duration(chunks*overallMultiplier) * 16 * time.Millisecond).Add(5 * time.Second)
+
+	for time.Now().Before(overallDeadline) {
+		writeU32(p.localView, uintptr(offCommandType), CmdRopScan)
+		writeU32(p.localView, uintptr(offStatusFlag), StatusBusy)
+		writeU32(p.localView, uintptr(offCommandFlag), 1)
+
+		chunkDeadline := time.Now().Add(chunkTimeout)
+		acked := false
+		for time.Now().Before(chunkDeadline) {
+			status := readU32(p.localView, uintptr(offStatusFlag))
+			if status == StatusDone {
+				acked = true
+				break
+			}
+			if status == StatusError {
+				ec := readU32(p.localView, uintptr(offErrorCode))
+				return 0, 0, fmt.Errorf("rop scan error 0x%X", ec)
+			}
+			time.Sleep(500 * time.Microsecond)
+		}
+		if !acked {
+			return 0, 0, fmt.Errorf("rop scan chunk timeout (no ack within 2 s)")
+		}
+
+		count = readU32(p.localView, uintptr(OffRopScanCount))
+		ready = readU32(p.localView, uintptr(OffRopReady))
+		if ready == 1 {
 			return count, ready, nil
 		}
-		if status == StatusError {
-			ec := readU32(p.localView, uintptr(offErrorCode))
-			return 0, 0, fmt.Errorf("rop scan error 0x%X", ec)
-		}
-		time.Sleep(500 * time.Microsecond)
 	}
-	return 0, 0, fmt.Errorf("rop scan timeout (rmod didn't ack CmdRopScan within 5 s)")
+	return count, ready, fmt.Errorf("rop scan overall timeout (ready=0 after deadline, count=%d)", count)
 }
 
 // RopRead asks rmod to execute a ROP-chain memcpy: copy `length` bytes

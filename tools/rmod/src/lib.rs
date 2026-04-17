@@ -806,6 +806,14 @@ static mut G_ROP_GADGETS:     rop_gadgets::ROPGadgets = rop_gadgets::ROPGadgets:
 static mut G_ROP_EXECUTOR:    Option<executor::Executor> = None;
 static mut G_ROP_STACK:       Option<alloc_mgr::AllocatedMemory> = None;
 static mut G_ROP_TRIGGER_BUF: Option<alloc_mgr::AllocatedMemory> = None;
+
+// Chunked scan state. CMD_ROP_SCAN with len > ROP_SCAN_CHUNK only scans
+// CHUNK bytes per invocation and updates G_ROP_SCAN_OFFSET; caller re-issues
+// the command (with the same base, auto-advance via OFF_ROP_SCAN_COUNT etc.)
+// until G_ROP_SCAN_COMPLETE. This keeps Present callback under ~1 ms per frame.
+const ROP_SCAN_CHUNK: usize = 0x1000; // 4 KB per Present frame — within budget
+static mut G_ROP_SCAN_CURSOR:   usize = 0; // bytes scanned from base this round
+static mut G_ROP_SCAN_COMPLETE: bool  = false;
 // Phase C: D2R offsets stored XOR-encoded in memory; per-boot key from rdtsc
 // at init prevents static-scan signatures matching the literal offset values
 // (UnitTable / Expansion / WaypointTable have well-known constants).
@@ -1665,27 +1673,45 @@ unsafe fn dispatch_commands() {
             dispatch_snapshot_init(shm);
         }
         CMD_ROP_SCAN => {
-            // Safe to run live: purely reads the supplied VA range looking
-            // for `ret`-ending byte sequences. No code execution, no writes
-            // to D2R. Populates G_ROP_GADGETS static pool.
+            // Chunked scan: do at most ROP_SCAN_CHUNK bytes per Present frame
+            // so the callback never blocks long enough to trigger d3d12's
+            // hang-watchdog. Caller re-issues CMD_ROP_SCAN with the same
+            // (base, len) — G_ROP_SCAN_CURSOR tracks progress; COMPLETE flag
+            // signals end of range.
             let base_va = shm_read_u64(shm, OFF_ROP_SCAN_BASE) as *const u8;
-            let len     = shm_read_u64(shm, OFF_ROP_SCAN_LEN) as usize;
-            let before  = G_ROP_GADGETS.count;
-            G_ROP_GADGETS.scan(base_va, len);
-            shm_write_u32(shm, OFF_ROP_SCAN_COUNT, G_ROP_GADGETS.count as u32);
+            let total   = shm_read_u64(shm, OFF_ROP_SCAN_LEN) as usize;
 
-            // Allocate executor / stack / trigger buffers near target for the
-            // later CMD_ROP_READ handler. Uses alloc_near so a single
-            // RIP-relative disp32 reaches D2R's .text.
+            // Reset cursor when caller starts a fresh scan (base changed or
+            // previous scan complete). We detect a fresh scan by cursor==0 OR
+            // by the complete flag being set (caller restarts after query).
+            if G_ROP_SCAN_COMPLETE {
+                G_ROP_SCAN_CURSOR = 0;
+                G_ROP_SCAN_COMPLETE = false;
+            }
+
+            let remaining = total.saturating_sub(G_ROP_SCAN_CURSOR);
+            let this_chunk = if remaining > ROP_SCAN_CHUNK { ROP_SCAN_CHUNK } else { remaining };
+
+            if this_chunk > 0 {
+                G_ROP_GADGETS.scan(base_va.add(G_ROP_SCAN_CURSOR), this_chunk);
+                G_ROP_SCAN_CURSOR += this_chunk;
+            }
+            if G_ROP_SCAN_CURSOR >= total {
+                G_ROP_SCAN_COMPLETE = true;
+            }
+
+            // Lazy-alloc executor + scratch buffers on the first chunk.
             if G_ROP_EXECUTOR.is_none() {
                 G_ROP_EXECUTOR    = executor::Executor::new(base_va as usize);
                 G_ROP_STACK       = alloc_mgr::alloc_near(base_va as usize, 0x1000);
                 G_ROP_TRIGGER_BUF = alloc_mgr::alloc_near(base_va as usize, 0x1000);
             }
-            let ready = G_ROP_EXECUTOR.is_some()
+
+            shm_write_u32(shm, OFF_ROP_SCAN_COUNT, G_ROP_GADGETS.count as u32);
+            let ready = G_ROP_SCAN_COMPLETE
+                && G_ROP_EXECUTOR.is_some()
                 && G_ROP_STACK.is_some()
-                && G_ROP_TRIGGER_BUF.is_some()
-                && G_ROP_GADGETS.count > before;
+                && G_ROP_TRIGGER_BUF.is_some();
             shm_write_u32(shm, OFF_ROP_READY, if ready { 1 } else { 0 });
             shm_write_u32(shm, OFF_STATUS_FLAG, STATUS_DONE);
             shm_write_u32(shm, OFF_COMMAND_FLAG, 0);
