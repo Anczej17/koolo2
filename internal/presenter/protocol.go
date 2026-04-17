@@ -321,6 +321,7 @@ const (
 	OffRopReadLen     = 0x3028 // u64 — bytes to copy
 	OffRopReadStatus  = 0x3030 // u32 — out: 0=ok, 1=pool-miss, 2=exec-fail
 	OffRopReady       = 0x3034 // u32 — 1 when ROP executor ready post-scan
+	OffRopDbg         = 0x3038 // u32 — step marker (0xAAAA00xx); read on timeout to locate hang
 
 	OffSnapRegions     = 0x4200 // RegionEntry[1024] × 16 B  (B3: grown 256→1024 for monster/object/entrance walker budget)
 	SnapRegionMax      = 1024

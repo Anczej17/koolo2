@@ -996,6 +996,7 @@ func (s *HttpServer) Listen(port int) error {
 	http.HandleFunc("/debug/rpm-counter", s.debugRPMCounter)
 	http.HandleFunc("/debug/rop-scan", s.debugRopScan)
 	http.HandleFunc("/debug/rop-read", s.debugRopRead)
+	http.HandleFunc("/debug/dispatch-ping", s.debugDispatchPing)
 	http.HandleFunc("/debug/handle-audit", s.debugHandleAudit)
 	http.HandleFunc("/debug/writemem", s.debugWriteMem)
 	http.HandleFunc("/debug/memdiff", s.debugMemDiff)
@@ -7833,6 +7834,40 @@ func (s *HttpServer) debugRopRead(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	fmt.Fprintf(w, `{"ok":true,"status":%d,"note":"2 = ROP handler gated; unit-test trigger first"}`, status)
+}
+
+// debugDispatchPing sends CMD_NOP and measures round-trip time. Used to
+// isolate "Present detour not dispatching" from "specific handler hanging".
+// Expected latency: one Present frame (~16 ms at 60 fps). If this times out,
+// D2R isn't rendering or rmod's detour isn't installed. If this succeeds but
+// rop-scan times out, the bug is in the scan handler.
+// Usage: GET /debug/dispatch-ping?character=Blizzard
+func (s *HttpServer) debugDispatchPing(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	character := r.URL.Query().Get("character")
+	if character == "" {
+		w.WriteHeader(http.StatusBadRequest)
+		fmt.Fprintf(w, `{"error":"missing character parameter"}`)
+		return
+	}
+	ctx := s.manager.GetContext(character)
+	if ctx == nil || ctx.MemoryInjector == nil {
+		w.WriteHeader(http.StatusServiceUnavailable)
+		fmt.Fprintf(w, `{"error":"no supervisor"}`)
+		return
+	}
+	pres := ctx.MemoryInjector.GetPresenter()
+	if pres == nil {
+		w.WriteHeader(http.StatusServiceUnavailable)
+		fmt.Fprintf(w, `{"error":"presenter not initialized"}`)
+		return
+	}
+	lat, err := pres.DispatchPing()
+	if err != nil {
+		fmt.Fprintf(w, `{"ok":false,"error":%q,"latency_ms":%d}`, err.Error(), lat.Milliseconds())
+		return
+	}
+	fmt.Fprintf(w, `{"ok":true,"latency_ms":%d,"latency_us":%d}`, lat.Milliseconds(), lat.Microseconds())
 }
 
 // debugHandleAudit returns the D2R handle-open state for the running

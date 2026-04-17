@@ -36,11 +36,15 @@ pub struct Executor {
 }
 
 impl Executor {
-    /// Allocate code + data buffers near `target_va` (e.g., the D2R module
-    /// base) so any RIP-relative jumps/calls into D2R fit in 32-bit disp.
-    pub unsafe fn new(target_va: usize) -> Option<Self> {
-        let code = alloc_near(target_va, CODE_BUF_SIZE)?;
-        let data = alloc_near(target_va, DATA_BUF_SIZE)?;
+    /// Allocate code + data buffers. Was previously alloc_near(target_va) to
+    /// keep RIP-rel jumps into D2R within disp32 range, but on slow VMs the
+    /// VirtualQuery march blew past d3d12's Present-callback watchdog. The
+    /// trampoline path uses jmp_abs_via_reg anyway, so abs-placement is fine.
+    /// `target_va` is still accepted as a hint for future callers that want
+    /// to re-enable near-alloc.
+    pub unsafe fn new(_target_va: usize) -> Option<Self> {
+        let code = AllocatedMemory::new(CODE_BUF_SIZE)?;
+        let data = AllocatedMemory::new(DATA_BUF_SIZE)?;
         Some(Self {
             code,
             data,

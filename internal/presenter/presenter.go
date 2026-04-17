@@ -409,6 +409,33 @@ func (p *Presenter) SnapshotInit(unitTableVA, expansionVA, waypointTableVA uint6
 	return fmt.Errorf("snapshot init timeout (rmod didn't ack CmdSnapshotInit within 2 s)")
 }
 
+// DispatchPing sends CmdNop and measures round-trip latency. Used to verify
+// the Present detour dispatch loop is firing at all. If this succeeds in
+// milliseconds but RopScan times out, the problem is in the scan handler,
+// not the dispatch pipeline.
+func (p *Presenter) DispatchPing() (latency time.Duration, err error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if !p.initialized || p.localView == nil {
+		return 0, fmt.Errorf("presenter not initialized")
+	}
+
+	start := time.Now()
+	writeU32(p.localView, uintptr(offCommandType), CmdNop)
+	writeU32(p.localView, uintptr(offStatusFlag), StatusBusy)
+	writeU32(p.localView, uintptr(offCommandFlag), 1)
+
+	deadline := start.Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		status := readU32(p.localView, uintptr(offStatusFlag))
+		if status == StatusDone {
+			return time.Since(start), nil
+		}
+		time.Sleep(200 * time.Microsecond)
+	}
+	return time.Since(start), fmt.Errorf("dispatch ping timeout (no ack within 2 s)")
+}
+
 // RopScan asks rmod to scan [baseVA..baseVA+length) for ROP gadgets
 // (ret-ending useful sequences) and populate its internal pool, plus
 // allocate Executor/Stack/Trigger buffers near the target.
@@ -463,7 +490,8 @@ func (p *Presenter) RopScan(baseVA uint64, length uint64) (count uint32, ready u
 			time.Sleep(500 * time.Microsecond)
 		}
 		if !acked {
-			return 0, 0, fmt.Errorf("rop scan chunk timeout (no ack within 2 s)")
+			dbg := readU32(p.localView, uintptr(OffRopDbg))
+			return 0, 0, fmt.Errorf("rop scan chunk timeout (no ack within 2 s, last_dbg=0x%08X)", dbg)
 		}
 
 		count = readU32(p.localView, uintptr(OffRopScanCount))

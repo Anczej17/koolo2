@@ -386,6 +386,7 @@ const OFF_ROP_READ_DST:     usize = 0x3020;  // u64 — SHM scratch VA to write 
 const OFF_ROP_READ_LEN:     usize = 0x3028;  // u64 — bytes to copy
 const OFF_ROP_READ_STATUS:  usize = 0x3030;  // u32 — out: 0=ok, 1=gadget-pool-missing, 2=exec-failed
 const OFF_ROP_READY:        usize = 0x3034;  // u32 — 1 when G_ROP_EXECUTOR/G_ROP_STACK/G_ROP_TRIGGER ready post-scan
+const OFF_ROP_DBG:          usize = 0x3038;  // u32 — step marker (0xAAAA00xx); Go reads on timeout to see where handler got stuck
 
 // HWBP commands — match Go protocol.go (CmdHwbpInstall=6 etc).
 const CMD_HWBP_INSTALL:   u32 = 6;          // install DR0=target on every D2R thread
@@ -1678,8 +1679,13 @@ unsafe fn dispatch_commands() {
             // hang-watchdog. Caller re-issues CMD_ROP_SCAN with the same
             // (base, len) — G_ROP_SCAN_CURSOR tracks progress; COMPLETE flag
             // signals end of range.
+            //
+            // DBG markers written to OFF_ROP_DBG so if this handler hangs/AVs
+            // the Go-side timeout can report last-seen state.
+            shm_write_u32(shm, OFF_ROP_DBG, 0xAAAA0001);
             let base_va = shm_read_u64(shm, OFF_ROP_SCAN_BASE) as *const u8;
             let total   = shm_read_u64(shm, OFF_ROP_SCAN_LEN) as usize;
+            shm_write_u32(shm, OFF_ROP_DBG, 0xAAAA0002);
 
             // Reset cursor when caller starts a fresh scan (base changed or
             // previous scan complete). We detect a fresh scan by cursor==0 OR
@@ -1692,19 +1698,28 @@ unsafe fn dispatch_commands() {
             let remaining = total.saturating_sub(G_ROP_SCAN_CURSOR);
             let this_chunk = if remaining > ROP_SCAN_CHUNK { ROP_SCAN_CHUNK } else { remaining };
 
+            shm_write_u32(shm, OFF_ROP_DBG, 0xAAAA0003);
             if this_chunk > 0 {
                 G_ROP_GADGETS.scan(base_va.add(G_ROP_SCAN_CURSOR), this_chunk);
                 G_ROP_SCAN_CURSOR += this_chunk;
             }
+            shm_write_u32(shm, OFF_ROP_DBG, 0xAAAA0004);
             if G_ROP_SCAN_CURSOR >= total {
                 G_ROP_SCAN_COMPLETE = true;
             }
 
             // Lazy-alloc executor + scratch buffers on the first chunk.
+            // Uses VirtualAlloc(NULL) so OS picks a free region quickly —
+            // `alloc_near` was too slow under Present-callback budgeting on
+            // VMs, and the trampoline path already uses abs-indirect jumps.
             if G_ROP_EXECUTOR.is_none() {
+                shm_write_u32(shm, OFF_ROP_DBG, 0xAAAA0005);
                 G_ROP_EXECUTOR    = executor::Executor::new(base_va as usize);
-                G_ROP_STACK       = alloc_mgr::alloc_near(base_va as usize, 0x1000);
-                G_ROP_TRIGGER_BUF = alloc_mgr::alloc_near(base_va as usize, 0x1000);
+                shm_write_u32(shm, OFF_ROP_DBG, 0xAAAA0006);
+                G_ROP_STACK       = alloc_mgr::AllocatedMemory::new(0x1000);
+                shm_write_u32(shm, OFF_ROP_DBG, 0xAAAA0007);
+                G_ROP_TRIGGER_BUF = alloc_mgr::AllocatedMemory::new(0x1000);
+                shm_write_u32(shm, OFF_ROP_DBG, 0xAAAA0008);
             }
 
             shm_write_u32(shm, OFF_ROP_SCAN_COUNT, G_ROP_GADGETS.count as u32);
@@ -1713,14 +1728,81 @@ unsafe fn dispatch_commands() {
                 && G_ROP_STACK.is_some()
                 && G_ROP_TRIGGER_BUF.is_some();
             shm_write_u32(shm, OFF_ROP_READY, if ready { 1 } else { 0 });
+            shm_write_u32(shm, OFF_ROP_DBG, 0xAAAA000F); // final marker — full path completed
             shm_write_u32(shm, OFF_STATUS_FLAG, STATUS_DONE);
             shm_write_u32(shm, OFF_COMMAND_FLAG, 0);
         }
         CMD_ROP_READ => {
-            // GATED: trigger thunk encoding is not yet unit-verified.
-            // Returns status=2 (exec-fail) for now so Go side falls back to
-            // RPM. Enable after unit tests land and first live chain runs.
-            shm_write_u32(shm, OFF_ROP_READ_STATUS, 2);
+            // Un-gated GID-6. Build memcpy(src, dst, len) chain using harvested
+            // D2R gadgets, execute via in-process trigger thunk. On success the
+            // `len` bytes at src now live at dst (bot supplies dst as a scratch
+            // VA within our SHM or our own alloc_mgr buffer).
+            //
+            // Status encoding:
+            //   0 = ok
+            //   1 = gadget pool missing (caller must run CMD_ROP_SCAN first)
+            //   2 = chain build failed (pool lacked required gadget kind)
+            //   3 = trigger_va invalid
+            //
+            // CAUTION: first live chain run is a D2R-integrity risk. If anything
+            // is encoded wrong the whole process AVs. Diagnostic marker in
+            // OFF_ROP_DBG (0xBBBB00xx band) lets Go trace final state on crash.
+            shm_write_u32(shm, OFF_ROP_DBG, 0xBBBB0001);
+
+            let src_va = shm_read_u64(shm, OFF_ROP_READ_SRC) as usize;
+            let dst_va = shm_read_u64(shm, OFF_ROP_READ_DST) as usize;
+            let len    = shm_read_u64(shm, OFF_ROP_READ_LEN) as usize;
+
+            if G_ROP_GADGETS.count == 0
+                || G_ROP_EXECUTOR.is_none()
+                || G_ROP_STACK.is_none()
+                || G_ROP_TRIGGER_BUF.is_none()
+            {
+                shm_write_u32(shm, OFF_ROP_DBG, 0xBBBB00E1);
+                shm_write_u32(shm, OFF_ROP_READ_STATUS, 1);
+                shm_write_u32(shm, OFF_STATUS_FLAG, STATUS_DONE);
+                shm_write_u32(shm, OFF_COMMAND_FLAG, 0);
+                return;
+            }
+
+            shm_write_u32(shm, OFF_ROP_DBG, 0xBBBB0002);
+            let stack   = G_ROP_STACK.as_ref().unwrap();
+            let trigger = G_ROP_TRIGGER_BUF.as_ref().unwrap();
+            let tick    = rdtsc_u64();
+            let builder = rop_chain::RopChainBuilder::new(&G_ROP_GADGETS, stack, trigger, tick);
+
+            shm_write_u32(shm, OFF_ROP_DBG, 0xBBBB0003);
+            let built = match builder.build_memcpy(src_va, dst_va, len) {
+                Some(c) => c,
+                None => {
+                    shm_write_u32(shm, OFF_ROP_DBG, 0xBBBB00E2);
+                    shm_write_u32(shm, OFF_ROP_READ_STATUS, 2);
+                    shm_write_u32(shm, OFF_STATUS_FLAG, STATUS_DONE);
+                    shm_write_u32(shm, OFF_COMMAND_FLAG, 0);
+                    return;
+                }
+            };
+
+            if built.trigger_va == 0 {
+                shm_write_u32(shm, OFF_ROP_DBG, 0xBBBB00E3);
+                shm_write_u32(shm, OFF_ROP_READ_STATUS, 3);
+                shm_write_u32(shm, OFF_STATUS_FLAG, STATUS_DONE);
+                shm_write_u32(shm, OFF_COMMAND_FLAG, 0);
+                return;
+            }
+
+            shm_write_u32(shm, OFF_ROP_DBG, 0xBBBB0004);
+            // Execute: treat trigger_va as a zero-arg function pointer.
+            // The thunk saves callee-saved regs, flips RSP to our chain, rets
+            // into the gadget chain, and the chain rets back to the epilogue
+            // which restores RSP + returns here.
+            type TriggerFn = unsafe extern "system" fn();
+            let trigger_fn: TriggerFn = core::mem::transmute(built.trigger_va);
+            trigger_fn();
+            shm_write_u32(shm, OFF_ROP_DBG, 0xBBBB0005);
+
+            shm_write_u32(shm, OFF_ROP_READ_STATUS, 0);
+            shm_write_u32(shm, OFF_ROP_DBG, 0xBBBB000F);
             shm_write_u32(shm, OFF_STATUS_FLAG, STATUS_DONE);
             shm_write_u32(shm, OFF_COMMAND_FLAG, 0);
         }

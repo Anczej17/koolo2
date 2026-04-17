@@ -135,23 +135,28 @@ impl Drop for AllocatedMemory {
 /// rel32 displacements from/to `target_va` can reach this memory without
 /// needing `jmp_abs_indirect`.
 ///
-/// Walks the process's VAD (via VirtualQuery) in both directions from the
-/// target page, picking the first MEM_FREE region large enough to fit `size`.
+/// Strategy: fixed-stride VirtualQuery walk. On x64 with ASLR, D2R has
+/// plenty of free gaps — we start at +/- 64 KB and march outward in 1 MB
+/// strides until we find a MEM_FREE region big enough. Bail at ±1 GB (well
+/// within 2 GB reach).
 ///
-/// Returns None if no suitable region found within ±2 GB (rare on Windows
-/// x64 with ASLR — normal games have plenty of free gaps).
+/// This replaced an exponential-doubling walk that called VirtualQuery up
+/// to 38× AND alloc+free on rejects — on slow VMs the round-trip plus the
+/// VAD traversal blew past d3d12's Present-callback watchdog. The fixed
+/// stride does ≤ 2048 VirtualQuery calls with no speculative allocations.
 pub unsafe fn alloc_near(target_va: usize, size: usize) -> Option<AllocatedMemory> {
-    const TWO_GB:   isize = 2 * 1024 * 1024 * 1024;
-    const PAGE:     usize = 0x1000;
+    const ONE_GB:   isize = 1 * 1024 * 1024 * 1024;
+    const STRIDE:   isize = 1 * 1024 * 1024;   // 1 MB — allocation granularity is 64 KB
+    const START:    isize = 64 * 1024;
 
-    // Try probes in expanding radius from target — small pages first so the
-    // resulting `rel32` has the smallest possible displacement (compact detour).
-    let mut step: isize = PAGE as isize;
-    while step < TWO_GB {
+    // Marching outward from target_va. We alternate signs so the closest
+    // MEM_FREE slot wins, minimising the resulting rel32 displacement.
+    let mut off = START;
+    while off < ONE_GB {
         for sign in [-1isize, 1] {
-            let probe = (target_va as isize).wrapping_add(sign.wrapping_mul(step));
-            if probe < 0x1_0000 { continue; } // don't probe kernel-reserved low addrs
-            if probe > 0x0000_7FFF_FFFF_FFFF { continue; } // avoid non-canonical
+            let probe = (target_va as isize).wrapping_add(sign.wrapping_mul(off));
+            if probe < 0x1_0000 { continue; }
+            if probe > 0x0000_7FFF_FFFF_FFFF { continue; }
 
             let mut mbi: MBI = core::mem::zeroed();
             let got = VirtualQuery(
@@ -161,26 +166,31 @@ pub unsafe fn alloc_near(target_va: usize, size: usize) -> Option<AllocatedMemor
             );
             if got == 0 { continue; }
             if mbi.state != MEM_FREE { continue; }
-            if mbi.region_size < size { continue; }
+            if mbi.region_size < size + 0x10000 { continue; }
 
-            // Request exact probe address — VirtualAlloc rounds to allocation
-            // granularity (64 KB on x64) so this may land slightly shifted.
+            // Round up to 64 KB allocation granularity.
             let aligned = ((mbi.base_address as usize) + 0xFFFF) & !0xFFFFusize;
             if aligned == 0 { continue; }
+            // Ensure aligned + size fits inside the free region.
+            let region_end = (mbi.base_address as usize).wrapping_add(mbi.region_size);
+            if aligned + size > region_end { continue; }
+
             if let Some(mem) = AllocatedMemory::new_at(
                 aligned as *const core::ffi::c_void, size,
             ) {
                 let delta = (mem.addr() as isize).wrapping_sub(target_va as isize);
-                if delta.abs() < TWO_GB {
+                if delta.abs() < 2 * ONE_GB {
                     return Some(mem);
                 }
-                // Allocation landed outside range — free + try next.
+                // Landed out of range somehow — drop and keep marching.
                 drop(mem);
             }
         }
-        step *= 2;
+        off += STRIDE;
     }
-    None
+    // Last-resort fallback: let the OS pick anywhere. Caller that cares about
+    // rel32 range will need jmp_abs_indirect for distant targets.
+    AllocatedMemory::new(size)
 }
 
 // Unit tests disabled — rmod is #![no_std] with custom panic handler; std
