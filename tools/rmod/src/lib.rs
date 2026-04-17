@@ -373,6 +373,19 @@ const CMD_PACKET_TRACE_UNINSTALL: u32 = 18; // restore original bytes
 const CMD_DR_PROBE: u32 = 22;               // probe whether SetThreadContext persists DR0 on D2R threads (Arxan diagnostic)
 const CMD_SNAPSHOT_INIT: u32 = 24;          // Phase A P1-GID: enable per-Present PlayerUnit snapshot into SHM
 const CMD_UNINSTALL_DETOUR: u32 = 25;       // Graceful shutdown: restore Present prologue before app.exe exits
+const CMD_ROP_SCAN: u32 = 26;               // GID-4: scan .text region for ROP gadgets, populate G_ROP_GADGETS
+const CMD_ROP_READ: u32 = 27;               // GID-5: execute build_memcpy ROP chain — D2R reads own memory via its own gadgets
+
+// ROP command SHM layout (u64 args, u32 status) — placed in the 0x3000 free
+// band between HWBP (0x2000-0x2100) and snapshot header (0x4000).
+const OFF_ROP_SCAN_BASE:    usize = 0x3000;  // u64 — scan region base VA
+const OFF_ROP_SCAN_LEN:     usize = 0x3008;  // u64 — scan region length
+const OFF_ROP_SCAN_COUNT:   usize = 0x3010;  // u32 — out: gadgets harvested
+const OFF_ROP_READ_SRC:     usize = 0x3018;  // u64 — D2R VA to read from
+const OFF_ROP_READ_DST:     usize = 0x3020;  // u64 — SHM scratch VA to write into
+const OFF_ROP_READ_LEN:     usize = 0x3028;  // u64 — bytes to copy
+const OFF_ROP_READ_STATUS:  usize = 0x3030;  // u32 — out: 0=ok, 1=gadget-pool-missing, 2=exec-failed
+const OFF_ROP_READY:        usize = 0x3034;  // u32 — 1 when G_ROP_EXECUTOR/G_ROP_STACK/G_ROP_TRIGGER ready post-scan
 
 // HWBP commands — match Go protocol.go (CmdHwbpInstall=6 etc).
 const CMD_HWBP_INSTALL:   u32 = 6;          // install DR0=target on every D2R thread
