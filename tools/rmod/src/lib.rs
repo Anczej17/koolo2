@@ -1,6 +1,7 @@
 #![no_std]
 #![allow(non_snake_case)]
 #![allow(non_camel_case_types)]
+#![allow(dead_code)]
 #![allow(clippy::missing_safety_doc)]
 
 //! Runtime graphics module - frame-synchronized command dispatch via shared memory.
@@ -8,6 +9,11 @@
 
 use core::sync::atomic::{AtomicU32, Ordering};
 use core::panic::PanicInfo;
+
+/// Minimal x86-64 encoder/decoder for GID-style AssembleInsteadOfBytes
+/// Present hook + ROP chain builder. no_std, handcrafted, no external crate.
+/// See `src/asm.rs` for the full API + tests.
+pub mod asm;
 
 #[panic_handler]
 fn panic(_: &PanicInfo) -> ! {
