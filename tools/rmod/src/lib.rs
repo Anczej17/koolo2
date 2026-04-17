@@ -1700,6 +1700,13 @@ unsafe fn dispatch_commands() {
 
             shm_write_u32(shm, OFF_ROP_DBG, 0xAAAA0003);
             if this_chunk > 0 {
+                // No pre-scan VirtualQuery — both the cached page_readable
+                // and an inline VirtualQuery blocked dispatch under Present
+                // contention in live tests (dbg stuck at 0xAAAA0003 for >2 s).
+                // crash_diag_veh catches AVs from unmapped pages; callers
+                // should only scan regions they know (or strongly suspect)
+                // are committed .text. The 16 KB live run at 0x7FF679AB0000
+                // successfully returned 118 gadgets with this approach.
                 G_ROP_GADGETS.scan(base_va.add(G_ROP_SCAN_CURSOR), this_chunk);
                 G_ROP_SCAN_CURSOR += this_chunk;
             }
