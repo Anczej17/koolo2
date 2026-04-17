@@ -19,6 +19,13 @@ pub mod asm;
 /// ±2 GB placements). See `src/alloc_mgr.rs`.
 pub mod alloc_mgr;
 
+/// In-process execution engine (GID's Executor class). See `src/executor.rs`.
+pub mod executor;
+
+/// ROP gadget harvester (scans D2R .text for ret-ending useful sequences).
+/// See `src/rop_gadgets.rs`.
+pub mod rop_gadgets;
+
 #[panic_handler]
 fn panic(_: &PanicInfo) -> ! {
     loop {}
