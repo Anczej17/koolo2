@@ -15,6 +15,10 @@ use core::panic::PanicInfo;
 /// See `src/asm.rs` for the full API + tests.
 pub mod asm;
 
+/// In-process RWX memory manager (AllocatedMemory RAII, alloc_near for
+/// ±2 GB placements). See `src/alloc_mgr.rs`.
+pub mod alloc_mgr;
+
 #[panic_handler]
 fn panic(_: &PanicInfo) -> ! {
     loop {}
