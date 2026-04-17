@@ -718,7 +718,11 @@ static mut G_SHM_PREFIX: [u16; 16] = [
 static mut G_SHM_PREFIX_LEN: usize = 9; // length of the actual prefix in G_SHM_PREFIX (default "DispCache")
 static mut G_TRAMPOLINE: *const u8 = core::ptr::null();
 static mut G_PRESENT_ADDR: usize = 0;
-static mut G_PRESENT_ORIG_BYTES: [u8; 14] = [0u8; 14]; // DETOUR_SIZE prologue bytes for DLL_PROCESS_DETACH restore
+/// Capacity covers variable-length prologue copy (walk_instruction_boundary
+/// may return up to ~30 bytes when Present has a big first instruction).
+/// First G_PRESENT_ORIG_LEN bytes are valid; rest is zero padding.
+static mut G_PRESENT_ORIG_BYTES: [u8; 32] = [0u8; 32];
+static mut G_PRESENT_ORIG_LEN:   usize   = 0;
 static mut G_PRESENT_ORIG_PROT: u32 = 0;               // saved page protection (for detach restore)
 static mut G_GTC64_TRAMPOLINE: *const u8 = core::ptr::null(); // unused (kept for compat)
 static mut G_DUAL_SEND_WRAP: usize = 0; // dual_send_wrap VA (set at init)
@@ -1213,15 +1217,47 @@ unsafe fn install_detour(present_addr: usize, shm: *mut SharedBuffer) -> Result<
     }
     shm_write_u32(shm, OFF_DEBUG_STEP, 0x0A); // trampoline allocated
 
-    // 2. Copy original prologue bytes into trampoline AND save a copy for
-    //    DLL_PROCESS_DETACH uninstall (trampoline may be VirtualFree'd).
-    core::ptr::copy_nonoverlapping(present_ptr, trampoline, DETOUR_SIZE);
-    core::ptr::copy_nonoverlapping(present_ptr, G_PRESENT_ORIG_BYTES.as_mut_ptr(), DETOUR_SIZE);
+    // 2. Determine variable-length prologue copy via asm::walk_instruction_boundary.
+    //    We need ≥ DETOUR_SIZE bytes of RIP-relocatable instructions. Decoder
+    //    walks one instruction at a time and stops at a boundary ≥ DETOUR_SIZE.
+    //    Fallback to fixed DETOUR_SIZE on decode failure (current D2R builds
+    //    have RIP-rel-free first 14 bytes of Present so the fallback is safe).
+    let copy_len = asm::walk_instruction_boundary(present_ptr, DETOUR_SIZE, 32)
+        .unwrap_or(DETOUR_SIZE);
+
+    // Copy original prologue bytes into trampoline AND save a copy for
+    // DLL_PROCESS_DETACH uninstall (trampoline may be VirtualFree'd).
+    core::ptr::copy_nonoverlapping(present_ptr, trampoline, copy_len);
+    core::ptr::copy_nonoverlapping(present_ptr, G_PRESENT_ORIG_BYTES.as_mut_ptr(), copy_len);
+    G_PRESENT_ORIG_LEN = copy_len;
     shm_write_u32(shm, OFF_DEBUG_STEP, 0x0B); // prologue copied
 
-    // 3. Append absolute JMP back to Present + DETOUR_SIZE.
-    let jmp_back_target = present_addr + DETOUR_SIZE;
-    write_abs_jmp(trampoline.add(DETOUR_SIZE), jmp_back_target);
+    // Fix up RIP-relative displacements in the copied instructions. Each
+    // carrying-disp instruction's effective address was relative to the
+    // ORIGINAL Present IP; after moving to the trampoline, displacements
+    // must be offset by (present_addr - trampoline_addr).
+    let delta: i64 = (trampoline as i64) - (present_addr as i64);
+    let mut cursor = 0usize;
+    while cursor < copy_len {
+        let rem = copy_len - cursor;
+        let info_opt = asm::decode_insn(trampoline.add(cursor), rem);
+        let info = match info_opt {
+            Some(i) => i,
+            None => break, // decoder gave up — remaining bytes are RIP-rel-free by assumption
+        };
+        if info.has_rip_rel {
+            let disp_off = cursor + info.rip_rel_off as usize;
+            let old_disp_ptr = trampoline.add(disp_off) as *mut i32;
+            let old_disp = core::ptr::read_unaligned(old_disp_ptr) as i64;
+            let new_disp = (old_disp - delta) as i32;
+            core::ptr::write_unaligned(old_disp_ptr, new_disp);
+        }
+        cursor += info.len as usize;
+    }
+
+    // 3. Append absolute JMP back to Present + copy_len.
+    let jmp_back_target = present_addr + copy_len;
+    write_abs_jmp(trampoline.add(copy_len), jmp_back_target);
 
     G_TRAMPOLINE = trampoline;
 
@@ -1234,7 +1270,7 @@ unsafe fn install_detour(present_addr: usize, shm: *mut SharedBuffer) -> Result<
     let mut old_protect: DWORD = 0;
     if VirtualProtect(
         present_ptr as *const core::ffi::c_void,
-        DETOUR_SIZE,
+        copy_len,
         PAGE_EXECUTE_READWRITE,
         &mut old_protect,
     ) == 0
@@ -1250,8 +1286,8 @@ unsafe fn install_detour(present_addr: usize, shm: *mut SharedBuffer) -> Result<
     // known JMP byte patterns at hooked function entries; a MOV r64, imm64
     // + JMP r64 sequence (12 bytes for low regs, 13 for R8-R15) produces
     // a different signature per session — we randomise the scratch reg
-    // via rdtsc low bits. 14-byte DETOUR_SIZE is preserved by padding
-    // with NOP tail; original bytes saved in G_PRESENT_ORIG_BYTES for restore.
+    // via rdtsc low bits. copy_len is determined by walk_instruction_boundary
+    // so the tail lands on an instruction boundary; pad with NOPs.
     let reg_choices = [
         asm::Reg64::Rax,
         asm::Reg64::Rcx,
@@ -1260,23 +1296,20 @@ unsafe fn install_detour(present_addr: usize, shm: *mut SharedBuffer) -> Result<
         asm::Reg64::R11,
     ];
     let reg = reg_choices[(rdtsc_u64() as usize) % reg_choices.len()];
-    let mut emitter = asm::Emitter::new(present_ptr as *mut u8, DETOUR_SIZE);
+    let mut emitter = asm::Emitter::new(present_ptr as *mut u8, copy_len);
     emitter.jmp_abs_via_reg(reg, handler_thunk as usize);
-    // Pad any remaining bytes (within DETOUR_SIZE) with NOPs so the tail
-    // stays instruction-aligned — decoding past our patch lands on valid NOPs
-    // until control returns via the trampoline's jmp_back.
-    while emitter.len() < DETOUR_SIZE {
+    while emitter.len() < copy_len {
         emitter.nop();
     }
 
-    FlushInstructionCache(GetCurrentProcess(), present_ptr as _, DETOUR_SIZE);
+    FlushInstructionCache(GetCurrentProcess(), present_ptr as _, copy_len);
     shm_write_u32(shm, OFF_DEBUG_STEP, 0x0E); // detour written
 
     // Restore original page protection.
     let mut dummy: DWORD = 0;
     VirtualProtect(
         present_ptr as *const core::ffi::c_void,
-        DETOUR_SIZE,
+        copy_len,
         old_protect,
         &mut dummy,
     );
@@ -1305,10 +1338,14 @@ unsafe fn uninstall_present_detour() {
     let present_ptr = G_PRESENT_ADDR as *mut u8;
 
     // Flip page to RWX, restore saved bytes, flush icache, restore protection.
+    // Use G_PRESENT_ORIG_LEN (set by install_detour via walk_instruction_boundary)
+    // so variable-length prologues restore correctly; fall back to DETOUR_SIZE
+    // for legacy paths that didn't set the length.
+    let restore_len = if G_PRESENT_ORIG_LEN != 0 { G_PRESENT_ORIG_LEN } else { DETOUR_SIZE };
     let mut old_protect: DWORD = 0;
     if VirtualProtect(
         present_ptr as *const core::ffi::c_void,
-        DETOUR_SIZE,
+        restore_len,
         PAGE_EXECUTE_READWRITE,
         &mut old_protect,
     ) == 0 {
@@ -1318,14 +1355,14 @@ unsafe fn uninstall_present_detour() {
     core::ptr::copy_nonoverlapping(
         G_PRESENT_ORIG_BYTES.as_ptr(),
         present_ptr,
-        DETOUR_SIZE,
+        restore_len,
     );
-    FlushInstructionCache(GetCurrentProcess(), present_ptr as _, DETOUR_SIZE);
+    FlushInstructionCache(GetCurrentProcess(), present_ptr as _, restore_len);
 
     let mut dummy: DWORD = 0;
     VirtualProtect(
         present_ptr as *const core::ffi::c_void,
-        DETOUR_SIZE,
+        restore_len,
         if G_PRESENT_ORIG_PROT != 0 { G_PRESENT_ORIG_PROT } else { old_protect },
         &mut dummy,
     );
