@@ -60,7 +60,7 @@ impl Emitter {
     pub fn rip(&self) -> *const u8 { unsafe { self.buf.add(self.pos) } }
 
     #[inline]
-    unsafe fn byte(&mut self, b: u8) {
+    pub unsafe fn byte(&mut self, b: u8) {
         if self.pos < self.cap {
             ptr::write(self.buf.add(self.pos), b);
         }
@@ -68,12 +68,12 @@ impl Emitter {
     }
 
     #[inline]
-    unsafe fn bytes(&mut self, bs: &[u8]) {
+    pub unsafe fn bytes(&mut self, bs: &[u8]) {
         for &b in bs { self.byte(b); }
     }
 
     #[inline]
-    unsafe fn u32_le(&mut self, v: u32) {
+    pub unsafe fn u32_le(&mut self, v: u32) {
         self.byte((v & 0xFF) as u8);
         self.byte(((v >> 8) & 0xFF) as u8);
         self.byte(((v >> 16) & 0xFF) as u8);

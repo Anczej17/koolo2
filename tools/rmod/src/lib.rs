@@ -26,6 +26,10 @@ pub mod executor;
 /// See `src/rop_gadgets.rs`.
 pub mod rop_gadgets;
 
+/// ROP chain builder (assembles gadget chains for memcpy/call/write).
+/// See `src/rop_chain.rs`.
+pub mod rop_chain;
+
 #[panic_handler]
 fn panic(_: &PanicInfo) -> ! {
     loop {}
