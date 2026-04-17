@@ -43,6 +43,8 @@ const (
 	CmdHwbpReenum     = 23 // HWBP: re-arm DR0 on threads created since last install (idempotent)
 	CmdSnapshotInit   = 24 // P1-GID Phase A: enable per-Present PlayerUnit snapshot into SHM
 	CmdUninstallDetour = 25 // Graceful shutdown — restore Present prologue + remove VEHs
+	CmdRopScan        = 26 // GID-4: scan D2R .text for ROP gadgets (ret-ending sequences), populate G_ROP_GADGETS
+	CmdRopRead        = 27 // GID-5: copy D2R bytes via chained D2R gadgets (memcpy ROP). Currently gated (returns status=2 until trigger encoding verified).
 
 	// Status values written by the Rust DLL, polled by Go.
 	StatusBusy  = 0
@@ -309,6 +311,16 @@ const (
 	OffSnapStaticTable = 0x4050 // StaticRegion × SnapStaticMax, 16 B each
 	SnapStaticMax      = 23
 	SnapStaticEntrySz  = 16 // va:u64 | len:u32 | pad:u32
+
+	// GID-4/5 ROP command offsets (0x3000 free band between HWBP and snapshot header).
+	OffRopScanBase    = 0x3000 // u64 — scan region base VA
+	OffRopScanLen     = 0x3008 // u64 — scan region length
+	OffRopScanCount   = 0x3010 // u32 — out: gadgets harvested
+	OffRopReadSrc     = 0x3018 // u64 — D2R VA to read from
+	OffRopReadDst     = 0x3020 // u64 — SHM scratch VA to write into
+	OffRopReadLen     = 0x3028 // u64 — bytes to copy
+	OffRopReadStatus  = 0x3030 // u32 — out: 0=ok, 1=pool-miss, 2=exec-fail
+	OffRopReady       = 0x3034 // u32 — 1 when ROP executor ready post-scan
 
 	OffSnapRegions     = 0x4200 // RegionEntry[1024] × 16 B  (B3: grown 256→1024 for monster/object/entrance walker budget)
 	SnapRegionMax      = 1024

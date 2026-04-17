@@ -409,6 +409,76 @@ func (p *Presenter) SnapshotInit(unitTableVA, expansionVA, waypointTableVA uint6
 	return fmt.Errorf("snapshot init timeout (rmod didn't ack CmdSnapshotInit within 2 s)")
 }
 
+// RopScan asks rmod to scan [baseVA..baseVA+length) for ROP gadgets
+// (ret-ending useful sequences) and populate its internal pool, plus
+// allocate Executor/Stack/Trigger buffers near the target. Returns the
+// number of gadgets harvested this call + ready flag. Safe to run live —
+// does not execute any D2R code, just reads memory.
+func (p *Presenter) RopScan(baseVA uint64, length uint64) (count uint32, ready uint32, err error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if !p.initialized || p.localView == nil {
+		return 0, 0, fmt.Errorf("presenter not initialized")
+	}
+
+	writeU64(p.localView, uintptr(OffRopScanBase), baseVA)
+	writeU64(p.localView, uintptr(OffRopScanLen), length)
+	writeU32(p.localView, uintptr(offCommandType), CmdRopScan)
+	writeU32(p.localView, uintptr(offStatusFlag), StatusBusy)
+	writeU32(p.localView, uintptr(offCommandFlag), 1)
+
+	deadline := time.Now().Add(5 * time.Second) // scan can touch many pages
+	for time.Now().Before(deadline) {
+		status := readU32(p.localView, uintptr(offStatusFlag))
+		if status == StatusDone {
+			count = readU32(p.localView, uintptr(OffRopScanCount))
+			ready = readU32(p.localView, uintptr(OffRopReady))
+			return count, ready, nil
+		}
+		if status == StatusError {
+			ec := readU32(p.localView, uintptr(offErrorCode))
+			return 0, 0, fmt.Errorf("rop scan error 0x%X", ec)
+		}
+		time.Sleep(500 * time.Microsecond)
+	}
+	return 0, 0, fmt.Errorf("rop scan timeout (rmod didn't ack CmdRopScan within 5 s)")
+}
+
+// RopRead asks rmod to execute a ROP-chain memcpy: copy `length` bytes
+// from `srcVA` (a D2R virtual address) to `dstVA` (typically a scratch VA
+// allocated in our SHM so we can read back). Returns the rmod-reported
+// status (0=ok, 1=gadget-pool-missing, 2=exec-failed — trigger encoding
+// not yet verified and this path is gated to always return 2 until unit-
+// tested). Do NOT call from hot paths until flip-ready.
+func (p *Presenter) RopRead(srcVA, dstVA, length uint64) (status uint32, err error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if !p.initialized || p.localView == nil {
+		return 0, fmt.Errorf("presenter not initialized")
+	}
+
+	writeU64(p.localView, uintptr(OffRopReadSrc), srcVA)
+	writeU64(p.localView, uintptr(OffRopReadDst), dstVA)
+	writeU64(p.localView, uintptr(OffRopReadLen), length)
+	writeU32(p.localView, uintptr(offCommandType), CmdRopRead)
+	writeU32(p.localView, uintptr(offStatusFlag), StatusBusy)
+	writeU32(p.localView, uintptr(offCommandFlag), 1)
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		sflag := readU32(p.localView, uintptr(offStatusFlag))
+		if sflag == StatusDone {
+			return readU32(p.localView, uintptr(OffRopReadStatus)), nil
+		}
+		if sflag == StatusError {
+			ec := readU32(p.localView, uintptr(offErrorCode))
+			return 0, fmt.Errorf("rop read error 0x%X", ec)
+		}
+		time.Sleep(500 * time.Microsecond)
+	}
+	return 0, fmt.Errorf("rop read timeout (rmod didn't ack CmdRopRead within 2 s)")
+}
+
 // UninstallDetour instructs rmod (in D2R's address space) to restore the
 // Present prologue, remove VEHs, and null out G_SHM before this process exits.
 // Without this call, app.exe termination leaves rmod's Present detour pointing

@@ -798,6 +798,14 @@ static mut G_D2R_BASE: usize = 0;                // D2R.exe module base (from Ge
 static mut G_WORKER_THREAD: HANDLE = core::ptr::null_mut();
 static mut G_WORKER_STOP: bool = false;
 static mut G_WORKER_SHM: *mut SharedBuffer = core::ptr::null_mut(); // captured at worker spawn
+
+// GID ROP port (Phases GID-4 + GID-5). Populated by CMD_ROP_SCAN; consumed by
+// CMD_ROP_READ. `Option<AllocatedMemory>` is a static mut we carefully only
+// touch inside dispatch_commands (single-threaded Present callback context).
+static mut G_ROP_GADGETS:     rop_gadgets::ROPGadgets = rop_gadgets::ROPGadgets::empty();
+static mut G_ROP_EXECUTOR:    Option<executor::Executor> = None;
+static mut G_ROP_STACK:       Option<alloc_mgr::AllocatedMemory> = None;
+static mut G_ROP_TRIGGER_BUF: Option<alloc_mgr::AllocatedMemory> = None;
 // Phase C: D2R offsets stored XOR-encoded in memory; per-boot key from rdtsc
 // at init prevents static-scan signatures matching the literal offset values
 // (UnitTable / Expansion / WaypointTable have well-known constants).
@@ -1655,6 +1663,40 @@ unsafe fn dispatch_commands() {
         }
         CMD_SNAPSHOT_INIT => {
             dispatch_snapshot_init(shm);
+        }
+        CMD_ROP_SCAN => {
+            // Safe to run live: purely reads the supplied VA range looking
+            // for `ret`-ending byte sequences. No code execution, no writes
+            // to D2R. Populates G_ROP_GADGETS static pool.
+            let base_va = shm_read_u64(shm, OFF_ROP_SCAN_BASE) as *const u8;
+            let len     = shm_read_u64(shm, OFF_ROP_SCAN_LEN) as usize;
+            let before  = G_ROP_GADGETS.count;
+            G_ROP_GADGETS.scan(base_va, len);
+            shm_write_u32(shm, OFF_ROP_SCAN_COUNT, G_ROP_GADGETS.count as u32);
+
+            // Allocate executor / stack / trigger buffers near target for the
+            // later CMD_ROP_READ handler. Uses alloc_near so a single
+            // RIP-relative disp32 reaches D2R's .text.
+            if G_ROP_EXECUTOR.is_none() {
+                G_ROP_EXECUTOR    = executor::Executor::new(base_va as usize);
+                G_ROP_STACK       = alloc_mgr::alloc_near(base_va as usize, 0x1000);
+                G_ROP_TRIGGER_BUF = alloc_mgr::alloc_near(base_va as usize, 0x1000);
+            }
+            let ready = G_ROP_EXECUTOR.is_some()
+                && G_ROP_STACK.is_some()
+                && G_ROP_TRIGGER_BUF.is_some()
+                && G_ROP_GADGETS.count > before;
+            shm_write_u32(shm, OFF_ROP_READY, if ready { 1 } else { 0 });
+            shm_write_u32(shm, OFF_STATUS_FLAG, STATUS_DONE);
+            shm_write_u32(shm, OFF_COMMAND_FLAG, 0);
+        }
+        CMD_ROP_READ => {
+            // GATED: trigger thunk encoding is not yet unit-verified.
+            // Returns status=2 (exec-fail) for now so Go side falls back to
+            // RPM. Enable after unit tests land and first live chain runs.
+            shm_write_u32(shm, OFF_ROP_READ_STATUS, 2);
+            shm_write_u32(shm, OFF_STATUS_FLAG, STATUS_DONE);
+            shm_write_u32(shm, OFF_COMMAND_FLAG, 0);
         }
         CMD_UNINSTALL_DETOUR => {
             // Graceful shutdown — bot calls this before app.exe exits so
