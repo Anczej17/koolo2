@@ -994,6 +994,8 @@ func (s *HttpServer) Listen(port int) error {
 	http.HandleFunc("/debug/screenshot", s.debugScreenshot)
 	http.HandleFunc("/debug/readmem", s.debugReadMem)
 	http.HandleFunc("/debug/rpm-counter", s.debugRPMCounter)
+	http.HandleFunc("/debug/rop-scan", s.debugRopScan)
+	http.HandleFunc("/debug/rop-read", s.debugRopRead)
 	http.HandleFunc("/debug/handle-audit", s.debugHandleAudit)
 	http.HandleFunc("/debug/writemem", s.debugWriteMem)
 	http.HandleFunc("/debug/memdiff", s.debugMemDiff)
@@ -7738,6 +7740,99 @@ func (s *HttpServer) debugRPMCounter(w http.ResponseWriter, r *http.Request) {
 	if r.URL.Query().Get("reset") == "1" {
 		proc.ResetRPMStats()
 	}
+}
+
+// debugRopScan triggers CMD_ROP_SCAN in rmod over the specified .text range.
+// Usage: GET /debug/rop-scan?character=Blizzard[&base=0x7FF6...&len=0x100000]
+// If base/len omitted, uses D2R module base + 0x80_0000 (8 MB — conservative
+// upper bound for .text). Returns gadget count and ready flag.
+func (s *HttpServer) debugRopScan(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+
+	character := r.URL.Query().Get("character")
+	if character == "" {
+		w.WriteHeader(http.StatusBadRequest)
+		fmt.Fprintf(w, `{"error":"missing character parameter"}`)
+		return
+	}
+	ctx := s.manager.GetContext(character)
+	if ctx == nil || ctx.GameReader == nil || ctx.MemoryInjector == nil {
+		w.WriteHeader(http.StatusServiceUnavailable)
+		fmt.Fprintf(w, `{"error":"no running supervisor"}`)
+		return
+	}
+	pres := ctx.MemoryInjector.GetPresenter()
+	if pres == nil {
+		w.WriteHeader(http.StatusServiceUnavailable)
+		fmt.Fprintf(w, `{"error":"presenter not initialized (MODE2+CLAUDE_MODE path only)"}`)
+		return
+	}
+
+	var baseVA uint64
+	var lenVal uint64
+	if b := r.URL.Query().Get("base"); b != "" {
+		fmt.Sscanf(b, "0x%x", &baseVA)
+	}
+	if baseVA == 0 {
+		baseVA = uint64(ctx.GameReader.Process.ModuleBaseAddress())
+	}
+	if l := r.URL.Query().Get("len"); l != "" {
+		fmt.Sscanf(l, "0x%x", &lenVal)
+	}
+	if lenVal == 0 {
+		// 1 MB default — full .text scan (8 MB) inside Present callback
+		// hits d3d12's watchdog. For production, scan incrementally in
+		// ~1 MB chunks via repeated calls with advancing base.
+		lenVal = 0x100000
+	}
+
+	count, ready, err := pres.RopScan(baseVA, lenVal)
+	if err != nil {
+		fmt.Fprintf(w, `{"ok":false,"error":%q,"base":"0x%X","len":"0x%X"}`, err.Error(), baseVA, lenVal)
+		return
+	}
+	fmt.Fprintf(w, `{"ok":true,"base":"0x%X","len":"0x%X","gadgets":%d,"ready":%d}`, baseVA, lenVal, count, ready)
+}
+
+// debugRopRead triggers CMD_ROP_READ — ROP-chain memcpy(src, dst, len). Currently
+// gated on rmod side (returns status=2 always). Useful as a liveness probe
+// before the trigger encoding is unit-tested and the path un-gated.
+// Usage: GET /debug/rop-read?character=Blizzard&src=0xNN&dst=0xNN&len=0xNN
+func (s *HttpServer) debugRopRead(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	character := r.URL.Query().Get("character")
+	if character == "" {
+		w.WriteHeader(http.StatusBadRequest)
+		fmt.Fprintf(w, `{"error":"missing character parameter"}`)
+		return
+	}
+	ctx := s.manager.GetContext(character)
+	if ctx == nil || ctx.MemoryInjector == nil {
+		w.WriteHeader(http.StatusServiceUnavailable)
+		fmt.Fprintf(w, `{"error":"no supervisor"}`)
+		return
+	}
+	pres := ctx.MemoryInjector.GetPresenter()
+	if pres == nil {
+		w.WriteHeader(http.StatusServiceUnavailable)
+		fmt.Fprintf(w, `{"error":"presenter not initialized"}`)
+		return
+	}
+	var src, dst, length uint64
+	fmt.Sscanf(r.URL.Query().Get("src"), "0x%x", &src)
+	fmt.Sscanf(r.URL.Query().Get("dst"), "0x%x", &dst)
+	fmt.Sscanf(r.URL.Query().Get("len"), "0x%x", &length)
+	if src == 0 || dst == 0 || length == 0 {
+		w.WriteHeader(http.StatusBadRequest)
+		fmt.Fprintf(w, `{"error":"src/dst/len required (hex)"}`)
+		return
+	}
+	status, err := pres.RopRead(src, dst, length)
+	if err != nil {
+		fmt.Fprintf(w, `{"ok":false,"error":%q}`, err.Error())
+		return
+	}
+	fmt.Fprintf(w, `{"ok":true,"status":%d,"note":"2 = ROP handler gated; unit-test trigger first"}`, status)
 }
 
 // debugHandleAudit returns the D2R handle-open state for the running
