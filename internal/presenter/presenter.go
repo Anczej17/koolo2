@@ -502,7 +502,8 @@ func (p *Presenter) RopScan(baseVA uint64, length uint64) (count uint32, ready u
 			return count, ready, nil
 		}
 	}
-	return count, ready, fmt.Errorf("rop scan overall timeout (ready=0 after deadline, count=%d)", count)
+	dbg := readU32(p.localView, uintptr(OffRopDbg))
+	return count, ready, fmt.Errorf("rop scan overall timeout (ready=0 after deadline, count=%d, last_dbg=0x%08X)", count, dbg)
 }
 
 // RopPoolBreakdown returns the current gadget-kind distribution in the
