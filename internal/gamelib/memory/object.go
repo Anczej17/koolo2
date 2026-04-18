@@ -155,12 +155,39 @@ func (gd *GameReader) Entrances(playerPosition data.Position, hover data.HoverDa
 		entranceUnitPtr := uintptr(ReadUIntFromBuffer(unitTableBuffer, uint(entranceOffset), Uint64))
 
 		for entranceUnitPtr > 0 {
+			// Batch the per-entrance header (type/txt/id/path/next).
+			var (
+				entranceType uint
+				txtFileNo    uint
+				unitID       uint
+				pathPtr      uintptr
+				nextUnit     uintptr
+			)
+			batched := false
+			if bufs, err := gd.Process.BatchReadBytes([]BatchReadEntry{
+				{Src: entranceUnitPtr + 0x00, Len: 4},
+				{Src: entranceUnitPtr + 0x04, Len: 4},
+				{Src: entranceUnitPtr + 0x08, Len: 4},
+				{Src: entranceUnitPtr + 0x38, Len: 8},
+				{Src: entranceUnitPtr + 0x158, Len: 8},
+			}); err == nil && len(bufs) == 5 {
+				entranceType = uint(binary.LittleEndian.Uint32(bufs[0]))
+				txtFileNo = uint(binary.LittleEndian.Uint32(bufs[1]))
+				unitID = uint(binary.LittleEndian.Uint32(bufs[2]))
+				pathPtr = uintptr(binary.LittleEndian.Uint64(bufs[3]))
+				nextUnit = uintptr(binary.LittleEndian.Uint64(bufs[4]))
+				batched = true
+			}
+			if !batched {
+				entranceType = gd.reader.ReadUInt(entranceUnitPtr+0x00, Uint32)
+			}
 
-			if entranceType := gd.reader.ReadUInt(entranceUnitPtr+0x00, Uint32); entranceType == 5 {
-				txtFileNo := gd.reader.ReadUInt(entranceUnitPtr+0x04, Uint32)
-				unitID := gd.reader.ReadUInt(entranceUnitPtr+0x08, Uint32)
-
-				pathPtr := uintptr(gd.reader.ReadUInt(entranceUnitPtr+0x38, Uint64))
+			if entranceType == 5 {
+				if !batched {
+					txtFileNo = gd.reader.ReadUInt(entranceUnitPtr+0x04, Uint32)
+					unitID = gd.reader.ReadUInt(entranceUnitPtr+0x08, Uint32)
+					pathPtr = uintptr(gd.reader.ReadUInt(entranceUnitPtr+0x38, Uint64))
+				}
 				posX := gd.reader.ReadUInt(pathPtr+0x10, Uint16)
 				posY := gd.reader.ReadUInt(pathPtr+0x14, Uint16)
 
@@ -174,7 +201,11 @@ func (gd *GameReader) Entrances(playerPosition data.Position, hover data.HoverDa
 					},
 				})
 			}
-			entranceUnitPtr = uintptr(gd.reader.ReadUInt(entranceUnitPtr+0x158, Uint64))
+			if batched {
+				entranceUnitPtr = nextUnit
+			} else {
+				entranceUnitPtr = uintptr(gd.reader.ReadUInt(entranceUnitPtr+0x158, Uint64))
+			}
 		}
 	}
 
