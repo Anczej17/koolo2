@@ -1736,11 +1736,48 @@ unsafe fn dispatch_commands() {
             // settle delay; scan command just CHECKS `is_some()`.
             shm_write_u32(shm, OFF_ROP_DBG, 0xAAAA0008);
 
-            // DEBUG: SHORT-CIRCUIT — skipping count write, breakdown, and
-            // all post-scan SHM writes to isolate the crashing op. Just
-            // acknowledge DONE. Revert once we've found the specific line
-            // that's crashing.
+            // Read count into a LOCAL variable via raw pointer to avoid any
+            // Rust codegen that would add guard checks. This field lives in
+            // rmod's .data — the previous cascade-AV (fault_va = -1) points
+            // at this exact read, so we keep the volatile form to reduce
+            // reorder surface even though rmod's .data is single-writer.
+            let current_count: u32 = core::ptr::read_volatile(&G_ROP_GADGETS.count as *const usize) as u32;
+            shm_write_u32(shm, OFF_ROP_SCAN_COUNT, current_count);
             shm_write_u32(shm, OFF_ROP_DBG, 0xAAAA0009);
+
+            // Breakdown only runs on the FINAL scan chunk — skipped on
+            // intermediate chunks to keep per-frame budget small.
+            if G_ROP_SCAN_COMPLETE {
+                let mut kind_counts = [0u32; 8];
+                let mut pop_mask: u16 = 0;
+                let gcount = current_count as usize;
+                if gcount <= rop_gadgets::GADGET_POOL_SIZE {
+                    let pool_ptr = G_ROP_GADGETS.pool.as_ptr();
+                    for i in 0..gcount {
+                        let g = pool_ptr.add(i);
+                        let kind_val = core::ptr::read(&(*g).kind);
+                        let regs = core::ptr::read(&(*g).regs_touched);
+                        let idx: usize = match kind_val {
+                            rop_gadgets::GadgetKind::Unknown    => 0,
+                            rop_gadgets::GadgetKind::PopReg     => { pop_mask |= regs; 1 },
+                            rop_gadgets::GadgetKind::MovRegMem  => 2,
+                            rop_gadgets::GadgetKind::MovMemReg  => 3,
+                            rop_gadgets::GadgetKind::RepMovsb   => 4,
+                            rop_gadgets::GadgetKind::RepMovsq   => 5,
+                            rop_gadgets::GadgetKind::XchgReg    => 6,
+                            rop_gadgets::GadgetKind::Ret        => 7,
+                        };
+                        if idx < 8 { kind_counts[idx] += 1; }
+                    }
+                }
+                shm_write_u32(shm, OFF_ROP_DBG, 0xAAAA000A);
+                for i in 0..8 {
+                    shm_write_u32(shm, OFF_ROP_KIND_COUNTS + i * 4, kind_counts[i]);
+                }
+                shm_write_u32(shm, OFF_ROP_POPREG_MASK, pop_mask as u32);
+                shm_write_u32(shm, OFF_ROP_DBG, 0xAAAA000B);
+            }
+
             let ready = G_ROP_SCAN_COMPLETE
                 && G_ROP_EXECUTOR.is_some()
                 && G_ROP_STACK.is_some()
@@ -1814,9 +1851,17 @@ unsafe fn dispatch_commands() {
             // The thunk saves callee-saved regs, flips RSP to our chain, rets
             // into the gadget chain, and the chain rets back to the epilogue
             // which restores RSP + returns here.
+            //
+            // Flip trigger buffer to PAGE_EXECUTE_READ right before the call,
+            // flip back to PAGE_READWRITE after. Buffers are allocated as RW
+            // to avoid Arxan's injection-pattern scan flagging our rmod; only
+            // this brief execute window is exposed to its hash check.
+            let trigger_mem = G_ROP_TRIGGER_BUF.as_ref().unwrap();
+            let _old = trigger_mem.protect_execute();
             type TriggerFn = unsafe extern "system" fn();
             let trigger_fn: TriggerFn = core::mem::transmute(built.trigger_va);
             trigger_fn();
+            let _ = trigger_mem.protect_rw();
             shm_write_u32(shm, OFF_ROP_DBG, 0xBBBB0005);
 
             shm_write_u32(shm, OFF_ROP_READ_STATUS, 0);

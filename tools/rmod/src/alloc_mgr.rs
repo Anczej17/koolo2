@@ -36,14 +36,23 @@ extern "system" {
         lpBuffer: *mut core::ffi::c_void,
         dwLength: usize,
     ) -> usize;
+
+    fn VirtualProtect(
+        lpAddress: *const core::ffi::c_void,
+        dwSize: usize,
+        flNewProtect: u32,
+        lpflOldProtect: *mut u32,
+    ) -> i32;
 }
 
-const MEM_COMMIT:       u32 = 0x0000_1000;
-const MEM_RESERVE:      u32 = 0x0000_2000;
-const MEM_RELEASE:      u32 = 0x0000_8000;
-const MEM_FREE:         u32 = 0x0001_0000;
-const PAGE_EXECUTE_RW:  u32 = 0x0000_0040;
-const PAGE_NOACCESS:    u32 = 0x0000_0001;
+const MEM_COMMIT:          u32 = 0x0000_1000;
+const MEM_RESERVE:         u32 = 0x0000_2000;
+const MEM_RELEASE:         u32 = 0x0000_8000;
+const MEM_FREE:            u32 = 0x0001_0000;
+const PAGE_READWRITE:      u32 = 0x0000_0004;
+const PAGE_EXECUTE_READ:   u32 = 0x0000_0020;
+const PAGE_EXECUTE_RW:     u32 = 0x0000_0040;
+const PAGE_NOACCESS:       u32 = 0x0000_0001;
 
 /// MEMORY_BASIC_INFORMATION — x64 layout. We read enough fields to pick an
 /// alloc site inside a MEM_FREE region. Other fields are not inspected.
@@ -70,14 +79,23 @@ pub struct AllocatedMemory {
 }
 
 impl AllocatedMemory {
-    /// Allocate `size` RWX bytes anywhere the OS chooses. Returns None on
+    /// Allocate `size` bytes (RW) anywhere the OS chooses. Returns None on
     /// allocation failure.
+    ///
+    /// Important: RW, NOT RWX. Arxan's integrity checker flags fresh
+    /// PAGE_EXECUTE_READWRITE allocations as injection signal; mid-game
+    /// scans made our rmod's .data reads return -1 (page-hash sentinel)
+    /// and cascaded to D2R zombie. Callers that need to execute code in
+    /// this region must call `.protect_execute()` immediately before
+    /// the function-pointer call and flip back with `.protect_rw()`
+    /// afterwards. Plain data buffers (scratch stacks, chain payloads)
+    /// never need execute permission.
     pub unsafe fn new(size: usize) -> Option<Self> {
         let ptr = VirtualAlloc(
             ptr::null(),
             size,
             MEM_COMMIT | MEM_RESERVE,
-            PAGE_EXECUTE_RW,
+            PAGE_READWRITE,
         ) as *mut u8;
         if ptr.is_null() {
             return None;
@@ -85,20 +103,59 @@ impl AllocatedMemory {
         Some(Self { base: ptr, size })
     }
 
-    /// Allocate `size` RWX bytes at a suggested address. Windows may round up
-    /// to the next free region — caller must verify `.as_ptr()` if a precise
-    /// placement is required.
+    /// Allocate `size` RW bytes at a suggested address. See `new` for the
+    /// rationale on PAGE_READWRITE (not RWX).
     pub unsafe fn new_at(hint: *const core::ffi::c_void, size: usize) -> Option<Self> {
         let ptr = VirtualAlloc(
             hint,
             size,
             MEM_COMMIT | MEM_RESERVE,
-            PAGE_EXECUTE_RW,
+            PAGE_READWRITE,
         ) as *mut u8;
         if ptr.is_null() {
             return None;
         }
         Some(Self { base: ptr, size })
+    }
+
+    /// Flip the region to PAGE_EXECUTE_READ so code inside can run. Returns
+    /// the old protection constant, or 0 on failure. Call only right before
+    /// the function-pointer jump; revert with `protect_rw` after the call
+    /// returns. Silently-tolerated legacy RWX allocations still work.
+    pub unsafe fn protect_execute(&self) -> u32 {
+        let mut old: u32 = 0;
+        if VirtualProtect(
+            self.base as *const core::ffi::c_void,
+            self.size,
+            PAGE_EXECUTE_READ,
+            &mut old as *mut u32,
+        ) != 0 { old } else { 0 }
+    }
+
+    /// Flip back to PAGE_READWRITE for later edits.
+    pub unsafe fn protect_rw(&self) -> u32 {
+        let mut old: u32 = 0;
+        if VirtualProtect(
+            self.base as *const core::ffi::c_void,
+            self.size,
+            PAGE_READWRITE,
+            &mut old as *mut u32,
+        ) != 0 { old } else { 0 }
+    }
+
+    /// Flip to legacy PAGE_EXECUTE_READWRITE. Reserved for the trampoline
+    /// buffer that must be writable AND executable during emit (simpler
+    /// than emit-RW → flip-RX → call → flip-RW). The main Present hook
+    /// trampoline still uses this because it's written once and lives
+    /// forever; we accept the Arxan exposure for the one-shot install.
+    pub unsafe fn protect_rwx(&self) -> u32 {
+        let mut old: u32 = 0;
+        if VirtualProtect(
+            self.base as *const core::ffi::c_void,
+            self.size,
+            PAGE_EXECUTE_RW,
+            &mut old as *mut u32,
+        ) != 0 { old } else { 0 }
     }
 
     #[inline] pub fn as_ptr(&self) -> *mut u8 { self.base }
