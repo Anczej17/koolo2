@@ -1099,22 +1099,24 @@ unsafe fn init_from_shm(shm: *mut SharedBuffer) -> Result<(), u32> {
         CloseHandle(G_ROP_WORKER_THREAD);
         G_ROP_WORKER_THREAD = core::ptr::null_mut();
     }
-    {
-        G_ROP_WORKER_THREAD = CreateThread(
-            core::ptr::null(),
-            0,
-            rop_scan_worker_thread_fn,
-            shm as *mut core::ffi::c_void,
-            0,
-            core::ptr::null_mut(),
-        );
-        if !G_ROP_WORKER_THREAD.is_null() {
-            shm_write_u32(shm, OFF_ROP_DBG, 0xC0DE0033);
-        } else {
-            shm_write_u32(shm, OFF_ROP_DBG, 0xC0DE00EE);
-        }
+    // Reset the global stop flag — a previous uninstall_present_detour
+    // would have set it true, which the new worker would see on its first
+    // loop iteration and immediately exit. This is almost certainly why
+    // HB stayed at 0 across all Plan B re-init attempts (rmod is not
+    // unloaded between bot sessions, so static mut state carries over).
+    G_WORKER_STOP = false;
+    G_ROP_WORKER_THREAD = CreateThread(
+        core::ptr::null(),
+        0,
+        rop_scan_worker_thread_fn,
+        shm as *mut core::ffi::c_void,
+        0,
+        core::ptr::null_mut(),
+    );
+    if !G_ROP_WORKER_THREAD.is_null() {
+        shm_write_u32(shm, OFF_ROP_DBG, 0xC0DE0033);
     } else {
-        shm_write_u32(shm, OFF_ROP_DBG, 0xC0DE0044);
+        shm_write_u32(shm, OFF_ROP_DBG, 0xC0DE00EE);
     }
 
     shm_write_u32(shm, OFF_DEBUG_STEP, 0x0F);
@@ -5386,6 +5388,8 @@ unsafe extern "system" fn snapshot_worker_thread_fn(_param: *mut core::ffi::c_vo
 ///  4. Write count + kind_counts + pop_mask into SHM.
 ///  5. Set G_ROP_WORKER_COMPLETE so Present's next CMD_ROP_SCAN returns
 ///     ready=1.
+#[no_mangle]
+#[inline(never)]
 unsafe extern "system" fn rop_scan_worker_thread_fn(param: *mut core::ffi::c_void) -> DWORD {
     // Take the shm pointer from the CreateThread param so we don't race
     // with whatever thread set G_ROP_WORKER_SHM — even if that static
@@ -5394,7 +5398,11 @@ unsafe extern "system" fn rop_scan_worker_thread_fn(param: *mut core::ffi::c_voi
     // arrives via the thread start-up sequence.
     let initial_shm = param as *mut SharedBuffer;
     if !initial_shm.is_null() {
-        shm_write_u32(initial_shm, OFF_ROP_WORKER_HB, 1);
+        // Write 0xBEEF10x markers BEFORE any other logic so we can see
+        // whether the thread even got scheduled. 0xBEEF1001 = entered,
+        // 0xBEEF1002 = about to enter main loop.
+        shm_write_u32(initial_shm, OFF_ROP_WORKER_HB, 0xBEEF1001);
+        shm_write_u32(initial_shm, OFF_ROP_WORKER_HB, 0xBEEF1002);
     }
     let mut heartbeat: u32 = 1;
     loop {
