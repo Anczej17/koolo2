@@ -1779,58 +1779,66 @@ unsafe fn dispatch_commands() {
             dispatch_snapshot_init(shm);
         }
         CMD_ROP_SCAN => {
-            // Plan B — Present handler only kicks the worker, then acks.
-            // All reads of G_ROP_GADGETS (.count, .pool) happen on the worker
-            // thread. Present touches only SHM + two `bool` flag writes, so
-            // Arxan's page-hash sentinel has nothing in the Present callback
-            // window to flip to -1 (the pattern that produced the 685-2422-AV
-            // cascade on Plan A). Worker writes results into SHM (count,
-            // kind_counts, pop_mask, ready); Present reads them from there.
+            // Plan C — inline scan with STREAMING writes.
+            //
+            // Plan B's worker thread got created (CreateThread returned
+            // a non-null handle, dbg=0xC0DE0033) but the thread body
+            // never executed — heartbeat stuck at 0 across every test.
+            // Arxan likely blocks threads whose start address is inside
+            // our injected DLL.
+            //
+            // Plan A's cascade (685-2422 AVs, fault_va=-1) was caused by
+            // the POST-SCAN pool iteration loop reading 256 kind fields
+            // from our .data in one Present callback. Remove that loop:
+            // scan_with_sink writes kind_counts + pop_mask to SHM AS each
+            // gadget is recorded. Only one .data read happens after scan
+            // (the count itself), which was always reliable in Plan A.
+            //
+            // 1 KB per Present frame (same chunking as Plan A).
             shm_write_u32(shm, OFF_ROP_DBG, 0xBEEF0001);
-            let base_va = shm_read_u64(shm, OFF_ROP_SCAN_BASE) as usize;
+            let base_va = shm_read_u64(shm, OFF_ROP_SCAN_BASE) as *const u8;
             let total   = shm_read_u64(shm, OFF_ROP_SCAN_LEN) as usize;
+            shm_write_u32(shm, OFF_ROP_DBG, 0xBEEF0002);
 
-            // Only hand a NEW request to the worker when it's idle and its
-            // last scan is consumed. If it's still running, just ack so the
-            // Go polling loop can keep checking.
-            // Volatile reads/writes on the cross-thread flags so neither
-            // the compiler nor the CPU caches them away. Without this the
-            // worker's busy-wait can hoist the !pending check out of the
-            // loop and never see our set-true.
-            let pending_ptr  = &raw mut G_ROP_REQ_PENDING;
-            let complete_ptr = &raw mut G_ROP_WORKER_COMPLETE;
-            let base_ptr     = &raw mut G_ROP_REQ_BASE;
-            let len_ptr      = &raw mut G_ROP_REQ_LEN;
-            let currently_pending = core::ptr::read_volatile(pending_ptr);
-            let currently_complete = core::ptr::read_volatile(complete_ptr);
-            let cur_base = core::ptr::read_volatile(base_ptr);
-            let cur_len  = core::ptr::read_volatile(len_ptr);
-            let same_target = cur_base == base_va && cur_len == total;
-
-            if currently_complete && same_target {
-                // Worker already produced results for this (base, len). Don't
-                // re-queue — that would wipe COMPLETE and make Go's polling
-                // loop spin forever. Present falls through to report
-                // ready=1 below.
-                shm_write_u32(shm, OFF_ROP_DBG, 0xBEEF0004);
-            } else if !currently_pending && !(currently_complete && same_target) {
-                // Fresh request — different base/len, OR previous scan not
-                // yet complete. Queue it for the worker.
-                core::ptr::write_volatile(base_ptr,     base_va);
-                core::ptr::write_volatile(len_ptr,      total);
-                core::ptr::write_volatile(complete_ptr, false);
-                core::ptr::write_volatile(pending_ptr,  true);
-                shm_write_u32(shm, OFF_ROP_DBG, 0xBEEF0002);
-            } else {
-                shm_write_u32(shm, OFF_ROP_DBG, 0xBEEF0003); // worker still busy — poll again
+            if G_ROP_SCAN_COMPLETE {
+                G_ROP_SCAN_CURSOR = 0;
+                G_ROP_SCAN_COMPLETE = false;
+                // Reset pool + SHM counters for a fresh scan.
+                G_ROP_GADGETS.count = 0;
+                for i in 0..8 {
+                    shm_write_u32(shm, OFF_ROP_KIND_COUNTS + i * 4, 0);
+                }
+                shm_write_u32(shm, OFF_ROP_POPREG_MASK, 0);
+                shm_write_u32(shm, OFF_ROP_SCAN_COUNT, 0);
             }
 
-            // READY is true when the worker finished at least one scan AND
-            // the pre-allocated buffers exist. We read is_some() on Options
-            // that were populated at init — they live forever after that, so
-            // this is cold-cached and Arxan's sentinel timing shouldn't apply.
-            let worker_done = core::ptr::read_volatile(complete_ptr);
-            let ready = worker_done
+            let remaining = total.saturating_sub(G_ROP_SCAN_CURSOR);
+            let this_chunk = if remaining > ROP_SCAN_CHUNK { ROP_SCAN_CHUNK } else { remaining };
+
+            shm_write_u32(shm, OFF_ROP_DBG, 0xBEEF0003);
+            if this_chunk > 0 {
+                G_ROP_GADGETS.scan_with_sink(
+                    base_va.add(G_ROP_SCAN_CURSOR),
+                    this_chunk,
+                    shm as *mut u8,
+                    OFF_ROP_KIND_COUNTS,
+                    OFF_ROP_POPREG_MASK,
+                    OFF_ROP_SCAN_COUNT,
+                );
+                G_ROP_SCAN_CURSOR += this_chunk;
+            }
+            shm_write_u32(shm, OFF_ROP_DBG, 0xBEEF0004);
+            if G_ROP_SCAN_CURSOR >= total {
+                G_ROP_SCAN_COMPLETE = true;
+            }
+
+            // Single volatile count read — this read pattern never triggered
+            // the cascade in Plan A. The broken read was the pool-iteration
+            // loop which is now gone.
+            let current_count: u32 = core::ptr::read_volatile(&G_ROP_GADGETS.count as *const usize) as u32;
+            shm_write_u32(shm, OFF_ROP_SCAN_COUNT, current_count);
+
+            let ready = G_ROP_SCAN_COMPLETE
                 && G_ROP_EXECUTOR.is_some()
                 && G_ROP_STACK.is_some()
                 && G_ROP_TRIGGER_BUF.is_some();

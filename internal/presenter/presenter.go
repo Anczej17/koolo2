@@ -469,8 +469,11 @@ func (p *Presenter) RopScan(baseVA uint64, length uint64) (count uint32, ready u
 	)
 	// rmod chunk is 1 KB. Use that for deadline math so the Go-side overall
 	// timeout matches the per-Present-frame work rmod actually does.
+	// Deadline assumes ~60 fps best case but our VMs regularly drop to 1 fps,
+	// so use a much more generous budget — 1 s per chunk + 10 s slack.
 	chunks := int(length/0x400) + 1
-	overallDeadline := time.Now().Add(time.Duration(chunks*overallMultiplier) * 16 * time.Millisecond).Add(10 * time.Second)
+	overallDeadline := time.Now().Add(time.Duration(chunks) * time.Second).Add(10 * time.Second)
+	_ = overallMultiplier
 
 	for time.Now().Before(overallDeadline) {
 		writeU32(p.localView, uintptr(offCommandType), CmdRopScan)

@@ -72,19 +72,61 @@ impl ROPGadgets {
     /// in-place, returns number of gadgets added. Safe to call multiple
     /// times — later scans append up to capacity, then stop.
     pub unsafe fn scan(&mut self, base: *const u8, len: usize) -> usize {
+        self.scan_with_sink(base, len, core::ptr::null_mut(), 0, 0, 0)
+    }
+
+    /// Scan variant that increments kind-count + pop-reg-mask cells in a
+    /// caller-provided SHM view as each gadget is added. Lets the Present
+    /// handler get per-kind statistics without a post-scan pool walk
+    /// (which Arxan was flipping to -1 with its page-hash sentinel).
+    ///
+    /// `kind_counts_base` points at u32[8] (Unknown,PopReg,MovRegMem,
+    /// MovMemReg,RepMovsb,RepMovsq,XchgReg,Ret). `pop_mask_off` points
+    /// at a u32 holding the cumulative `pop r<n>; ret` register mask.
+    /// `count_off` points at a u32 holding the live count. Pass null for
+    /// `shm` to disable the sink (behaves like `scan`).
+    pub unsafe fn scan_with_sink(
+        &mut self,
+        base: *const u8,
+        len: usize,
+        shm: *mut u8,
+        kind_counts_base: usize,
+        pop_mask_off: usize,
+        count_off: usize,
+    ) -> usize {
         let mut added = 0usize;
         let mut off = 0usize;
         while off < len && self.count < GADGET_POOL_SIZE {
             let b = *base.add(off);
             if b == 0xC3 || b == 0xC2 {
-                // Found a ret. Try back-decoding 1..=MAX_GADGET_LEN bytes
-                // looking for an instruction sequence that terminates here.
-                let ret_len: usize = if b == 0xC3 { 1 } else { 3 }; // ret vs ret imm16
+                let ret_len: usize = if b == 0xC3 { 1 } else { 3 };
                 let max_back = if off >= MAX_GADGET_LEN { MAX_GADGET_LEN } else { off };
                 for back in 0..=max_back {
                     let start = off - back;
-                    if self.try_classify(base.add(start), back + ret_len) {
+                    if let Some((kind, regs)) = self.try_classify_return(base.add(start), back + ret_len) {
                         added += 1;
+                        if !shm.is_null() {
+                            let idx: usize = match kind {
+                                GadgetKind::Unknown    => 0,
+                                GadgetKind::PopReg     => 1,
+                                GadgetKind::MovRegMem  => 2,
+                                GadgetKind::MovMemReg  => 3,
+                                GadgetKind::RepMovsb   => 4,
+                                GadgetKind::RepMovsq   => 5,
+                                GadgetKind::XchgReg    => 6,
+                                GadgetKind::Ret        => 7,
+                            };
+                            if idx < 8 {
+                                let p = shm.add(kind_counts_base + idx * 4) as *mut u32;
+                                core::ptr::write_unaligned(p, core::ptr::read_unaligned(p).wrapping_add(1));
+                            }
+                            if kind == GadgetKind::PopReg {
+                                let pm = shm.add(pop_mask_off) as *mut u32;
+                                core::ptr::write_unaligned(pm, core::ptr::read_unaligned(pm) | (regs as u32));
+                            }
+                            let cp = shm.add(count_off) as *mut u32;
+                            core::ptr::write_unaligned(cp, self.count as u32);
+                        }
                         break;
                     }
                 }
@@ -92,6 +134,40 @@ impl ROPGadgets {
             off += 1;
         }
         added
+    }
+
+    /// Like `try_classify` but returns (kind, regs) on success for sinks.
+    unsafe fn try_classify_return(&mut self, start: *const u8, len: usize) -> Option<(GadgetKind, u16)> {
+        if self.count >= GADGET_POOL_SIZE { return None; }
+        let mut cursor = 0usize;
+        let mut insns: [(u8, *const u8); 4] = [(0, core::ptr::null()); 4];
+        let mut n_insn = 0usize;
+        while cursor < len {
+            if n_insn >= insns.len() { return None; }
+            let info = match decode_insn(start.add(cursor), len - cursor) {
+                Some(i) => i,
+                None => return None,
+            };
+            insns[n_insn] = (info.len, start.add(cursor));
+            n_insn += 1;
+            cursor += info.len as usize;
+        }
+        if cursor != len { return None; }
+        let (_, last_ptr) = insns[n_insn - 1];
+        let last_op = *last_ptr;
+        if last_op != 0xC3 && last_op != 0xC2 { return None; }
+        let (kind, regs) = classify_prefix(&insns[..n_insn - 1]);
+        if kind == GadgetKind::Unknown && n_insn > 1 {
+            return None;
+        }
+        self.pool[self.count] = Gadget {
+            va:   start as u64,
+            len:  len as u8,
+            kind,
+            regs_touched: regs,
+        };
+        self.count += 1;
+        Some((kind, regs))
     }
 
     /// Attempt to decode instructions in [start..start+len) and, if the
