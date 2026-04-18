@@ -817,6 +817,27 @@ static mut G_ROP_TRIGGER_BUF: Option<alloc_mgr::AllocatedMemory> = None;
 const ROP_SCAN_CHUNK: usize = 0x400; // 1 KB per Present frame — stays well under d3d12 watchdog
 static mut G_ROP_SCAN_CURSOR:   usize = 0; // bytes scanned from base this round
 static mut G_ROP_SCAN_COMPLETE: bool  = false;
+
+// Plan B — worker-thread scan.
+//
+// Reading `G_ROP_GADGETS.count` or iterating `G_ROP_GADGETS.pool` from the
+// Present callback consistently triggered Arxan's page-hash sentinel — it
+// flips our rmod .data reads to 0xFFFFFFFF_FFFFFFFF, which the breakdown
+// loop then feeds into further derefs, producing the 685-2422-AV cascade
+// + D2R zombie documented in Desktop/reports/SESSION_GID_PORT_PROGRESS.md.
+//
+// The fix is to keep the Present handler out of rmod's .data entirely.
+// CMD_ROP_SCAN now just hands the request (base, len) to a dedicated
+// worker thread via these globals and immediately acks STATUS_DONE. The
+// worker does the scan, classification, and pool-breakdown write, and
+// only it touches `G_ROP_GADGETS`. Present reads the final results from
+// SHM (which the worker populates), not from rmod .data.
+static mut G_ROP_WORKER_THREAD:   HANDLE = core::ptr::null_mut();
+static mut G_ROP_REQ_BASE:        usize  = 0;
+static mut G_ROP_REQ_LEN:         usize  = 0;
+static mut G_ROP_REQ_PENDING:     bool   = false; // Present sets true, worker clears
+static mut G_ROP_WORKER_COMPLETE: bool   = false; // worker sets true after each finished scan
+static mut G_ROP_WORKER_SHM:      *mut SharedBuffer = core::ptr::null_mut();
 // Phase C: D2R offsets stored XOR-encoded in memory; per-boot key from rdtsc
 // at init prevents static-scan signatures matching the literal offset values
 // (UnitTable / Expansion / WaypointTable have well-known constants).
@@ -1119,6 +1140,22 @@ unsafe fn init_all() -> Result<(), u32> {
     G_ROP_STACK       = alloc_mgr::AllocatedMemory::new(0x1000);
     G_ROP_TRIGGER_BUF = alloc_mgr::AllocatedMemory::new(0x1000);
 
+    // 3e. Spawn the ROP scan worker thread — Plan B. Present-only access
+    // to `G_ROP_GADGETS` was consistently tripping Arxan's page-hash
+    // sentinel. Moving the scan + pool breakdown to a dedicated worker
+    // thread keeps the Present callback's footprint trivial.
+    G_ROP_WORKER_SHM = shm;
+    if G_ROP_WORKER_THREAD.is_null() {
+        G_ROP_WORKER_THREAD = CreateThread(
+            core::ptr::null(),
+            0,
+            rop_scan_worker_thread_fn,
+            core::ptr::null_mut(),
+            0,
+            core::ptr::null_mut(),
+        );
+    }
+
     // 4. Signal ready.
     shm_write_u32(shm, OFF_DEBUG_STEP, 0x0F); // all done
     shm_write_u32(shm, OFF_READY_FLAG, 1);
@@ -1381,13 +1418,20 @@ unsafe fn install_detour(present_addr: usize, shm: *mut SharedBuffer) -> Result<
 unsafe fn uninstall_present_detour() {
     // Stop walker worker thread first so it can't race against the SHM
     // being nulled and the Present bytes being restored. Bounded wait:
-    // worker sleeps 30 ms between iterations so 200 ms is plenty.
+    // worker sleeps 30 ms between iterations so 200 ms is plenty. Same
+    // G_WORKER_STOP also signals the ROP scan worker.
+    G_WORKER_STOP = true;
     if !G_WORKER_THREAD.is_null() {
-        G_WORKER_STOP = true;
         let _ = WaitForSingleObject(G_WORKER_THREAD, 200);
         CloseHandle(G_WORKER_THREAD);
         G_WORKER_THREAD = core::ptr::null_mut();
         G_WORKER_SHM = core::ptr::null_mut();
+    }
+    if !G_ROP_WORKER_THREAD.is_null() {
+        let _ = WaitForSingleObject(G_ROP_WORKER_THREAD, 200);
+        CloseHandle(G_ROP_WORKER_THREAD);
+        G_ROP_WORKER_THREAD = core::ptr::null_mut();
+        G_ROP_WORKER_SHM = core::ptr::null_mut();
     }
     if G_PRESENT_ADDR == 0 {
         return; // never installed
@@ -1686,104 +1730,44 @@ unsafe fn dispatch_commands() {
             dispatch_snapshot_init(shm);
         }
         CMD_ROP_SCAN => {
-            // Chunked scan: do at most ROP_SCAN_CHUNK bytes per Present frame
-            // so the callback never blocks long enough to trigger d3d12's
-            // hang-watchdog. Caller re-issues CMD_ROP_SCAN with the same
-            // (base, len) — G_ROP_SCAN_CURSOR tracks progress; COMPLETE flag
-            // signals end of range.
-            //
-            // DBG markers written to OFF_ROP_DBG so if this handler hangs/AVs
-            // the Go-side timeout can report last-seen state.
-            shm_write_u32(shm, OFF_ROP_DBG, 0xAAAA0001);
-            let base_va = shm_read_u64(shm, OFF_ROP_SCAN_BASE) as *const u8;
+            // Plan B — Present handler only kicks the worker, then acks.
+            // All reads of G_ROP_GADGETS (.count, .pool) happen on the worker
+            // thread. Present touches only SHM + two `bool` flag writes, so
+            // Arxan's page-hash sentinel has nothing in the Present callback
+            // window to flip to -1 (the pattern that produced the 685-2422-AV
+            // cascade on Plan A). Worker writes results into SHM (count,
+            // kind_counts, pop_mask, ready); Present reads them from there.
+            shm_write_u32(shm, OFF_ROP_DBG, 0xBEEF0001);
+            let base_va = shm_read_u64(shm, OFF_ROP_SCAN_BASE) as usize;
             let total   = shm_read_u64(shm, OFF_ROP_SCAN_LEN) as usize;
-            shm_write_u32(shm, OFF_ROP_DBG, 0xAAAA0002);
 
-            // Reset cursor when caller starts a fresh scan (base changed or
-            // previous scan complete). We detect a fresh scan by cursor==0 OR
-            // by the complete flag being set (caller restarts after query).
-            if G_ROP_SCAN_COMPLETE {
-                G_ROP_SCAN_CURSOR = 0;
-                G_ROP_SCAN_COMPLETE = false;
+            // Only hand a NEW request to the worker when it's idle and its
+            // last scan is consumed. If it's still running, just ack so the
+            // Go polling loop can keep checking.
+            if !G_ROP_REQ_PENDING {
+                // Fresh request when the previous scan completed OR the base
+                // we were asked to scan changed. Consumer clears
+                // G_ROP_WORKER_COMPLETE by issuing a new base; here we always
+                // accept the new params.
+                G_ROP_REQ_BASE      = base_va;
+                G_ROP_REQ_LEN       = total;
+                G_ROP_WORKER_COMPLETE = false;
+                G_ROP_REQ_PENDING   = true;
+                shm_write_u32(shm, OFF_ROP_DBG, 0xBEEF0002);
+            } else {
+                shm_write_u32(shm, OFF_ROP_DBG, 0xBEEF0003); // worker still busy — poll again
             }
 
-            let remaining = total.saturating_sub(G_ROP_SCAN_CURSOR);
-            let this_chunk = if remaining > ROP_SCAN_CHUNK { ROP_SCAN_CHUNK } else { remaining };
-
-            shm_write_u32(shm, OFF_ROP_DBG, 0xAAAA0003);
-            if this_chunk > 0 {
-                // No pre-scan VirtualQuery — both the cached page_readable
-                // and an inline VirtualQuery blocked dispatch under Present
-                // contention in live tests (dbg stuck at 0xAAAA0003 for >2 s).
-                // crash_diag_veh catches AVs from unmapped pages; callers
-                // should only scan regions they know (or strongly suspect)
-                // are committed .text. The 16 KB live run at 0x7FF679AB0000
-                // successfully returned 118 gadgets with this approach.
-                G_ROP_GADGETS.scan(base_va.add(G_ROP_SCAN_CURSOR), this_chunk);
-                G_ROP_SCAN_CURSOR += this_chunk;
-            }
-            shm_write_u32(shm, OFF_ROP_DBG, 0xAAAA0004);
-            if G_ROP_SCAN_CURSOR >= total {
-                G_ROP_SCAN_COMPLETE = true;
-            }
-
-            // NOTE: Lazy alloc of Executor + stack + trigger buffer moved
-            // to init_worker thread (see DllMain). Allocating 64+4+4 KB
-            // of PAGE_EXECUTE_READWRITE from inside Present callback was
-            // consistently triggering D2R crashes — suspected Arxan memory
-            // scanner flagging mid-frame RWX allocs as injection pattern.
-            // Worker-thread approach does it once during DllMain after a
-            // settle delay; scan command just CHECKS `is_some()`.
-            shm_write_u32(shm, OFF_ROP_DBG, 0xAAAA0008);
-
-            // Read count into a LOCAL variable via raw pointer to avoid any
-            // Rust codegen that would add guard checks. This field lives in
-            // rmod's .data — the previous cascade-AV (fault_va = -1) points
-            // at this exact read, so we keep the volatile form to reduce
-            // reorder surface even though rmod's .data is single-writer.
-            let current_count: u32 = core::ptr::read_volatile(&G_ROP_GADGETS.count as *const usize) as u32;
-            shm_write_u32(shm, OFF_ROP_SCAN_COUNT, current_count);
-            shm_write_u32(shm, OFF_ROP_DBG, 0xAAAA0009);
-
-            // Breakdown only runs on the FINAL scan chunk — skipped on
-            // intermediate chunks to keep per-frame budget small.
-            if G_ROP_SCAN_COMPLETE {
-                let mut kind_counts = [0u32; 8];
-                let mut pop_mask: u16 = 0;
-                let gcount = current_count as usize;
-                if gcount <= rop_gadgets::GADGET_POOL_SIZE {
-                    let pool_ptr = G_ROP_GADGETS.pool.as_ptr();
-                    for i in 0..gcount {
-                        let g = pool_ptr.add(i);
-                        let kind_val = core::ptr::read(&(*g).kind);
-                        let regs = core::ptr::read(&(*g).regs_touched);
-                        let idx: usize = match kind_val {
-                            rop_gadgets::GadgetKind::Unknown    => 0,
-                            rop_gadgets::GadgetKind::PopReg     => { pop_mask |= regs; 1 },
-                            rop_gadgets::GadgetKind::MovRegMem  => 2,
-                            rop_gadgets::GadgetKind::MovMemReg  => 3,
-                            rop_gadgets::GadgetKind::RepMovsb   => 4,
-                            rop_gadgets::GadgetKind::RepMovsq   => 5,
-                            rop_gadgets::GadgetKind::XchgReg    => 6,
-                            rop_gadgets::GadgetKind::Ret        => 7,
-                        };
-                        if idx < 8 { kind_counts[idx] += 1; }
-                    }
-                }
-                shm_write_u32(shm, OFF_ROP_DBG, 0xAAAA000A);
-                for i in 0..8 {
-                    shm_write_u32(shm, OFF_ROP_KIND_COUNTS + i * 4, kind_counts[i]);
-                }
-                shm_write_u32(shm, OFF_ROP_POPREG_MASK, pop_mask as u32);
-                shm_write_u32(shm, OFF_ROP_DBG, 0xAAAA000B);
-            }
-
-            let ready = G_ROP_SCAN_COMPLETE
+            // READY is true when the worker finished at least one scan AND
+            // the pre-allocated buffers exist. We read is_some() on Options
+            // that were populated at init — they live forever after that, so
+            // this is cold-cached and Arxan's sentinel timing shouldn't apply.
+            let ready = G_ROP_WORKER_COMPLETE
                 && G_ROP_EXECUTOR.is_some()
                 && G_ROP_STACK.is_some()
                 && G_ROP_TRIGGER_BUF.is_some();
             shm_write_u32(shm, OFF_ROP_READY, if ready { 1 } else { 0 });
-            shm_write_u32(shm, OFF_ROP_DBG, 0xAAAA000F); // final marker — full path completed
+            shm_write_u32(shm, OFF_ROP_DBG, 0xBEEF000F);
             shm_write_u32(shm, OFF_STATUS_FLAG, STATUS_DONE);
             shm_write_u32(shm, OFF_COMMAND_FLAG, 0);
         }
@@ -5319,6 +5303,93 @@ unsafe extern "system" fn snapshot_worker_thread_fn(_param: *mut core::ffi::c_vo
             continue;
         }
         snapshot_walker_scan(shm);
+    }
+    0
+}
+
+/// ROP scan worker — Plan B. Consumes (G_ROP_REQ_BASE, G_ROP_REQ_LEN)
+/// requests queued by the Present-thread CMD_ROP_SCAN handler and does the
+/// full scan + pool breakdown off the Present callback. The handler never
+/// reads G_ROP_GADGETS after this is live, which keeps Arxan's page-hash
+/// sentinel away from rmod's .data in the Present timing window.
+///
+/// Flow per request:
+///  1. Clear pending flag first so a concurrent re-request still wakes us.
+///  2. Reset pool + scan base/len.
+///  3. Iterate pool, count kinds, mask popable regs.
+///  4. Write count + kind_counts + pop_mask into SHM.
+///  5. Set G_ROP_WORKER_COMPLETE so Present's next CMD_ROP_SCAN returns
+///     ready=1.
+unsafe extern "system" fn rop_scan_worker_thread_fn(_param: *mut core::ffi::c_void) -> DWORD {
+    loop {
+        if G_WORKER_STOP {
+            break;
+        }
+        Sleep(30);
+        let shm = G_ROP_WORKER_SHM;
+        if shm.is_null() {
+            continue;
+        }
+        if !G_ROP_REQ_PENDING {
+            continue;
+        }
+
+        // Snapshot request + clear the pending flag so a follow-up request
+        // can be queued without racing with our in-flight work.
+        let base = G_ROP_REQ_BASE as *const u8;
+        let total = G_ROP_REQ_LEN;
+        G_ROP_REQ_PENDING = false;
+        shm_write_u32(shm, OFF_ROP_DBG, 0xCAFE0001);
+
+        // Reset pool for the new range, then scan. `scan` reads D2R .text
+        // and writes into G_ROP_GADGETS — both touches happen here, off
+        // the Present thread. crash_diag_veh still catches unmapped-page
+        // AVs but those are D2R-side, not rmod-side, so won't cascade the
+        // same way.
+        G_ROP_GADGETS.count = 0;
+        if total > 0 {
+            G_ROP_GADGETS.scan(base, total);
+        }
+        shm_write_u32(shm, OFF_ROP_DBG, 0xCAFE0002);
+
+        // Pool breakdown — written to SHM so Present doesn't need to read
+        // rmod .data when returning the summary.
+        let mut kind_counts = [0u32; 8];
+        let mut pop_mask: u16 = 0;
+        let gcount = G_ROP_GADGETS.count;
+        if gcount <= rop_gadgets::GADGET_POOL_SIZE {
+            let pool_ptr = G_ROP_GADGETS.pool.as_ptr();
+            for i in 0..gcount {
+                let g = pool_ptr.add(i);
+                let kind_val = core::ptr::read(&(*g).kind);
+                let regs = core::ptr::read(&(*g).regs_touched);
+                let idx: usize = match kind_val {
+                    rop_gadgets::GadgetKind::Unknown    => 0,
+                    rop_gadgets::GadgetKind::PopReg     => { pop_mask |= regs; 1 },
+                    rop_gadgets::GadgetKind::MovRegMem  => 2,
+                    rop_gadgets::GadgetKind::MovMemReg  => 3,
+                    rop_gadgets::GadgetKind::RepMovsb   => 4,
+                    rop_gadgets::GadgetKind::RepMovsq   => 5,
+                    rop_gadgets::GadgetKind::XchgReg    => 6,
+                    rop_gadgets::GadgetKind::Ret        => 7,
+                };
+                if idx < 8 { kind_counts[idx] += 1; }
+            }
+        }
+        shm_write_u32(shm, OFF_ROP_DBG, 0xCAFE0003);
+
+        // Publish results into SHM — Present only reads from SHM from
+        // here on, never from rmod's .data.
+        shm_write_u32(shm, OFF_ROP_SCAN_COUNT, gcount as u32);
+        for i in 0..8 {
+            shm_write_u32(shm, OFF_ROP_KIND_COUNTS + i * 4, kind_counts[i]);
+        }
+        shm_write_u32(shm, OFF_ROP_POPREG_MASK, pop_mask as u32);
+
+        // Mark this request complete AFTER all results are in SHM so
+        // Present's ready=... check sees a consistent snapshot.
+        G_ROP_WORKER_COMPLETE = true;
+        shm_write_u32(shm, OFF_ROP_DBG, 0xCAFE000F);
     }
     0
 }
