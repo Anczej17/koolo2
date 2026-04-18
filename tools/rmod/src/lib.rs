@@ -391,6 +391,12 @@ const OFF_ROP_DBG:          usize = 0x3038;  // u32 — step marker (0xAAAA00xx)
 const OFF_ROP_KIND_COUNTS:  usize = 0x303C;  // u32[8] — GadgetKind breakdown: [Unknown,PopReg,MovRegMem,MovMemReg,RepMovsb,RepMovsq,XchgReg,Ret]
 const OFF_ROP_POPREG_MASK:  usize = 0x305C;  // u16 — bitmask of popable regs in pool (bit0=rax..bit15=r15)
 const OFF_ROP_WORKER_HB:    usize = 0x3060;  // u32 — ROP worker thread heartbeat counter (Plan B diagnostic)
+// GID-6 scratch buffer. Rmod's CMD_ROP_READ memcpys D2R VAs into this area;
+// app.exe reads back from the same SHM offset. 4 KB is enough for any single
+// D2R struct the bot reads per tick (PlayerUnit chain = ~0x200 B, inventory
+// rows ~0x100 B each).
+const OFF_ROP_READ_BUFFER:  usize = 0x8000;  // u8[0x1000] — ROP-mirrored D2R bytes
+const OFF_ROP_READ_BUFFER_SIZE: usize = 0x1000;
 
 // HWBP commands — match Go protocol.go (CmdHwbpInstall=6 etc).
 const CMD_HWBP_INSTALL:   u32 = 6;          // install DR0=target on every D2R thread
@@ -1865,8 +1871,22 @@ unsafe fn dispatch_commands() {
             shm_write_u32(shm, OFF_ROP_DBG, 0xBBBB0001);
 
             let src_va = shm_read_u64(shm, OFF_ROP_READ_SRC) as usize;
-            let dst_va = shm_read_u64(shm, OFF_ROP_READ_DST) as usize;
+            let mut dst_va = shm_read_u64(shm, OFF_ROP_READ_DST) as usize;
             let len    = shm_read_u64(shm, OFF_ROP_READ_LEN) as usize;
+            // Sentinel: dst_va == 0 means "use internal SHM scratch buffer".
+            // This is the GID-6 production path — Process.ReadBytesFromMemory
+            // calls RopReadToScratch which sets DST=0 and reads from
+            // OffRopReadBuffer after the chain completes. Clamp to buffer
+            // size so the chain can't run past the scratch region.
+            if dst_va == 0 {
+                if len > OFF_ROP_READ_BUFFER_SIZE {
+                    shm_write_u32(shm, OFF_ROP_READ_STATUS, 4); // too big for scratch
+                    shm_write_u32(shm, OFF_STATUS_FLAG, STATUS_DONE);
+                    shm_write_u32(shm, OFF_COMMAND_FLAG, 0);
+                    return;
+                }
+                dst_va = (shm as *mut u8).add(OFF_ROP_READ_BUFFER) as usize;
+            }
 
             if G_ROP_GADGETS.count == 0
                 || G_ROP_EXECUTOR.is_none()

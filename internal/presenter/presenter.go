@@ -576,6 +576,62 @@ func (p *Presenter) RopWorkerHeartbeat() (uint32, error) {
 // status (0=ok, 1=gadget-pool-missing, 2=exec-failed — trigger encoding
 // not yet verified and this path is gated to always return 2 until unit-
 // tested). Do NOT call from hot paths until flip-ready.
+// RopReadToScratch issues CMD_ROP_READ with dst = SHM scratch buffer and
+// returns the copied bytes directly. This is the path Process.ReadBytes
+// takes when ROP_READ=1 — no need for the caller to allocate a dst, and
+// the scratch offset is an rmod-internal detail.
+//
+// Size must be <= OffRopReadBufferSize (0x1000). Status !=0 returns err;
+// caller should fall back to RPM on error.
+func (p *Presenter) RopReadToScratch(srcVA uintptr, size uint32) ([]byte, error) {
+	if size == 0 || size > uint32(OffRopReadBufferSize) {
+		return nil, fmt.Errorf("rop read size out of range: %d", size)
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if !p.initialized || p.localView == nil {
+		return nil, fmt.Errorf("presenter not initialized")
+	}
+
+	// Write command params. DST is the SHM absolute VA on the rmod side;
+	// we encode it as an offset by passing 0 and having rmod resolve via
+	// G_SHM+OffRopReadBuffer. Keep the size in OffRopReadLen.
+	writeU64(p.localView, uintptr(OffRopReadSrc), uint64(srcVA))
+	writeU64(p.localView, uintptr(OffRopReadDst), 0) // sentinel: use internal scratch
+	writeU64(p.localView, uintptr(OffRopReadLen), uint64(size))
+	writeU32(p.localView, uintptr(offCommandType), CmdRopRead)
+	writeU32(p.localView, uintptr(offStatusFlag), StatusBusy)
+	writeU32(p.localView, uintptr(offCommandFlag), 1)
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		sflag := readU32(p.localView, uintptr(offStatusFlag))
+		if sflag == StatusDone {
+			break
+		}
+		if sflag == StatusError {
+			return nil, fmt.Errorf("rop read rmod status=ERROR")
+		}
+		time.Sleep(500 * time.Microsecond)
+	}
+	if readU32(p.localView, uintptr(offStatusFlag)) != StatusDone {
+		return nil, fmt.Errorf("rop read timeout")
+	}
+	status := readU32(p.localView, uintptr(OffRopReadStatus))
+	if status != 0 {
+		return nil, fmt.Errorf("rop read status=%d", status)
+	}
+
+	// Copy out of the SHM scratch buffer. localView is unsafe.Pointer to the
+	// mapped file section base; bytes live at base+OffRopReadBuffer.
+	out := make([]byte, size)
+	base := uintptr(p.localView) + uintptr(OffRopReadBuffer)
+	for i := uint32(0); i < size; i++ {
+		out[i] = *(*byte)(unsafe.Pointer(base + uintptr(i)))
+	}
+	return out, nil
+}
+
 func (p *Presenter) RopRead(srcVA, dstVA, length uint64) (status uint32, err error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()

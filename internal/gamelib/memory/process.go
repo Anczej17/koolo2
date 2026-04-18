@@ -42,6 +42,17 @@ type Process struct {
 	externalForceClick func(x, y int32) error
 	externalCallFn    func(fnAddr uintptr, args ...uintptr) (uint64, error)
 	externalWriteMem  func(destAddr uintptr, data []byte) error
+	// externalRopRead, when non-nil and ropReadEnabled flips on, routes
+	// ReadBytesFromMemory through rmod's CMD_ROP_READ path. rmod uses D2R's
+	// own `rep movsb; ret` gadgets to copy `length` bytes from `src` (a D2R
+	// VA) into the SHM scratch buffer at OFF_ROP_READ_BUFFER; app.exe then
+	// reads from its local SHM mapping at the same offset. No cross-process
+	// ReadProcessMemory is issued.
+	//
+	// Signature: (src D2R VA, length) → (bytes, error). Length capped at
+	// OFF_ROP_READ_BUFFER_SIZE (4 KB); caller chunks above that.
+	externalRopRead   func(src uintptr, length uint32) ([]byte, error)
+	ropReadEnabled    atomic.Bool
 
 	// Layer 3: per-tick chunk cache. When STEALTH_READ=1, field reads <=256B
 	// are served from this cache instead of issuing individual RPMs. Fresh
@@ -262,6 +273,22 @@ func (p *Process) SetExternalWriteMem(fn func(uintptr, []byte) error) {
 	p.externalWriteMem = fn
 }
 
+// SetExternalRopRead installs the GID-6 ROP-chain memcpy reader. Once set,
+// enable the path with process.EnableRopRead(). The flag is checked per read
+// so the toggle is cheap; callers can flip it mid-session without races.
+func (p *Process) SetExternalRopRead(fn func(src uintptr, length uint32) ([]byte, error)) {
+	p.sendPacketMu.Lock()
+	defer p.sendPacketMu.Unlock()
+	p.externalRopRead = fn
+}
+
+// EnableRopRead flips the ropRead path on. ReadBytesFromMemory will prefer
+// ROP once set. Off by default so bot startup stays on RPM until the pool
+// is harvested and /debug/rop-read validates end-to-end.
+func (p *Process) EnableRopRead(on bool) {
+	p.ropReadEnabled.Store(on)
+}
+
 func (p *Process) CallFn(fnAddr uintptr, args ...uintptr) (uint64, error) {
 	p.sendPacketMu.Lock()
 	fn := p.externalCallFn
@@ -417,6 +444,24 @@ func ReadMemoryChunked(handle windows.Handle, baseAddress uintptr, size uint32) 
 }
 
 func (p *Process) ReadBytesFromMemory(address uintptr, size uint) []byte {
+	// GID-6: prefer ROP-chain memcpy when enabled. rmod's rep-movsb gadget
+	// runs inside D2R so no cross-process ReadProcessMemory is issued —
+	// Warden sees zero RPM on paths routed through here. Falls back to the
+	// stealth RPM chain on any error (pool miss, chain fail, length > 4 KB
+	// scratch).
+	if p.ropReadEnabled.Load() && size > 0 && size <= 0x1000 {
+		p.sendPacketMu.Lock()
+		fn := p.externalRopRead
+		p.sendPacketMu.Unlock()
+		if fn != nil {
+			if out, err := fn(address, uint32(size)); err == nil && len(out) == int(size) {
+				return out
+			}
+			// On error / size mismatch, silently fall through to the RPM
+			// path below so a transient rmod hiccup doesn't stall the bot.
+		}
+	}
+
 	if StealthEnabled() && size > 0 && size <= 256 {
 		if cached, ok := p.chunkLookup(address, size); ok {
 			return cached

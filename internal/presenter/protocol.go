@@ -325,6 +325,10 @@ const (
 	OffRopKindCounts  = 0x303C // u32[8] — [Unknown,PopReg,MovRegMem,MovMemReg,RepMovsb,RepMovsq,XchgReg,Ret]
 	OffRopPopRegMask  = 0x305C // u32 — bitmask of popable regs in pool (bit0=rax..bit15=r15)
 	OffRopWorkerHB    = 0x3060 // u32 — ROP worker thread heartbeat counter (Plan B diagnostic)
+	// GID-6 scratch buffer mirrored in SHM. rmod's CMD_ROP_READ_SCRATCH
+	// writes here; Go-side reads from its own SHM view at the same offset.
+	OffRopReadBuffer     = 0x8000 // u8[0x1000] — ROP-mirrored D2R bytes
+	OffRopReadBufferSize = 0x1000
 
 	OffSnapRegions     = 0x4200 // RegionEntry[1024] × 16 B  (B3: grown 256→1024 for monster/object/entrance walker budget)
 	SnapRegionMax      = 1024

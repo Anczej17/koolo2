@@ -256,30 +256,75 @@ impl ROPGadgets {
     }
 }
 
+/// Try to decode a single `pop r64` at `p`, walking past any REX prefix.
+/// Returns Some(reg_bit) if `p` starts with a pop r64 (possibly REX-
+/// prefixed), else None.
+unsafe fn parse_pop_reg(p: *const u8) -> Option<u16> {
+    let mut cursor = p;
+    let mut high_reg = false;
+    // Consume a single REX prefix if present. REX range is 0x40..=0x4F.
+    // Only the REX.B bit (low bit of REX) promotes the pop target to r8-r15;
+    // REX.W / REX.R are accepted and ignored.
+    if *cursor >= 0x40 && *cursor <= 0x4F {
+        high_reg = (*cursor & 0x01) != 0;
+        cursor = cursor.add(1);
+    }
+    let op = *cursor;
+    if op >= 0x58 && op <= 0x5F {
+        let reg_low = op - 0x58;
+        let reg_idx = if high_reg { reg_low + 8 } else { reg_low };
+        return Some(1u16 << reg_idx);
+    }
+    None
+}
+
 /// Classify a sequence of 0..=3 instructions preceding a ret.
 unsafe fn classify_prefix(insns: &[(u8, *const u8)]) -> (GadgetKind, u16) {
     if insns.is_empty() { return (GadgetKind::Ret, 0); }
+
+    // Multi-pop combo: two or more pop r64 in a row ending with ret → merged
+    // PopReg with the union of reg bits set. build_memcpy can consume this
+    // because it only needs the right bits in the mask, regardless of how
+    // many pops it took.
+    if insns.len() >= 2 {
+        let mut combined: u16 = 0;
+        let mut all_pops = true;
+        for &(_, p) in insns.iter() {
+            if let Some(bit) = parse_pop_reg(p) {
+                combined |= bit;
+            } else {
+                all_pops = false;
+                break;
+            }
+        }
+        if all_pops && combined != 0 {
+            return (GadgetKind::PopReg, combined);
+        }
+    }
+
     if insns.len() == 1 {
         let (_, p) = insns[0];
-        // pop r64: 58+rd or REX.B 58+rd
-        let (op, rex_b) = if *p >= 0x41 && *p <= 0x41 {
-            // REX.B prefix, next byte is opcode.
-            (*p.add(1), true)
-        } else {
-            (*p, false)
-        };
-        if op >= 0x58 && op <= 0x5F {
-            let reg_low = op - 0x58;
-            let reg_idx = if rex_b { reg_low + 8 } else { reg_low };
-            return (GadgetKind::PopReg, 1u16 << reg_idx);
+        // pop r64 (with or without any REX prefix)
+        if let Some(bit) = parse_pop_reg(p) {
+            return (GadgetKind::PopReg, bit);
         }
-        // rep movsb: F3 A4
+        // rep movsb: F3 A4, optionally with REX
         if *p == 0xF3 && *p.add(1) == 0xA4 {
+            return (GadgetKind::RepMovsb, 0);
+        }
+        // REX + rep movsb: 40..=4F F3 A4
+        if *p >= 0x40 && *p <= 0x4F && *p.add(1) == 0xF3 && *p.add(2) == 0xA4 {
             return (GadgetKind::RepMovsb, 0);
         }
         // rep movsq: F3 48 A5 (REX.W + movsq)
         if *p == 0xF3 && *p.add(1) == 0x48 && *p.add(2) == 0xA5 {
             return (GadgetKind::RepMovsq, 0);
+        }
+        // movsb without rep: A4 (classified as RepMovsb for build_memcpy
+        // purposes — caller sets ecx/rcx via a preceding pop rcx; ret, so
+        // a bare movsb + a loop gadget gives equivalent memcpy behaviour).
+        if *p == 0xA4 {
+            return (GadgetKind::RepMovsb, 0);
         }
         // mov r64, [r64]: REX.W 8B /r with mod=00
         // Fast path: opcode 8B, modrm with mod=00 and rm != 100 and rm != 101.

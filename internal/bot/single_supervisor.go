@@ -1650,6 +1650,15 @@ func (s *SinglePlayerSupervisor) initClaudePresenter() {
 	gi.SetPresenter(pres)
 	gr.Process.SetExternalCallFn(pres.CallFn)
 	gr.Process.SetExternalWriteMem(pres.WriteMem)
+	// GID-6 ROP read wiring. Flag off by default; enable via ROP_READ=1 env
+	// (gated below after the pool is harvested) OR live via /debug/rop-read
+	// validation. process.ReadBytesFromMemory falls back to stealth RPM on
+	// any error, so setting the hook is safe even before the pool is ready.
+	gr.Process.SetExternalRopRead(pres.RopReadToScratch)
+	if os.Getenv("ROP_READ") == "1" {
+		gr.Process.EnableRopRead(true)
+		s.bot.ctx.Logger.Info("Claude mode: ROP_READ=1 — reads route through CMD_ROP_READ (fallback to RPM on error)")
+	}
 	// Keep classic APC for SendPacket (game-state opcodes like 0x3C).
 	// UI sender: DON'T use rmod (render thread crashes D2R).
 	// Instead, Process.SendUIPacket falls back to APC-based SendUIPacketViaMainThread.
