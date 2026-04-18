@@ -696,15 +696,18 @@ func (mng *SupervisorManager) buildSupervisor(supervisorName string, logger *slo
 			utils.Sleep(5000)
 		}
 
-		gameTitle := supervisorName
-		// Take the *uint16 into a local so the GC keeps the backing array
-		// alive across the lazy-DLL call. Go special-cases uintptr(unsafe.Pointer(x))
-		// in call arg lists, but this pattern has crashed with rip near-zero on
-		// the Hyper-V VM — likely a lazy-DLL resolution interacting with GC. Keep
-		// the local + explicit runtime.KeepAlive below.
-		titlePtr, _ := syscall.UTF16PtrFromString(gameTitle)
-		winproc.SetWindowText.Call(uintptr(hwnd), uintptr(unsafe.Pointer(titlePtr)))
-		runtime.KeepAlive(titlePtr)
+		// Async per the main-path fix — SendMessage blocks on an unresponsive
+		// D2R window during restart too.
+		go func(h win.HWND, title string) {
+			defer func() {
+				if r := recover(); r != nil {
+					mng.logger.Warn("SetWindowText restart goroutine panic", slog.Any("panic", r))
+				}
+			}()
+			titlePtr, _ := syscall.UTF16PtrFromString(title)
+			winproc.SetWindowText.Call(uintptr(h), uintptr(unsafe.Pointer(titlePtr)))
+			runtime.KeepAlive(titlePtr)
+		}(hwnd, supervisorName)
 
 		var err error
 		if wasClaudeMode {
@@ -717,10 +720,22 @@ func (mng *SupervisorManager) buildSupervisor(supervisorName string, logger *slo
 		}
 	}
 
-	gameTitle := supervisorName
-	titlePtr2, _ := syscall.UTF16PtrFromString(gameTitle)
-	winproc.SetWindowText.Call(uintptr(hwnd), uintptr(unsafe.Pointer(titlePtr2)))
-	runtime.KeepAlive(titlePtr2)
+	// SetWindowText uses WM_SETTEXT via SendMessage on a cross-process HWND —
+	// blocks until the target window pumps messages. If D2R is still in early
+	// init (splash, Bnet login, GPU post-OK warmup) its window hasn't started
+	// its message loop yet, so the sync call stalls buildSupervisor forever.
+	// Fire-and-forget in a goroutine: title eventually gets set once D2R is
+	// responsive. Startup path is no longer gated on D2R message-pump state.
+	go func(h win.HWND, title string) {
+		defer func() {
+			if r := recover(); r != nil {
+				mng.logger.Warn("SetWindowText goroutine panic", slog.Any("panic", r))
+			}
+		}()
+		titlePtr2, _ := syscall.UTF16PtrFromString(title)
+		winproc.SetWindowText.Call(uintptr(h), uintptr(unsafe.Pointer(titlePtr2)))
+		runtime.KeepAlive(titlePtr2)
+	}(hwnd, supervisorName)
 	crashDetector := game.NewCrashDetector(supervisorName, int32(pid), uintptr(hwnd), mng.logger, restartFunc)
 
 	return supervisor, crashDetector, nil

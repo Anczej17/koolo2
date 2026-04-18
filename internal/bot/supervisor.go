@@ -133,9 +133,30 @@ func (s *baseSupervisor) logGameStart(runs []run.Run) {
 func (s *baseSupervisor) waitUntilCharacterSelectionScreen() error {
 	s.bot.ctx.Logger.Info("Waiting for character selection screen...")
 
-	for !s.bot.ctx.GameReader.IsInCharacterSelectionScreen() {
-		// Spam left click to skip to the char select screen
-		s.bot.ctx.HID.Click(game.LeftButton, 100, 100)
+	// Cycle through 3 input types per iteration (every ~750 ms):
+	//  1. (100,100) left click — safe corner, dismisses most intro overlays
+	//  2. (640,602) left click — hits Continue on Gamma/ScreenSpace/ColorBlind
+	//     calibration dialogs D2R re-shows on every fresh boot without a persisted
+	//     calibration state
+	//  3. VK_G (0x47) — tiny mod's "PRESS G TO PLAY" custom char-select flow
+	//     bypasses vanilla's click-PLAY-button + click-difficulty sequence and
+	//     jumps straight into the last-played character's game. Also harmless on
+	//     vanilla char select (G maps to a chat shortcut in-game, doesn't affect
+	//     menu UI).
+	// InGame() short-circuits because tiny-mod's G jumps straight from title
+	// screen to in-game with no separate char-select panel — we detect success
+	// via InGame, not a specific "char select panel visible" signal.
+	clickIdx := 0
+	for !s.bot.ctx.GameReader.IsInCharacterSelectionScreen() && !s.bot.ctx.GameReader.InGame() {
+		switch clickIdx % 3 {
+		case 0:
+			s.bot.ctx.HID.Click(game.LeftButton, 100, 100)
+		case 1:
+			s.bot.ctx.HID.Click(game.LeftButton, 640, 602)
+		case 2:
+			s.bot.ctx.HID.PressKey(0x47) // VK_G — tiny mod "PRESS G TO PLAY"
+		}
+		clickIdx++
 		time.Sleep(250 * time.Millisecond)
 	}
 

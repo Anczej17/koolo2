@@ -502,8 +502,20 @@ func (gd *GameReader) IsInLobby() bool {
 }
 
 func (gd *GameReader) IsInCharacterSelectionScreen() bool {
+	// Vanilla D2R path: CharacterSelectPanel registers as a visible root panel.
 	panel := gd.GetPanel("CharacterSelectPanel")
-	return panel.PanelName != "" && panel.PanelEnabled && panel.PanelVisible
+	if panel.PanelName != "" && panel.PanelEnabled && panel.PanelVisible {
+		return true
+	}
+	// Mod tiny (and similar mods) overlay their offline-profile list on top
+	// of TitleScreenPanel without registering a separate CharacterSelectPanel
+	// root. SelectedCharName is populated as soon as a profile is highlighted
+	// in the list — empty on raw title screen, non-empty once the bot's
+	// click-spam lands the cursor on an offline profile.
+	if gd.GetSelectedCharacterName() != "" {
+		return true
+	}
+	return false
 }
 
 func (gd *GameReader) IsInCharacterCreationScreen() bool {

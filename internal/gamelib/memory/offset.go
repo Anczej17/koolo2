@@ -38,12 +38,12 @@ func calculateOffsets(_ *Process) Offset {
 	fpsOffset := uintptr(0x1D59414)
 	keyBindingsOffset := uintptr(0x19D25B4)
 	keyBindingsSkillsOffset := uintptr(0x1DFB190)
-	questInfoOffset := uintptr(0x1EC7388)              // behavior verified by kolega
+	questInfoOffset := uintptr(0x1EC3D58)              // 2026-04-19 confirmed via offset_resolver (aob-primary)
 	tzOffset := uintptr(0x25B1B80)                     // behavior verified by kolega
 	tzOfflineOffset := uintptr(0x25B2300)              // offline TZ array
 	pingOffset := uintptr(0x1DFA4E8)
 	legacyGfxOffset := uintptr(0x1EC3FC6)
-	charDataOffset := uintptr(0x1DFE638)               // behavior verified by kolega
+	charDataOffset := uintptr(0x1DFE678)               // 2026-04-19 confirmed via offset_resolver (aob-primary, was 0x1DFE638)
 	selectedCharNameOffset := uintptr(0x1D50215)       // verified
 	lastGameNameOffset := uintptr(0x25FA4E0)           // verified
 	lastGamePasswordOffset := uintptr(0x25FA538)       // verified

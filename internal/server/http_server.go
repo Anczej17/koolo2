@@ -992,6 +992,7 @@ func (s *HttpServer) Listen(port int) error {
 	http.HandleFunc("/debug/npcs", s.debugNPCs)
 	http.HandleFunc("/debug/inventory", s.debugInventory)
 	http.HandleFunc("/debug/screenshot", s.debugScreenshot)
+	http.HandleFunc("/debug/panels", s.debugPanels)
 	http.HandleFunc("/debug/readmem", s.debugReadMem)
 	http.HandleFunc("/debug/rpm-counter", s.debugRPMCounter)
 	http.HandleFunc("/debug/rop-scan", s.debugRopScan)
@@ -6143,6 +6144,73 @@ func (s *HttpServer) debugInventory(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(map[string]any{
 		"count": len(out),
 		"items": out,
+	})
+}
+
+// debugPanels dumps the panel tree ReadAllPanels sees. Used to diagnose why
+// IsInCharacterSelectionScreen returns false — if mod tiny renames the root
+// panel, the CharacterSelectPanel lookup misses.
+//
+// Usage: GET /debug/panels?character=Blizzard
+func (s *HttpServer) debugPanels(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+
+	defer func() {
+		if rec := recover(); rec != nil {
+			s.logger.Error("debugPanels PANIC", slog.Any("panic", rec))
+			fmt.Fprintf(w, `{"error":"panic: %v"}`, rec)
+		}
+	}()
+
+	character := r.URL.Query().Get("character")
+	if character == "" {
+		w.WriteHeader(http.StatusBadRequest)
+		fmt.Fprintf(w, `{"error":"missing character parameter"}`)
+		return
+	}
+
+	ctx := s.manager.GetContext(character)
+	if ctx == nil {
+		w.WriteHeader(http.StatusServiceUnavailable)
+		fmt.Fprintf(w, `{"error":"no running supervisor for character %s"}`, character)
+		return
+	}
+
+	panels := ctx.GameReader.ReadAllPanels()
+
+	type panelInfo struct {
+		Name        string `json:"name"`
+		Parent      string `json:"parent"`
+		Depth       int    `json:"depth"`
+		Enabled     bool   `json:"enabled"`
+		Visible     bool   `json:"visible"`
+		NumChildren int    `json:"num_children"`
+		Extra       string `json:"extra,omitempty"`
+	}
+
+	var out []panelInfo
+	var walk func(p data.Panel)
+	walk = func(p data.Panel) {
+		out = append(out, panelInfo{
+			Name:        p.PanelName,
+			Parent:      p.PanelParent,
+			Depth:       p.Depth,
+			Enabled:     p.PanelEnabled,
+			Visible:     p.PanelVisible,
+			NumChildren: p.NumChildren,
+			Extra:       p.ExtraText,
+		})
+		for _, c := range p.PanelChildren {
+			walk(c)
+		}
+	}
+	for _, p := range panels {
+		walk(p)
+	}
+
+	json.NewEncoder(w).Encode(map[string]any{
+		"count":  len(out),
+		"panels": out,
 	})
 }
 
