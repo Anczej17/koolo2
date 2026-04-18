@@ -1689,6 +1689,18 @@ func (s *SinglePlayerSupervisor) initClaudePresenter() {
 		gr.Process.EnableBatchRead(true)
 		s.bot.ctx.Logger.Info("ROP_READ=batch: CMD_ROP_READ_BATCH active; GameReader.GetData will group hot-path reads")
 	}
+	// ROP_READ=full: belt-and-suspenders. Batch path serves the clusters
+	// that were explicitly converted; single-shot CMD_ROP_READ catches
+	// EVERYTHING else (ReadBytesFromMemory / ReadUInt / ReadString). Result
+	// is zero cross-process NtReadVirtualMemory from app.exe — every D2R
+	// byte comes out of rmod's in-process copy. Slower per-read than RPM
+	// (~5-15 ms Present round-trip vs ~microseconds) but the "no RPM"
+	// behavior Bartek asked for.
+	if os.Getenv("ROP_READ") == "full" {
+		gr.Process.EnableBatchRead(true)
+		gr.Process.EnableRopRead(true)
+		s.bot.ctx.Logger.Info("ROP_READ=full: CMD_ROP_READ_BATCH + CMD_ROP_READ single-shot — every read routes through rmod, zero external RPM")
+	}
 	// Keep classic APC for SendPacket (game-state opcodes like 0x3C).
 	// UI sender: DON'T use rmod (render thread crashes D2R).
 	// Instead, Process.SendUIPacket falls back to APC-based SendUIPacketViaMainThread.
