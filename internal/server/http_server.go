@@ -998,6 +998,9 @@ func (s *HttpServer) Listen(port int) error {
 	http.HandleFunc("/debug/rop-read", s.debugRopRead)
 	http.HandleFunc("/debug/rop-worker-hb", s.debugRopWorkerHb)
 	http.HandleFunc("/debug/rop-dbg", s.debugRopDbg)
+	http.HandleFunc("/debug/read-trace", s.debugReadTrace)
+	http.HandleFunc("/debug/read-trace-stats", s.debugReadTraceStats)
+	http.HandleFunc("/debug/read-trace-enable", s.debugReadTraceEnable)
 	http.HandleFunc("/debug/dispatch-ping", s.debugDispatchPing)
 	http.HandleFunc("/debug/handle-audit", s.debugHandleAudit)
 	http.HandleFunc("/debug/writemem", s.debugWriteMem)
@@ -7843,6 +7846,87 @@ func (s *HttpServer) debugRopRead(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	fmt.Fprintf(w, `{"ok":true,"status":%d,"note":"2 = ROP handler gated; unit-test trigger first"}`, status)
+}
+
+// debugReadTrace dumps the ring buffer of recent ReadBytesFromMemory calls.
+// Per Bartek's request: shows each read's (addr, size, source, result,
+// latency) so we can pinpoint which specific read first faults when
+// ROP_READ / SNAPSHOT_ENABLE is switched on. Off by default — enable via
+// /debug/read-trace-enable?on=1 or CLAUDE_READ_TRACE=1 env.
+//
+// Usage: GET /debug/read-trace?character=Blizzard[&limit=200]
+func (s *HttpServer) debugReadTrace(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	character := r.URL.Query().Get("character")
+	ctx := s.manager.GetContext(character)
+	if ctx == nil || ctx.GameReader == nil {
+		w.WriteHeader(http.StatusServiceUnavailable)
+		fmt.Fprintf(w, `{"error":"no supervisor"}`)
+		return
+	}
+	tr := ctx.GameReader.Process.ReadTrace()
+	if tr == nil {
+		fmt.Fprintf(w, `{"error":"trace not initialised"}`)
+		return
+	}
+	entries := tr.Dump()
+	limit := 200
+	if l := r.URL.Query().Get("limit"); l != "" {
+		var v int
+		fmt.Sscanf(l, "%d", &v)
+		if v > 0 && v < len(entries) {
+			limit = v
+		}
+	}
+	if len(entries) > limit {
+		entries = entries[len(entries)-limit:]
+	}
+	fmt.Fprintf(w, `{"ok":true,"enabled":%t,"count":%d,"entries":[`, tr.Enabled(), len(entries))
+	for i, e := range entries {
+		if i > 0 { w.Write([]byte(",")) }
+		fmt.Fprintf(w, `{"tick":%d,"t_ms":%d,"addr":"0x%X","size":%d,"src":"%s","result":"%s","lat_ns":%d}`,
+			e.Tick, e.Timestamp.UnixMilli(), e.Address, e.Size, e.Source, e.Result, e.LatencyNs)
+	}
+	fmt.Fprintf(w, `]}`)
+}
+
+// debugReadTraceStats returns source-rollup counters without walking the ring.
+func (s *HttpServer) debugReadTraceStats(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	character := r.URL.Query().Get("character")
+	ctx := s.manager.GetContext(character)
+	if ctx == nil || ctx.GameReader == nil {
+		w.WriteHeader(http.StatusServiceUnavailable)
+		fmt.Fprintf(w, `{"error":"no supervisor"}`)
+		return
+	}
+	tr := ctx.GameReader.Process.ReadTrace()
+	if tr == nil {
+		fmt.Fprintf(w, `{"error":"trace not initialised"}`)
+		return
+	}
+	fmt.Fprintf(w, `{"ok":true,"enabled":%t,"counters":%q}`, tr.Enabled(), tr.Stats())
+}
+
+// debugReadTraceEnable toggles the trace on/off at runtime.
+// Usage: GET /debug/read-trace-enable?character=Blizzard&on=1
+func (s *HttpServer) debugReadTraceEnable(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	character := r.URL.Query().Get("character")
+	ctx := s.manager.GetContext(character)
+	if ctx == nil || ctx.GameReader == nil {
+		w.WriteHeader(http.StatusServiceUnavailable)
+		fmt.Fprintf(w, `{"error":"no supervisor"}`)
+		return
+	}
+	tr := ctx.GameReader.Process.ReadTrace()
+	if tr == nil {
+		fmt.Fprintf(w, `{"error":"trace not initialised"}`)
+		return
+	}
+	on := r.URL.Query().Get("on") == "1"
+	tr.Enable(on)
+	fmt.Fprintf(w, `{"ok":true,"enabled":%t}`, tr.Enabled())
 }
 
 // debugRopDbg returns the current OFF_ROP_DBG marker. Useful for post-

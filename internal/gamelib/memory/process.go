@@ -4,10 +4,12 @@ import (
 	"bytes"
 	"encoding/binary"
 	"errors"
+	"os"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"syscall"
+	"time"
 	"unsafe"
 
 	"golang.org/x/sys/windows"
@@ -53,6 +55,12 @@ type Process struct {
 	// OFF_ROP_READ_BUFFER_SIZE (4 KB); caller chunks above that.
 	externalRopRead   func(src uintptr, length uint32) ([]byte, error)
 	ropReadEnabled    atomic.Bool
+	// Per-read ring-buffer trace (off by default). Flip on via
+	// /debug/read-trace-enable or CLAUDE_READ_TRACE=1 env. Captures
+	// source + result + latency for every ReadBytesFromMemory call so
+	// we can see which specific read first faults when a new path
+	// (ROP, snapshot) is switched on.
+	readTrace *ReadTrace
 
 	// Layer 3: per-tick chunk cache. When STEALTH_READ=1, field reads <=256B
 	// are served from this cache instead of issuing individual RPMs. Fresh
@@ -154,8 +162,12 @@ func NewProcess() (*Process, error) {
 		pid:                  module.ProcessID,
 		moduleBaseAddressPtr: module.ModuleBaseAddress,
 		moduleBaseSize:       module.ModuleBaseSize,
+		readTrace:            NewReadTrace(1024),
 	}
 	StartChaffReader(p) // Layer 5: background decoy reads (no-op if stealth off)
+	if os.Getenv("CLAUDE_READ_TRACE") == "1" {
+		p.readTrace.Enable(true)
+	}
 	return p, nil
 }
 
@@ -444,6 +456,12 @@ func ReadMemoryChunked(handle windows.Handle, baseAddress uintptr, size uint32) 
 }
 
 func (p *Process) ReadBytesFromMemory(address uintptr, size uint) []byte {
+	traceOn := p.readTrace != nil && p.readTrace.Enabled()
+	var traceStart time.Time
+	if traceOn {
+		traceStart = time.Now()
+	}
+
 	// GID-6: prefer ROP-chain memcpy when enabled. rmod's rep-movsb gadget
 	// runs inside D2R so no cross-process ReadProcessMemory is issued —
 	// Warden sees zero RPM on paths routed through here. Falls back to the
@@ -455,15 +473,25 @@ func (p *Process) ReadBytesFromMemory(address uintptr, size uint) []byte {
 		p.sendPacketMu.Unlock()
 		if fn != nil {
 			if out, err := fn(address, uint32(size)); err == nil && len(out) == int(size) {
+				if traceOn {
+					p.readTrace.Record(address, uint32(size), ReadSourceROP, ReadResultOK, time.Since(traceStart))
+				}
 				return out
 			}
 			// On error / size mismatch, silently fall through to the RPM
 			// path below so a transient rmod hiccup doesn't stall the bot.
+			// Mark fallback so the trace shows where ROP missed.
+			if traceOn {
+				p.readTrace.Record(address, uint32(size), ReadSourceROP, ReadResultFallback, time.Since(traceStart))
+			}
 		}
 	}
 
 	if StealthEnabled() && size > 0 && size <= 256 {
 		if cached, ok := p.chunkLookup(address, size); ok {
+			if traceOn {
+				p.readTrace.Record(address, uint32(size), ReadSourceChunkCache, ReadResultOK, time.Since(traceStart))
+			}
 			return cached
 		}
 	}
@@ -471,8 +499,14 @@ func (p *Process) ReadBytesFromMemory(address uintptr, size uint) []byte {
 	p.rpmReadBytesCalls.Add(1)
 	p.rpmBytesTotal.Add(uint64(size))
 	ntapi.ReadProcessMemory(p.handler, address, &data[0], uintptr(size))
+	if traceOn {
+		p.readTrace.Record(address, uint32(size), ReadSourceRPM, ReadResultOK, time.Since(traceStart))
+	}
 	return data
 }
+
+// ReadTrace returns the ring so HTTP debug endpoints can dump it.
+func (p *Process) ReadTrace() *ReadTrace { return p.readTrace }
 
 // chunkLookup (Layer 3) — if the requested [address, address+size) range is
 // fully inside a page-aligned cached chunk, return a copy of that sub-slice.

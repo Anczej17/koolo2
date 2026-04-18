@@ -184,6 +184,19 @@ extern "system" {
         MemoryInformationLength: usize,
         ReturnLength: *mut usize,
     ) -> i32;
+    /// Kernel-level memcpy — page-probes in the kernel, returns NTSTATUS
+    /// on unmapped / guard / PAGE_NOACCESS pages instead of raising an
+    /// AV in our user-space handler. The handle is self (-1 pseudo-
+    /// handle from GetCurrentProcess), so this is an entirely-in-process
+    /// copy — no cross-process ReadProcessMemory trace visible to any
+    /// external observer.
+    fn NtReadVirtualMemory(
+        ProcessHandle: HANDLE,
+        BaseAddress: *const core::ffi::c_void,
+        Buffer: *mut core::ffi::c_void,
+        NumberOfBytesToRead: usize,
+        NumberOfBytesRead: *mut usize,
+    ) -> i32;
 }
 
 /// MEMORY_BASIC_INFORMATION (subset — we only read State/Protect).
@@ -1980,48 +1993,36 @@ unsafe fn dispatch_commands() {
             }
             shm_write_u32(shm, OFF_ROP_DBG, 0xBBBB0002);
 
-            // In-process copy with VirtualQuery probe first — crash_diag_veh
-            // DOES catch AVs but each raised exception re-enters its handler
-            // and that cascades (685+ AVs per previous Plan A run). An
-            // unmapped source page is the common failure mode on bot reads
-            // while a D2R structure is being freed/reallocated, so we check
-            // every src page before touching it. If any page along the span
-            // is unreadable we skip the copy and return status=5 (Go side
-            // falls back to stealth RPM, which handles faults gracefully).
-            let mut ok = true;
-            if len > 0 {
-                let mut cursor = src_va & !0xFFFusize; // page-align
-                let end = src_va + len;
-                while cursor < end {
-                    let mut mbi: MemoryBasicInformation = core::mem::zeroed();
-                    let got = VirtualQuery(
-                        cursor as *const core::ffi::c_void,
-                        &mut mbi as *mut _ as *mut core::ffi::c_void,
-                        core::mem::size_of::<MemoryBasicInformation>(),
-                    );
-                    if got == 0
-                        || mbi.state != MEM_COMMIT
-                        || mbi.protect == PAGE_NOACCESS
-                        || (mbi.protect & PAGE_GUARD) != 0
-                    {
-                        ok = false;
-                        break;
-                    }
-                    cursor = (cursor | 0xFFFusize) + 1;
-                }
-            }
-            if !ok {
+            // Use NtReadVirtualMemory with self-handle instead of raw
+            // `ptr::copy_nonoverlapping`. Kernel page-probes before touching
+            // any byte, so unmapped / PAGE_NOACCESS / PAGE_GUARD pages
+            // return STATUS_PARTIAL_COPY (0x8000000D) or similar without
+            // raising an AV in our Present callback — which used to cascade
+            // via crash_diag_veh and take D2R down 2 s after ROP_READ
+            // activated.
+            //
+            // Self-handle (-1 pseudo) means this is still an in-process
+            // copy — no cross-process RPM trace, Warden sees nothing. The
+            // "NtReadVirtualMemory from D2R's own PID with D2R's own handle"
+            // is indistinguishable from any D2R-internal memcpy from the
+            // kernel ETW perspective.
+            let mut bytes_read: usize = 0;
+            let status = if len > 0 {
+                NtReadVirtualMemory(
+                    GetCurrentProcess(),
+                    src_va as *const core::ffi::c_void,
+                    dst_va as *mut core::ffi::c_void,
+                    len,
+                    &mut bytes_read as *mut usize,
+                )
+            } else {
+                0
+            };
+            if status != 0 || bytes_read != len {
                 shm_write_u32(shm, OFF_ROP_READ_STATUS, 5);
                 shm_write_u32(shm, OFF_STATUS_FLAG, STATUS_DONE);
                 shm_write_u32(shm, OFF_COMMAND_FLAG, 0);
                 return;
-            }
-            if len > 0 {
-                core::ptr::copy_nonoverlapping(
-                    src_va as *const u8,
-                    dst_va as *mut u8,
-                    len,
-                );
             }
 
             shm_write_u32(shm, OFF_ROP_READ_STATUS, 0);

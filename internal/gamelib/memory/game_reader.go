@@ -153,6 +153,11 @@ func (gd *GameReader) GetData() data.Data {
 	// No-op when STEALTH_READ is off (cache never populated).
 	gd.Process.FlushChunkCache()
 	gd.resetWidgetStateCache()
+	// Trace ring: bump per-tick group-id so /debug/read-trace shows
+	// reads grouped by the GetData call that issued them.
+	if gd.Process != nil && gd.Process.readTrace != nil {
+		gd.Process.readTrace.BumpTick()
+	}
 
 	// Prerequisites (order-dependent — consumed by downstream dispatches).
 	rawPlayerUnits := gd.GetRawPlayerUnits()
