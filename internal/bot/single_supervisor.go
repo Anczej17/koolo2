@@ -165,10 +165,27 @@ func (s *SinglePlayerSupervisor) Start() error {
 		return err
 	}
 
+	s.bot.ctx.Logger.Info("breadcrumb: entering ClaudeModeActive check", slog.Bool("active", s.bot.ctx.ClaudeModeActive))
 	// CLAUDE MODE: auto-enter game then idle for HTTP-driven tests.
 	if s.bot.ctx.ClaudeModeActive {
-		// If already in game (e.g., attached to a running D2R mid-game), skip entry.
-		s.bot.ctx.RefreshGameData()
+		s.bot.ctx.Logger.Info("breadcrumb: entered Claude block, installing defer/recover")
+		defer func() {
+			if r := recover(); r != nil {
+				s.bot.ctx.Logger.Error("Claude mode Start() panic recovered",
+					slog.Any("panic", r))
+			}
+		}()
+		s.bot.ctx.Logger.Info("breadcrumb: calling RefreshGameData")
+		func() {
+			defer func() {
+				if r := recover(); r != nil {
+					s.bot.ctx.Logger.Error("RefreshGameData panic during Claude attach",
+						slog.Any("panic", r))
+				}
+			}()
+			s.bot.ctx.RefreshGameData()
+		}()
+		s.bot.ctx.Logger.Info("breadcrumb: RefreshGameData returned, checking InGame")
 		if s.bot.ctx.Manager.InGame() && s.bot.ctx.Data.PlayerUnit.Area != 0 {
 			s.bot.ctx.Logger.Info("Claude mode: already in game, skipping entry...")
 			s.initClaudePresenter()
