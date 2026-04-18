@@ -101,9 +101,14 @@ impl ROPGadgets {
             if b == 0xC3 || b == 0xC2 {
                 let ret_len: usize = if b == 0xC3 { 1 } else { 3 };
                 let max_back = if off >= MAX_GADGET_LEN { MAX_GADGET_LEN } else { off };
-                for back in 0..=max_back {
-                    let start = off - back;
-                    if let Some((kind, regs)) = self.try_classify_return(base.add(start), back + ret_len) {
+                // Iterate back LONGEST → SHORTEST so we prefer richer gadgets
+                // (pop rsi; ret) over degenerate Ret-only gadgets. Previously
+                // 0..=max_back made back=0 win every time, classifying every
+                // ret as a lone Ret kind — build_memcpy needs PopReg etc.
+                let mut back = max_back as isize;
+                while back >= 0 {
+                    let start = off - back as usize;
+                    if let Some((kind, regs)) = self.try_classify_return(base.add(start), back as usize + ret_len) {
                         added += 1;
                         if !shm.is_null() {
                             let idx: usize = match kind {
@@ -129,6 +134,7 @@ impl ROPGadgets {
                         }
                         break;
                     }
+                    back -= 1;
                 }
             }
             off += 1;
