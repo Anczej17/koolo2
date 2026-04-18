@@ -456,19 +456,21 @@ func (p *Presenter) RopScan(baseVA uint64, length uint64) (count uint32, ready u
 	writeU64(p.localView, uintptr(OffRopScanBase), baseVA)
 	writeU64(p.localView, uintptr(OffRopScanLen), length)
 
-	// Per-chunk timeout: rmod scans 4 KB ≪ 1 Present frame. Allow 2 s each
-	// call to tolerate a stalled frame (GPU retry / Arxan page-fault) before
-	// giving up.
+	// Per-chunk timeout: rmod scans 1 KB ≪ 1 Present frame. Allow 5 s each
+	// call to tolerate a stalled frame (GPU retry / Arxan page-fault / VM
+	// scheduler hiccup) before giving up.
 	const (
-		chunkTimeout = 2 * time.Second
+		chunkTimeout = 5 * time.Second
 		// Total chunk count the scanner CAN need = length / 4 KB. Wall-clock
 		// bound per chunk is one Present frame, so completion at 60 fps is
 		// ~ length/4KB * 16 ms; at 180 fps ~5 ms. For 1 MB that's ~4 s best
 		// case. Give generous overall deadline.
 		overallMultiplier = 4
 	)
-	chunks := int(length/0x1000) + 1
-	overallDeadline := time.Now().Add(time.Duration(chunks*overallMultiplier) * 16 * time.Millisecond).Add(5 * time.Second)
+	// rmod chunk is 1 KB. Use that for deadline math so the Go-side overall
+	// timeout matches the per-Present-frame work rmod actually does.
+	chunks := int(length/0x400) + 1
+	overallDeadline := time.Now().Add(time.Duration(chunks*overallMultiplier) * 16 * time.Millisecond).Add(10 * time.Second)
 
 	for time.Now().Before(overallDeadline) {
 		writeU32(p.localView, uintptr(offCommandType), CmdRopScan)
