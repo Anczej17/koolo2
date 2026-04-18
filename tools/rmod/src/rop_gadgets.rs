@@ -74,6 +74,25 @@ impl ROPGadgets {
         }
     }
 
+    /// Append a pre-fabricated gadget sequence. Used by the synthetic-gadget
+    /// injector — if D2R.text doesn't organically contain `pop rcx; ret` or
+    /// `rep movsb; ret` (modern compilers rarely emit those), we allocate
+    /// our own RWX page with exactly the byte sequence we need and add the
+    /// VA here. The ROP-chain builder picks it up just like a harvested
+    /// gadget.
+    ///
+    /// Stealth angle: Arxan's page-hash sentinel only covers D2R's image.
+    /// Our allocated pages aren't part of the hash set. The trigger thunk
+    /// executes these synthetic gadgets for the brief memcpy window; from
+    /// an external observer (RPM trace / Warden) nothing crosses the
+    /// process boundary.
+    pub unsafe fn add_synthetic(&mut self, va: u64, len: u8, kind: GadgetKind, regs_touched: u16) -> bool {
+        if self.count >= GADGET_POOL_SIZE { return false; }
+        self.pool[self.count] = Gadget { va, len, kind, regs_touched };
+        self.count += 1;
+        true
+    }
+
     /// Scan `[base..base+len)` for `ret`-ending gadgets. Populates the pool
     /// in-place, returns number of gadgets added. Safe to call multiple
     /// times — later scans append up to capacity, then stop.

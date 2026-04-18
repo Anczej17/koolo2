@@ -826,6 +826,20 @@ const ROP_SCAN_CHUNK: usize = 0x400; // 1 KB per Present frame — stays well un
 static mut G_ROP_SCAN_CURSOR:   usize = 0; // bytes scanned from base this round
 static mut G_ROP_SCAN_COMPLETE: bool  = false;
 
+// GID-6 synthetic-gadget backing page. We emit the exact byte sequences
+// build_memcpy needs (`pop rsi; ret`, `pop rdi; ret`, `pop rcx; ret`,
+// `rep movsb; ret`, and a lone `ret`) into an RWX page. If a live scan
+// doesn't harvest one of these kinds from D2R.text, we inject the
+// synthetic variant into the pool so build_memcpy can still complete.
+//
+// Layout inside the synthetic page (1 byte offsets):
+//   +0x00  5E C3                   pop rsi; ret
+//   +0x10  5F C3                   pop rdi; ret
+//   +0x20  59 C3                   pop rcx; ret
+//   +0x30  F3 A4 C3                rep movsb; ret
+//   +0x40  C3                      ret
+static mut G_SYNTHETIC_GADGET_PAGE: *mut u8 = core::ptr::null_mut();
+
 // Plan B — worker-thread scan.
 //
 // Reading `G_ROP_GADGETS.count` or iterating `G_ROP_GADGETS.pool` from the
@@ -1092,6 +1106,38 @@ unsafe fn init_from_shm(shm: *mut SharedBuffer) -> Result<(), u32> {
     G_ROP_EXECUTOR    = executor::Executor::new(target_va);
     G_ROP_STACK       = alloc_mgr::AllocatedMemory::new(0x1000);
     G_ROP_TRIGGER_BUF = alloc_mgr::AllocatedMemory::new(0x1000);
+    // Synthetic gadget page — same as init_all. Guarantees build_memcpy
+    // has every gadget kind even when D2R.text organically lacks rcx /
+    // rep-movsb (modern compilers rarely emit those).
+    if G_SYNTHETIC_GADGET_PAGE.is_null() {
+        if let Some(mem) = alloc_mgr::AllocatedMemory::new(0x1000) {
+            let p = mem.as_ptr();
+            *p.add(0x00) = 0x5E; *p.add(0x01) = 0xC3;
+            *p.add(0x10) = 0x5F; *p.add(0x11) = 0xC3;
+            *p.add(0x20) = 0x59; *p.add(0x21) = 0xC3;
+            *p.add(0x30) = 0xF3; *p.add(0x31) = 0xA4; *p.add(0x32) = 0xC3;
+            *p.add(0x40) = 0xC3;
+            let _ = mem.protect_execute();
+            G_SYNTHETIC_GADGET_PAGE = p;
+            let base = p as u64;
+            G_ROP_GADGETS.add_synthetic(base + 0x00, 2, rop_gadgets::GadgetKind::PopReg,   1u16 << 6);
+            G_ROP_GADGETS.add_synthetic(base + 0x10, 2, rop_gadgets::GadgetKind::PopReg,   1u16 << 7);
+            G_ROP_GADGETS.add_synthetic(base + 0x20, 2, rop_gadgets::GadgetKind::PopReg,   1u16 << 1);
+            G_ROP_GADGETS.add_synthetic(base + 0x30, 3, rop_gadgets::GadgetKind::RepMovsb, 0);
+            G_ROP_GADGETS.add_synthetic(base + 0x40, 1, rop_gadgets::GadgetKind::Ret,      0);
+            core::mem::forget(mem);
+        }
+    }
+    // Seed SHM baseline so the bot's pool-health gate sees the synthetic
+    // gadgets even before it issues /debug/rop-scan. Without this, the gate
+    // reads zeroed kind_counts and keeps RPM.
+    if !G_SYNTHETIC_GADGET_PAGE.is_null() {
+        shm_write_u32(shm, OFF_ROP_KIND_COUNTS + 1 * 4, 3); // PopReg: 3 (rsi,rdi,rcx)
+        shm_write_u32(shm, OFF_ROP_KIND_COUNTS + 4 * 4, 1); // RepMovsb
+        shm_write_u32(shm, OFF_ROP_KIND_COUNTS + 7 * 4, 1); // Ret
+        shm_write_u32(shm, OFF_ROP_POPREG_MASK, (1u32 << 1) | (1u32 << 6) | (1u32 << 7));
+        shm_write_u32(shm, OFF_ROP_SCAN_COUNT, 5);
+    }
     shm_write_u32(shm, OFF_ROP_DBG, 0xC0DE0002);
     G_ROP_WORKER_SHM = shm;
     // If there's a leftover thread handle from a previous load, terminate
@@ -1194,6 +1240,34 @@ unsafe fn init_all() -> Result<(), u32> {
     G_ROP_EXECUTOR    = executor::Executor::new(target_va);
     G_ROP_STACK       = alloc_mgr::AllocatedMemory::new(0x1000);
     G_ROP_TRIGGER_BUF = alloc_mgr::AllocatedMemory::new(0x1000);
+
+    // 3d.1 — Synthetic gadget page. See G_SYNTHETIC_GADGET_PAGE comment.
+    // Allocated RW first, then flipped to RX before use. Leaked (never
+    // freed) because build_memcpy's trigger thunks retain refs to the VA.
+    if let Some(mem) = alloc_mgr::AllocatedMemory::new(0x1000) {
+        let p = mem.as_ptr();
+        // pop rsi; ret
+        *p.add(0x00) = 0x5E; *p.add(0x01) = 0xC3;
+        // pop rdi; ret
+        *p.add(0x10) = 0x5F; *p.add(0x11) = 0xC3;
+        // pop rcx; ret
+        *p.add(0x20) = 0x59; *p.add(0x21) = 0xC3;
+        // rep movsb; ret
+        *p.add(0x30) = 0xF3; *p.add(0x31) = 0xA4; *p.add(0x32) = 0xC3;
+        // ret
+        *p.add(0x40) = 0xC3;
+        let _ = mem.protect_execute();
+        G_SYNTHETIC_GADGET_PAGE = p;
+        // Inject into the ROP pool so scan+chain builder can pick them up
+        // even before any live scan has run.
+        let base = p as u64;
+        G_ROP_GADGETS.add_synthetic(base + 0x00, 2, rop_gadgets::GadgetKind::PopReg,   1u16 << 6); // rsi
+        G_ROP_GADGETS.add_synthetic(base + 0x10, 2, rop_gadgets::GadgetKind::PopReg,   1u16 << 7); // rdi
+        G_ROP_GADGETS.add_synthetic(base + 0x20, 2, rop_gadgets::GadgetKind::PopReg,   1u16 << 1); // rcx
+        G_ROP_GADGETS.add_synthetic(base + 0x30, 3, rop_gadgets::GadgetKind::RepMovsb, 0);
+        G_ROP_GADGETS.add_synthetic(base + 0x40, 1, rop_gadgets::GadgetKind::Ret,      0);
+        core::mem::forget(mem);
+    }
 
     // 3e. Spawn the ROP scan worker thread — Plan B. Present-only access
     // to `G_ROP_GADGETS` was consistently tripping Arxan's page-hash
@@ -1809,13 +1883,29 @@ unsafe fn dispatch_commands() {
             if G_ROP_SCAN_COMPLETE {
                 G_ROP_SCAN_CURSOR = 0;
                 G_ROP_SCAN_COMPLETE = false;
-                // Reset pool + SHM counters for a fresh scan.
-                G_ROP_GADGETS.count = 0;
-                for i in 0..8 {
-                    shm_write_u32(shm, OFF_ROP_KIND_COUNTS + i * 4, 0);
+                // Reset pool + SHM counters for a fresh scan — but preserve
+                // the synthetic gadgets (pool[0..5], injected during init).
+                // Without this, scan restart would drop the synthetic
+                // `pop rcx; ret` + `rep movsb; ret` that build_memcpy relies
+                // on when D2R.text doesn't organically contain them.
+                const SYNTHETIC_GADGET_COUNT: usize = 5;
+                let preserve = if G_SYNTHETIC_GADGET_PAGE.is_null() { 0 } else { SYNTHETIC_GADGET_COUNT };
+                G_ROP_GADGETS.count = preserve;
+                // Rebuild SHM kind counts from preserved synthetic entries.
+                let mut kind_counts = [0u32; 8];
+                let mut pop_mask: u32 = 0;
+                if preserve > 0 {
+                    // Synthetic page layout: 3 PopReg (rsi, rdi, rcx), 1 RepMovsb, 1 Ret.
+                    kind_counts[1] = 3; // PopReg
+                    kind_counts[4] = 1; // RepMovsb
+                    kind_counts[7] = 1; // Ret
+                    pop_mask = (1u32 << 1) | (1u32 << 6) | (1u32 << 7); // rcx | rsi | rdi
                 }
-                shm_write_u32(shm, OFF_ROP_POPREG_MASK, 0);
-                shm_write_u32(shm, OFF_ROP_SCAN_COUNT, 0);
+                for i in 0..8 {
+                    shm_write_u32(shm, OFF_ROP_KIND_COUNTS + i * 4, kind_counts[i]);
+                }
+                shm_write_u32(shm, OFF_ROP_POPREG_MASK, pop_mask);
+                shm_write_u32(shm, OFF_ROP_SCAN_COUNT, preserve as u32);
             }
 
             let remaining = total.saturating_sub(G_ROP_SCAN_CURSOR);

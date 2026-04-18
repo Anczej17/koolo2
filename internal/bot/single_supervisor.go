@@ -1658,36 +1658,45 @@ func (s *SinglePlayerSupervisor) initClaudePresenter() {
 	// after /debug/rop-scan returns a complete breakdown.
 	gr.Process.SetExternalRopRead(pres.RopReadToScratch)
 	if os.Getenv("ROP_READ") == "1" {
-		// Fire-and-forget goroutine: scan a slice of D2R.text once the
-		// bot is idle, check the pool breakdown, flip EnableRopRead only
-		// when all 4 kinds (PopReg rsi, rdi, rcx + RepMovsb) are present.
+		// Fire-and-forget goroutine: scan multiple D2R.text offsets until
+		// the pool has all required kinds. `pop rcx; ret` and `rep movsb;
+		// ret` are legitimately rare in optimized x64 (compilers prefer
+		// mov rcx / SSE memcpy), so a single 64 KB scan at one offset
+		// isn't enough. Walk the image in 1 MB strides up to ~8 MB to
+		// cover the whole .text.
 		go func() {
 			time.Sleep(5 * time.Second) // let presenter settle
-			baseVA := uint64(gr.Process.GetModuleBase()) + 0x100000
-			// Scan 64 KB to populate the pool. RopScan handles its own
-			// chunking + retries via the Go-side timeout.
-			if _, _, err := pres.RopScan(baseVA, 0x10000); err != nil {
-				s.bot.ctx.Logger.Warn("ROP_READ: initial scan failed, keeping RPM", slog.Any("err", err))
-				return
-			}
-			pool, err := pres.RopPool()
-			if err != nil {
-				s.bot.ctx.Logger.Warn("ROP_READ: pool read failed", slog.Any("err", err))
-				return
-			}
-			// Required: pop rsi (bit 6) + pop rdi (bit 7) + pop rcx (bit 1) + at least one rep-movsb.
-			const wantMask = (1 << 1) | (1 << 6) | (1 << 7)
-			if (pool.PopRegMask&wantMask) != wantMask || pool.RepMovsb == 0 {
-				s.bot.ctx.Logger.Warn("ROP_READ: pool incomplete, keeping RPM",
+			const wantMask = (1 << 1) | (1 << 6) | (1 << 7) // rcx, rsi, rdi
+			// Scan offsets inside D2R's image. Start close to Present (where
+			// 256-gadget harvest already proved stable) and walk outward.
+			offsets := []uint64{0x100000, 0x200000, 0x400000, 0x800000, 0x1000000, 0x1800000, 0x2000000}
+			base := uint64(gr.Process.GetModuleBase())
+			for i, off := range offsets {
+				if _, _, err := pres.RopScan(base+off, 0x80000); err != nil {
+					s.bot.ctx.Logger.Warn("ROP_READ scan region failed",
+						slog.String("off", fmt.Sprintf("0x%X", off)),
+						slog.Any("err", err))
+					continue
+				}
+				pool, err := pres.RopPool()
+				if err != nil {
+					continue
+				}
+				s.bot.ctx.Logger.Info("ROP_READ scan progress",
+					slog.Int("iter", i+1),
 					slog.String("popRegMask", fmt.Sprintf("0x%X", pool.PopRegMask)),
-					slog.Uint64("repMovsb", uint64(pool.RepMovsb)))
-				return
+					slog.Uint64("repMovsb", uint64(pool.RepMovsb)),
+					slog.Uint64("repMovsq", uint64(pool.RepMovsq)))
+				if (pool.PopRegMask&wantMask) == wantMask && (pool.RepMovsb > 0 || pool.RepMovsq > 0) {
+					gr.Process.EnableRopRead(true)
+					s.bot.ctx.Logger.Info("ROP_READ: pool healthy — reads now route through CMD_ROP_READ",
+						slog.String("popRegMask", fmt.Sprintf("0x%X", pool.PopRegMask)),
+						slog.Uint64("popReg", uint64(pool.PopReg)),
+						slog.Uint64("repMovsb", uint64(pool.RepMovsb)))
+					return
+				}
 			}
-			gr.Process.EnableRopRead(true)
-			s.bot.ctx.Logger.Info("ROP_READ: pool healthy — reads now route through CMD_ROP_READ",
-				slog.String("popRegMask", fmt.Sprintf("0x%X", pool.PopRegMask)),
-				slog.Uint64("popReg", uint64(pool.PopReg)),
-				slog.Uint64("repMovsb", uint64(pool.RepMovsb)))
+			s.bot.ctx.Logger.Warn("ROP_READ: pool incomplete after scanning all regions — keeping RPM")
 		}()
 	}
 	// Keep classic APC for SendPacket (game-state opcodes like 0x3C).
