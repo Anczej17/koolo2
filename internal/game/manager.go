@@ -292,7 +292,11 @@ func closeWindowAndTerminateProcess(hwnd windows.HWND, pid uint32) {
 }
 
 func StartGame(username string, password string, authmethod string, authToken string, realm string, arguments string, useCustomSettings bool) (uint32, win.HWND, error) {
-	const maxGPURetries = 8
+	// 30 attempts with increasing delays. GPU-P / Hyper-V VMs sometimes
+	// need minutes of GPU pressure to clear — giving up at 8 attempts
+	// broke multi-instance launches where the 5th bot would routinely
+	// fall into a state the first 4 had left behind.
+	const maxGPURetries = 30
 
 	// First check for other instances of the game and kill the handles, otherwise we will not be able to start the game
 	err := KillAllClientHandles()
@@ -441,9 +445,15 @@ func StartGame(username string, password string, authmethod string, authToken st
 
 		// Check if the window is a GPU error dialog
 		if isGPUErrorWindow(foundHwnd) {
-			// Fixed 3s delay between retries — exponential backoff is too slow for GPU-P VMs
-			// where the GPU just needs a moment to free resources from the previous attempt
-			const gpuRetryDelay = 3 * time.Second
+			// Progressive backoff: short waits early, longer waits later.
+			// Measured on the GPU-P VM: first 3-5 attempts fail instantly
+			// (GPU still pinned by previous D2R), then it clears. Using
+			// longer delays past attempt 8 gives Hyper-V vGPU time to
+			// reclaim resources when multi-instance pressure builds.
+			gpuRetryDelay := 3 * time.Second
+			if attempt >= 4 { gpuRetryDelay = 5 * time.Second }
+			if attempt >= 8 { gpuRetryDelay = 10 * time.Second }
+			if attempt >= 16 { gpuRetryDelay = 20 * time.Second }
 			fmt.Printf("GPU initialization error detected (attempt %d/%d), retrying in %v...\n", attempt+1, maxGPURetries, gpuRetryDelay)
 			closeWindowAndTerminateProcess(foundHwnd, uint32(cmd.Process.Pid))
 			time.Sleep(gpuRetryDelay)

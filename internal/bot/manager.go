@@ -5,6 +5,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"sync"
 	"syscall"
@@ -696,7 +697,14 @@ func (mng *SupervisorManager) buildSupervisor(supervisorName string, logger *slo
 		}
 
 		gameTitle := supervisorName
-		winproc.SetWindowText.Call(uintptr(hwnd), uintptr(unsafe.Pointer(syscall.StringToUTF16Ptr(gameTitle))))
+		// Take the *uint16 into a local so the GC keeps the backing array
+		// alive across the lazy-DLL call. Go special-cases uintptr(unsafe.Pointer(x))
+		// in call arg lists, but this pattern has crashed with rip near-zero on
+		// the Hyper-V VM — likely a lazy-DLL resolution interacting with GC. Keep
+		// the local + explicit runtime.KeepAlive below.
+		titlePtr, _ := syscall.UTF16PtrFromString(gameTitle)
+		winproc.SetWindowText.Call(uintptr(hwnd), uintptr(unsafe.Pointer(titlePtr)))
+		runtime.KeepAlive(titlePtr)
 
 		var err error
 		if wasClaudeMode {

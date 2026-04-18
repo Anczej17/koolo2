@@ -28,6 +28,20 @@ func NewCrashDetector(sup string, pid int32, hwnd uintptr, logger *slog.Logger, 
 }
 
 func (cd *CrashDetector) Start() {
+	// restartFunc closures reach into supervisor/context state that might
+	// be mid-teardown when the crash fires (we've seen goroutine 44 die
+	// with rip=0x5a4 — nil-vtable deref). Wrap the whole goroutine in
+	// recover so a panic here can't take down app.exe and leave D2R +
+	// rmod dangling.
+	defer func() {
+		if r := recover(); r != nil {
+			cd.logger.Error("Crash Detector goroutine panicked",
+				slog.Int("PID", int(cd.pid)),
+				slog.String("Supervisor", cd.supervisor),
+				slog.Any("panic", r))
+		}
+	}()
+
 	cd.logger.Info("Starting Crash Detector ...", slog.Int("PID", int(cd.pid)), slog.String("Supervisor", cd.supervisor))
 	ticker := time.NewTicker(5 * time.Second)
 	defer ticker.Stop()
@@ -42,7 +56,18 @@ func (cd *CrashDetector) Start() {
 				cd.logger.Error("Client crash detected ...", slog.Int("PID", int(cd.pid)), slog.String("Supervisor", cd.supervisor))
 				if cd.restartFunc != nil {
 					cd.logger.Info("Attempting to restart client ...", slog.String("Supervisor", cd.supervisor))
-					cd.restartFunc()
+					// Guard restartFunc panics so this goroutine logs + exits
+					// cleanly instead of dropping the whole process.
+					func() {
+						defer func() {
+							if r := recover(); r != nil {
+								cd.logger.Error("restartFunc panicked",
+									slog.Any("panic", r),
+									slog.String("Supervisor", cd.supervisor))
+							}
+						}()
+						cd.restartFunc()
+					}()
 				}
 				return
 			}
