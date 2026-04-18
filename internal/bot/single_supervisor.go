@@ -1650,14 +1650,45 @@ func (s *SinglePlayerSupervisor) initClaudePresenter() {
 	gi.SetPresenter(pres)
 	gr.Process.SetExternalCallFn(pres.CallFn)
 	gr.Process.SetExternalWriteMem(pres.WriteMem)
-	// GID-6 ROP read wiring. Flag off by default; enable via ROP_READ=1 env
-	// (gated below after the pool is harvested) OR live via /debug/rop-read
-	// validation. process.ReadBytesFromMemory falls back to stealth RPM on
-	// any error, so setting the hook is safe even before the pool is ready.
+	// GID-6 ROP read wiring. The hook itself is always registered; whether
+	// reads actually route through it depends on (a) the ROP_READ env var
+	// AND (b) a live pool-health check below. Enabling ROP_READ before the
+	// pool has rsi/rdi/rcx pop gadgets + rep-movsb stalls Present on every
+	// read as build_memcpy fails repeatedly, so callers should only opt in
+	// after /debug/rop-scan returns a complete breakdown.
 	gr.Process.SetExternalRopRead(pres.RopReadToScratch)
 	if os.Getenv("ROP_READ") == "1" {
-		gr.Process.EnableRopRead(true)
-		s.bot.ctx.Logger.Info("Claude mode: ROP_READ=1 — reads route through CMD_ROP_READ (fallback to RPM on error)")
+		// Fire-and-forget goroutine: scan a slice of D2R.text once the
+		// bot is idle, check the pool breakdown, flip EnableRopRead only
+		// when all 4 kinds (PopReg rsi, rdi, rcx + RepMovsb) are present.
+		go func() {
+			time.Sleep(5 * time.Second) // let presenter settle
+			baseVA := uint64(gr.Process.GetModuleBase()) + 0x100000
+			// Scan 64 KB to populate the pool. RopScan handles its own
+			// chunking + retries via the Go-side timeout.
+			if _, _, err := pres.RopScan(baseVA, 0x10000); err != nil {
+				s.bot.ctx.Logger.Warn("ROP_READ: initial scan failed, keeping RPM", slog.Any("err", err))
+				return
+			}
+			pool, err := pres.RopPool()
+			if err != nil {
+				s.bot.ctx.Logger.Warn("ROP_READ: pool read failed", slog.Any("err", err))
+				return
+			}
+			// Required: pop rsi (bit 6) + pop rdi (bit 7) + pop rcx (bit 1) + at least one rep-movsb.
+			const wantMask = (1 << 1) | (1 << 6) | (1 << 7)
+			if (pool.PopRegMask&wantMask) != wantMask || pool.RepMovsb == 0 {
+				s.bot.ctx.Logger.Warn("ROP_READ: pool incomplete, keeping RPM",
+					slog.String("popRegMask", fmt.Sprintf("0x%X", pool.PopRegMask)),
+					slog.Uint64("repMovsb", uint64(pool.RepMovsb)))
+				return
+			}
+			gr.Process.EnableRopRead(true)
+			s.bot.ctx.Logger.Info("ROP_READ: pool healthy — reads now route through CMD_ROP_READ",
+				slog.String("popRegMask", fmt.Sprintf("0x%X", pool.PopRegMask)),
+				slog.Uint64("popReg", uint64(pool.PopReg)),
+				slog.Uint64("repMovsb", uint64(pool.RepMovsb)))
+		}()
 	}
 	// Keep classic APC for SendPacket (game-state opcodes like 0x3C).
 	// UI sender: DON'T use rmod (render thread crashes D2R).
