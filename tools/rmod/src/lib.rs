@@ -580,6 +580,12 @@ const OFF_SNAP_UNIT_TABLE: usize       = 0x4030; // u64 — D2R.base + offset.Un
 const OFF_SNAP_EXPANSION: usize        = 0x4038; // u64 — D2R.base + offset.Expansion
 const OFF_SNAP_WAYPOINT_TABLE: usize   = 0x4040; // u64 — D2R.base + offset.WaypointTableOffset
 
+// Bot-controlled walker throttle. When 0, rmod uses its default period.
+// When non-zero, snapshot_walker_scan runs every Nth Present frame. Lets the
+// bot dial down reads the moment crash telemetry looks unhappy, without a
+// rmod rebuild. Written by presenter before CmdSnapshotInit (or at runtime).
+const OFF_SNAP_WALKER_PERIOD: usize    = 0x404C; // u32 — frames between full scans
+
 // Generic static-region table — bot writes N entries of {va:u64, len:u32, pad:u32}
 // before CmdSnapshotInit, rmod mirrors each per tick. Lets us add new field
 // coverage without rebuilding rmod (only the bot side changes).
@@ -634,6 +640,8 @@ const STATIC_ROLE_ROSTER_CHAIN: u32 = 4; // head: 8 B ptr slot; deref → party 
 #[allow(dead_code)] const SNAP_FLAG_MAIN_PLAYER_FOUND: u32  = 1 << 1;
 #[allow(dead_code)] const SNAP_FLAG_ERROR: u32              = 1 << 2;
 #[allow(dead_code)] const SNAP_FLAG_WALKER_SKIP: u32        = 1 << 3;  // diagnostic: bump tick only, skip all D2R derefs
+#[allow(dead_code)] const SNAP_FLAG_WALKER_ENABLE: u32      = 1 << 4;  // opt-in gate: walker is off by default until Arxan sentinel isolated
+#[allow(dead_code)] const SNAP_FLAG_WALKER_MINIMAL: u32     = 1 << 5;  // opt-in gate: skip hardcoded R1-R4 reads; only mirror bot-supplied static regions
 
 // ---------------------------------------------------------------------------
 // Crash diagnostic VEH offsets (must match Go protocol.go OffCrash*).
@@ -1119,28 +1127,18 @@ unsafe fn init_from_shm(shm: *mut SharedBuffer) -> Result<(), u32> {
     G_ROP_EXECUTOR    = executor::Executor::new(target_va);
     G_ROP_STACK       = alloc_mgr::AllocatedMemory::new(0x1000);
     G_ROP_TRIGGER_BUF = alloc_mgr::AllocatedMemory::new(0x1000);
-    // Synthetic gadget page — same as init_all. Guarantees build_memcpy
-    // has every gadget kind even when D2R.text organically lacks rcx /
-    // rep-movsb (modern compilers rarely emit those).
-    if G_SYNTHETIC_GADGET_PAGE.is_null() {
-        if let Some(mem) = alloc_mgr::AllocatedMemory::new(0x1000) {
-            let p = mem.as_ptr();
-            *p.add(0x00) = 0x5E; *p.add(0x01) = 0xC3;
-            *p.add(0x10) = 0x5F; *p.add(0x11) = 0xC3;
-            *p.add(0x20) = 0x59; *p.add(0x21) = 0xC3;
-            *p.add(0x30) = 0xF3; *p.add(0x31) = 0xA4; *p.add(0x32) = 0xC3;
-            *p.add(0x40) = 0xC3;
-            let _ = mem.protect_execute();
-            G_SYNTHETIC_GADGET_PAGE = p;
-            let base = p as u64;
-            G_ROP_GADGETS.add_synthetic(base + 0x00, 2, rop_gadgets::GadgetKind::PopReg,   1u16 << 6);
-            G_ROP_GADGETS.add_synthetic(base + 0x10, 2, rop_gadgets::GadgetKind::PopReg,   1u16 << 7);
-            G_ROP_GADGETS.add_synthetic(base + 0x20, 2, rop_gadgets::GadgetKind::PopReg,   1u16 << 1);
-            G_ROP_GADGETS.add_synthetic(base + 0x30, 3, rop_gadgets::GadgetKind::RepMovsb, 0);
-            G_ROP_GADGETS.add_synthetic(base + 0x40, 1, rop_gadgets::GadgetKind::Ret,      0);
-            core::mem::forget(mem);
-        }
-    }
+    // Synthetic gadget page DISABLED for Claude walker mode 04-18 pm:
+    // the page's PAGE_EXECUTE_READ protection looks like a freshly-allocated
+    // foreign executable region to Arxan's integrity checker. Live tests show
+    // first Present tick after walker activates -> fault_va=0xFFFFFFFFFFFFFFFF
+    // (Arxan page-hash sentinel) + D2R zombie. See memory note
+    // project_gid5_arxan_rwx_wall_2026_04_18.md. Walker itself uses
+    // d2r_read_* (kernel-probed NtRVM) and does NOT need synthetic gadgets —
+    // those are only needed when ROP chains execute. Re-enable once we have
+    // the protect-RW / VirtualProtect-to-X / execute / protect-RW pattern in
+    // place and confirmed Arxan-invisible.
+    //
+    // if G_SYNTHETIC_GADGET_PAGE.is_null() { ... }
     // Seed SHM baseline so the bot's pool-health gate sees the synthetic
     // gadgets even before it issues /debug/rop-scan. Without this, the gate
     // reads zeroed kind_counts and keeps RPM.
@@ -1254,33 +1252,13 @@ unsafe fn init_all() -> Result<(), u32> {
     G_ROP_STACK       = alloc_mgr::AllocatedMemory::new(0x1000);
     G_ROP_TRIGGER_BUF = alloc_mgr::AllocatedMemory::new(0x1000);
 
-    // 3d.1 — Synthetic gadget page. See G_SYNTHETIC_GADGET_PAGE comment.
-    // Allocated RW first, then flipped to RX before use. Leaked (never
-    // freed) because build_memcpy's trigger thunks retain refs to the VA.
-    if let Some(mem) = alloc_mgr::AllocatedMemory::new(0x1000) {
-        let p = mem.as_ptr();
-        // pop rsi; ret
-        *p.add(0x00) = 0x5E; *p.add(0x01) = 0xC3;
-        // pop rdi; ret
-        *p.add(0x10) = 0x5F; *p.add(0x11) = 0xC3;
-        // pop rcx; ret
-        *p.add(0x20) = 0x59; *p.add(0x21) = 0xC3;
-        // rep movsb; ret
-        *p.add(0x30) = 0xF3; *p.add(0x31) = 0xA4; *p.add(0x32) = 0xC3;
-        // ret
-        *p.add(0x40) = 0xC3;
-        let _ = mem.protect_execute();
-        G_SYNTHETIC_GADGET_PAGE = p;
-        // Inject into the ROP pool so scan+chain builder can pick them up
-        // even before any live scan has run.
-        let base = p as u64;
-        G_ROP_GADGETS.add_synthetic(base + 0x00, 2, rop_gadgets::GadgetKind::PopReg,   1u16 << 6); // rsi
-        G_ROP_GADGETS.add_synthetic(base + 0x10, 2, rop_gadgets::GadgetKind::PopReg,   1u16 << 7); // rdi
-        G_ROP_GADGETS.add_synthetic(base + 0x20, 2, rop_gadgets::GadgetKind::PopReg,   1u16 << 1); // rcx
-        G_ROP_GADGETS.add_synthetic(base + 0x30, 3, rop_gadgets::GadgetKind::RepMovsb, 0);
-        G_ROP_GADGETS.add_synthetic(base + 0x40, 1, rop_gadgets::GadgetKind::Ret,      0);
-        core::mem::forget(mem);
-    }
+    // 3d.1 — Synthetic gadget page DISABLED 04-18 pm. First Present after
+    // walker activates -> fault_va=0xFFFFFFFFFFFFFFFF (Arxan page-hash
+    // sentinel) + D2R zombie. Our PAGE_EXECUTE_READ page looks like a
+    // freshly-allocated foreign exec region. Walker uses d2r_read_*
+    // (NtReadVirtualMemory) and does not need ROP gadgets; re-enable once
+    // we can allocate these pages invisibly (e.g. place inside D2R's own
+    // .text by overwriting cold padding bytes, rather than VirtualAlloc).
 
     // 3e. Spawn the ROP scan worker thread — Plan B. Present-only access
     // to `G_ROP_GADGETS` was consistently tripping Arxan's page-hash
@@ -1333,7 +1311,14 @@ unsafe fn open_shared_memory() -> Result<*mut SharedBuffer, u32> {
         return Err(0xE010);
     }
 
-    let view = MapViewOfFile(handle, FILE_MAP_ALL_ACCESS, 0, 0, 16384);
+    // Map the FULL SharedBuffer (128 KB). Earlier builds mapped 16 KB, which
+    // is fine for the command-protocol region (0x00-0x3FFF) but any access at
+    // OFF_SNAPSHOT_HEADER=0x4000 or higher faults the unmapped tail. Every
+    // snapshot init then AV'd at the first shm_read_u64(OFF_SNAP_UNIT_TABLE)
+    // and the cascade killed D2R (see fault_va=SHM+0x4030 crash pattern
+    // 04-18). The assert on SharedBuffer's size at line 562 is the source
+    // of truth for what needs to be mapped.
+    let view = MapViewOfFile(handle, FILE_MAP_ALL_ACCESS, 0, 0, core::mem::size_of::<SharedBuffer>());
     if view.is_null() {
         CloseHandle(handle);
         return Err(0xE011);
@@ -2151,7 +2136,22 @@ unsafe fn shm_write_u32(shm: *mut SharedBuffer, offset: usize, val: u32) {
 
 #[inline(always)]
 unsafe fn shm_read_u64(shm: *const SharedBuffer, offset: usize) -> u64 {
-    core::ptr::read_unaligned((shm as *const u8).add(offset) as *const u64)
+    // Kernel-probed: SHM view can race with mapping tear-down during Phase-1→Phase-2
+    // transition, and Arxan's page-hash sentinel has (rarely, 04-18 live) flipped
+    // protection on SHM pages adjacent to rmod. NtRVM returns NTSTATUS on fault
+    // instead of crashing Present — caller gets 0, flow falls through safely.
+    let src = (shm as *const u8).add(offset);
+    let mut v: u64 = 0;
+    let mut br: usize = 0;
+    let status = NtReadVirtualMemory(
+        GetCurrentProcess(),
+        src as *const core::ffi::c_void,
+        &mut v as *mut u64 as *mut core::ffi::c_void,
+        8,
+        &mut br as *mut usize,
+    );
+    if status != 0 || br != 8 { return 0; }
+    v
 }
 
 // ---------------------------------------------------------------------------
@@ -2752,6 +2752,22 @@ const EXCEPTION_SINGLE_STEP: u32 = 0x80000004;
 static mut G_CRASH_VEH_INSTALLED: bool = false;
 static mut G_CRASH_VEH_HANDLE: *mut core::ffi::c_void = core::ptr::null_mut();
 
+// Cascade-break circuit breaker for crash_diag_veh. Arxan's page-hash sentinel
+// fires at fault_va=0xFFFF...FF and then recovers; each recovery attempt can
+// re-fault and reach our VEH, producing 1000+ AVs per second. Each AV fires
+// shm_writes + page-readable probes which themselves can fault → zombie D2R
+// that no taskkill can clear. When the AV rate exceeds the threshold we
+// short-circuit: no work, no SHM writes, just propagate the exception.
+//
+// Thresholds tuned for Present-rate (60 fps): normal path sees ≤1 AV per
+// several seconds. >AV_CASCADE_LIMIT within AV_CASCADE_WINDOW_TICKS means a
+// real cascade, not a natural runtime error.
+const AV_CASCADE_LIMIT: u32 = 8;             // AVs seen inside the window
+const AV_CASCADE_WINDOW_TICKS: u64 = 300_000_000; // rdtsc ticks (~100 ms on 3 GHz)
+static mut G_AV_WINDOW_START: u64 = 0;
+static mut G_AV_WINDOW_COUNT: u32 = 0;
+static mut G_AV_CASCADE_TRIPPED: bool = false;
+
 /// VEH handler: captures fatal exception details to SHM so the bot can read
 /// them after D2R dies. Returns EXCEPTION_CONTINUE_SEARCH for everything so
 /// any other handler (including Arxan's UnhandledExceptionFilter) still runs.
@@ -2763,6 +2779,41 @@ unsafe extern "system" fn crash_diag_veh(info: *mut EXCEPTION_POINTERS) -> i32 {
     if shm.is_null() { return EXCEPTION_CONTINUE_SEARCH; }
 
     let code = (*rec).ExceptionCode;
+
+    // Cascade-break circuit. The sentinel AV (fault_va=0xFFFF...FF) is
+    // Arxan's telemetry probe — it always comes in bursts of hundreds when
+    // tripped. Treat it as the cascade signature directly and bail on the
+    // first one. Non-sentinel AVs still go through the rate gate below so
+    // one-off heap faults don't silence us.
+    if G_AV_CASCADE_TRIPPED {
+        return EXCEPTION_CONTINUE_SEARCH;
+    }
+    if code == EXCEPTION_ACCESS_VIOLATION {
+        let fault_va_here = if (*rec).NumberParameters >= 2 {
+            (*rec).ExceptionInformation[1] as u64
+        } else {
+            0
+        };
+        if fault_va_here == 0xFFFFFFFFFFFFFFFF {
+            G_AV_CASCADE_TRIPPED = true;
+            shm_write_u32(shm, 0xB0, 0xDEADCA5C);
+            shm_write_u32(shm, 0xB4, 1);
+            return EXCEPTION_CONTINUE_SEARCH;
+        }
+        let now = rdtsc_u64();
+        if G_AV_WINDOW_START == 0 || now.wrapping_sub(G_AV_WINDOW_START) > AV_CASCADE_WINDOW_TICKS {
+            G_AV_WINDOW_START = now;
+            G_AV_WINDOW_COUNT = 1;
+        } else {
+            G_AV_WINDOW_COUNT = G_AV_WINDOW_COUNT.saturating_add(1);
+            if G_AV_WINDOW_COUNT >= AV_CASCADE_LIMIT {
+                G_AV_CASCADE_TRIPPED = true;
+                shm_write_u32(shm, 0xB0, 0xDEADCA5D);
+                shm_write_u32(shm, 0xB4, G_AV_WINDOW_COUNT);
+                return EXCEPTION_CONTINUE_SEARCH;
+            }
+        }
+    }
 
     // Only capture interesting (likely-fatal) codes. Skip BP/SS/guard-page
     // since those are routine and a different handler usually consumes them.
@@ -5134,29 +5185,71 @@ unsafe fn peb_name_eq_ci(a: *const u16, b: &[u16], n: usize) -> bool {
 #[inline(always)]
 unsafe fn d2r_read_u64(va: usize) -> u64 {
     if !is_safe_va(va) { return 0; }
-    if !page_readable(va) { return 0; }
-    core::ptr::read_unaligned(va as *const u64)
+    // NtReadVirtualMemory kernel-probes the page. Unmapped / NOACCESS /
+    // GUARD / mid-teardown pages return non-zero NTSTATUS instead of
+    // raising an AV that cascades through crash_diag_veh and takes D2R
+    // down. Cost per call: ~300 ns amortised (measured on Hyper-V vGPU
+    // VM) — the walker does ~50 derefs per tick = ~15 us which is well
+    // inside a 16 ms Present budget.
+    let mut v: u64 = 0;
+    let mut br: usize = 0;
+    let status = NtReadVirtualMemory(
+        GetCurrentProcess(),
+        va as *const core::ffi::c_void,
+        &mut v as *mut u64 as *mut core::ffi::c_void,
+        8,
+        &mut br as *mut usize,
+    );
+    if status != 0 || br != 8 { return 0; }
+    v
 }
 
 #[inline(always)]
 unsafe fn d2r_read_u32(va: usize) -> u32 {
     if !is_safe_va(va) { return 0; }
-    if !page_readable(va) { return 0; }
-    core::ptr::read_unaligned(va as *const u32)
+    let mut v: u32 = 0;
+    let mut br: usize = 0;
+    let status = NtReadVirtualMemory(
+        GetCurrentProcess(),
+        va as *const core::ffi::c_void,
+        &mut v as *mut u32 as *mut core::ffi::c_void,
+        4,
+        &mut br as *mut usize,
+    );
+    if status != 0 || br != 4 { return 0; }
+    v
 }
 
 #[inline(always)]
 unsafe fn d2r_read_u16(va: usize) -> u16 {
     if !is_safe_va(va) { return 0; }
-    if !page_readable(va) { return 0; }
-    core::ptr::read_unaligned(va as *const u16)
+    let mut v: u16 = 0;
+    let mut br: usize = 0;
+    let status = NtReadVirtualMemory(
+        GetCurrentProcess(),
+        va as *const core::ffi::c_void,
+        &mut v as *mut u16 as *mut core::ffi::c_void,
+        2,
+        &mut br as *mut usize,
+    );
+    if status != 0 || br != 2 { return 0; }
+    v
 }
 
 #[inline(always)]
 unsafe fn d2r_read_u8(va: usize) -> u8 {
     if !is_safe_va(va) { return 0; }
-    if !page_readable(va) { return 0; }
-    core::ptr::read_unaligned(va as *const u8)
+    let mut v: u8 = 0;
+    let mut br: usize = 0;
+    let status = NtReadVirtualMemory(
+        GetCurrentProcess(),
+        va as *const core::ffi::c_void,
+        &mut v as *mut u8 as *mut core::ffi::c_void,
+        1,
+        &mut br as *mut usize,
+    );
+    if status != 0 || br != 1 { return 0; }
+    v
 }
 
 /// Copy `len` bytes from D2R virtual address `va` into snapshot data blob at
@@ -5189,8 +5282,21 @@ unsafe fn snapshot_add_region(
 
     let base = shm as *mut u8;
     let dst = base.add(OFF_SNAPSHOT_DATA + data_cursor);
-    // Copy D2R bytes into SHM. This is a memcpy within our own process.
-    core::ptr::copy_nonoverlapping(va as *const u8, dst, len);
+    // Kernel-probed copy — Arxan can flip a middle page mid-walk; NtRVM
+    // returns STATUS_PARTIAL_COPY instead of raising an AV that would
+    // cascade through crash_diag_veh. If the copy failed or was partial,
+    // skip the region entry entirely (don't mirror half a struct).
+    let mut br: usize = 0;
+    let status = NtReadVirtualMemory(
+        GetCurrentProcess(),
+        va as *const core::ffi::c_void,
+        dst as *mut core::ffi::c_void,
+        len,
+        &mut br as *mut usize,
+    );
+    if status != 0 || br != len {
+        return (data_cursor, region_count);
+    }
 
     // Write RegionEntry at index `region_count`.
     let entry_off = OFF_SNAPSHOT_REGIONS + region_count * SNAPSHOT_REGION_ENTRY_SIZE;
@@ -5208,6 +5314,7 @@ unsafe fn snapshot_add_region(
 /// WaypointTable) into SHM at OFF_SNAP_*, then flips CMD_COMMAND_FLAG.
 /// We copy them into globals, resolve D2R base, set enabled flag.
 unsafe fn dispatch_snapshot_init(shm: *mut SharedBuffer) {
+    shm_write_u32(shm, OFF_DEBUG_STEP, 0x50); // enter snapshot init
     // Phase C: derive per-boot XOR key from rdtsc (defeats static-scan
     // signatures on D2R offset constants in rmod memory).
     if G_SNAP_VA_XOR_KEY == 0 {
@@ -5215,11 +5322,15 @@ unsafe fn dispatch_snapshot_init(shm: *mut SharedBuffer) {
         // re-init is fine — values get re-encoded with new key on each init.
         G_SNAP_VA_XOR_KEY = (rdtsc_u64() as usize ^ 0xA5A5_5A5A_3C3C_C3C3) | 1;
     }
+    shm_write_u32(shm, OFF_DEBUG_STEP, 0x51); // XOR key set
     // Fresh read of bot-supplied offsets — XOR-encode before storing.
     let key = G_SNAP_VA_XOR_KEY;
     G_SNAP_UNIT_TABLE_VA_XOR = (shm_read_u64(shm as *const SharedBuffer, OFF_SNAP_UNIT_TABLE) as usize) ^ key;
+    shm_write_u32(shm, OFF_DEBUG_STEP, 0x52); // unit table read
     G_SNAP_EXPANSION_VA_XOR  = (shm_read_u64(shm as *const SharedBuffer, OFF_SNAP_EXPANSION) as usize) ^ key;
+    shm_write_u32(shm, OFF_DEBUG_STEP, 0x53); // expansion read
     G_SNAP_WAYPOINT_VA_XOR   = (shm_read_u64(shm as *const SharedBuffer, OFF_SNAP_WAYPOINT_TABLE) as usize) ^ key;
+    shm_write_u32(shm, OFF_DEBUG_STEP, 0x54); // waypoint read
 
     // D2R module base — Phase C: PEB->ImageBaseAddress (no kernel32 call).
     let base = peb_image_base();
@@ -5230,7 +5341,15 @@ unsafe fn dispatch_snapshot_init(shm: *mut SharedBuffer) {
     core::ptr::write_unaligned(shm_u8.add(OFF_SNAP_MAGIC) as *mut u32, SNAP_MAGIC);
     core::ptr::write_unaligned(shm_u8.add(OFF_SNAP_VERSION) as *mut u32, SNAP_VERSION_A);
     core::ptr::write_unaligned(shm_u8.add(OFF_SNAP_D2R_BASE) as *mut u64, base as u64);
-    core::ptr::write_unaligned(shm_u8.add(OFF_SNAP_FLAGS) as *mut u32, SNAP_FLAG_ENABLED);
+    // Walker starts MINIMAL by default — the only stable shape under Arxan
+    // as of 14:35 live (full scan with hardcoded R1..R4 reads or entity/
+    // main-player sweeps trips count=55..338 AVs in seconds). Bot clears
+    // SNAP_FLAG_WALKER_MINIMAL on OFF_SNAP_FLAGS once a safe full-scan path
+    // lands (TimerQueue worker / GetTickCount hook / batched CMD_ROP_READ).
+    core::ptr::write_unaligned(
+        shm_u8.add(OFF_SNAP_FLAGS) as *mut u32,
+        SNAP_FLAG_ENABLED | SNAP_FLAG_WALKER_MINIMAL,
+    );
 
     G_SNAPSHOT_ENABLED = true;
 
@@ -5259,20 +5378,10 @@ unsafe fn dispatch_snapshot_init(shm: *mut SharedBuffer) {
 /// runs on a dedicated worker thread (`snapshot_worker_thread_fn`). Present
 /// returns immediately.
 unsafe fn snapshot_tick_write(shm: *mut SharedBuffer) {
-    // Activated 2026-04-18: walker runs inline in Present. Earlier plan had
-    // it off-thread via snapshot_worker_thread_fn, but CreateThread inside
-    // Arxan-watched rmod pages silently blocks (Plan B investigation). In
-    // practice the walker only reads committed D2R memory + writes into
-    // SHM — measured under 1 ms per tick in offline profiling — so running
-    // it from Present is well inside budget.
-    //
-    // crash_diag_veh still catches AVs (unmapped pages during a D2R reload
-    // race), and snapshot_walker_scan's own internal checks re-read volatile
-    // pointers so a fault doesn't corrupt partial tick data.
-    //
-    // Rate limiting: if the walker exceeds its soft budget the tick skips
-    // this call via SNAP_FLAG_WALKER_SKIP (bit 3 of OFF_SNAP_FLAGS), which
-    // operators can toggle via CmdSnapshotInit re-invocation.
+    // Walker runs inline in Present. Earlier plan had it off-thread but
+    // CreateThread inside Arxan-watched rmod pages silently blocks (Plan B
+    // investigation). In practice the walker only reads committed D2R memory
+    // + writes into SHM — well inside 16 ms Present budget.
     snapshot_walker_scan(shm);
 }
 
@@ -5282,11 +5391,54 @@ unsafe fn snapshot_walker_scan(shm: *mut SharedBuffer) {
     if !G_SNAPSHOT_ENABLED || G_SNAP_UNIT_TABLE_VA_XOR == 0 {
         return;
     }
+    shm_write_u32(shm, OFF_DEBUG_STEP, 0x60); // walker entered
+
+    // Walker active 04-18 14:10, throttled. Single-read probe (CMD_ROP_READ ×
+    // 100 rapid) proved that NtRVM from Present context is safe per-call —
+    // but un-throttled walker fires ~30 reads per frame × 60 fps = 2k reads/s
+    // which trips an Arxan rate / pattern detector (live 14:05 test: count=123
+    // AVs, D2R dies fault_va=-1 2 s after walker activation).
+    //
+    // Throttle: full scan runs once every WALKER_FRAME_PERIOD frames. Between
+    // scans the walker returns fast, just bumps the tick so bot knows rmod is
+    // alive. Reduces read rate to ~250 /s — still worlds cheaper than koolo's
+    // 4-5 k RPM/s but under whatever Arxan threshold the cascade implied.
+    //
+    // Fallback: SNAP_FLAG_WALKER_SKIP bit 3 of OFF_SNAP_FLAGS forces inert
+    // mode — bot can flip it at runtime if live scan misbehaves.
+    // Bot can tune the throttle at runtime by writing to OFF_SNAP_WALKER_PERIOD.
+    // Defaults to 60 (one scan per second at 60 fps) which sits comfortably
+    // below whatever Arxan rate-threshold killed the 8-frame scan (count=55
+    // AVs at 14:18 live). Bot steps this down to tighten up as observed
+    // stability allows.
+    const WALKER_FRAME_PERIOD_DEFAULT: u32 = 60;
+    static mut WALKER_FRAME_COUNTER: u32 = 0;
 
     // Diagnostic gate: bit 3 (WALKER_SKIP) of OFF_SNAP_FLAGS → bump tick only,
     // skip all D2R derefs. Isolates "SnapshotInit alone vs walker reads".
     let flags_now = core::ptr::read_volatile((shm as *const u8).add(OFF_SNAP_FLAGS) as *const u32);
     if flags_now & SNAP_FLAG_WALKER_SKIP != 0 {
+        let shm_u8 = shm as *mut u8;
+        let tick = core::ptr::read_unaligned(shm_u8.add(OFF_SNAP_TICK) as *const u64);
+        core::ptr::write_volatile(shm_u8.add(OFF_SNAP_TICK) as *mut u64, tick.wrapping_add(1));
+        return;
+    }
+
+    // Frame throttle. Bot-controlled via OFF_SNAP_WALKER_PERIOD; clamp into
+    // [1, 600] so a zero or runaway write can't brick the scan.
+    let raw_period = core::ptr::read_volatile(
+        (shm as *const u8).add(OFF_SNAP_WALKER_PERIOD) as *const u32,
+    );
+    let period = if raw_period == 0 {
+        WALKER_FRAME_PERIOD_DEFAULT
+    } else if raw_period > 600 {
+        600
+    } else {
+        raw_period
+    };
+    WALKER_FRAME_COUNTER = WALKER_FRAME_COUNTER.wrapping_add(1);
+    if WALKER_FRAME_COUNTER % period != 0 {
+        // Still bump tick so bot's liveness probe sees rmod is running.
         let shm_u8 = shm as *mut u8;
         let tick = core::ptr::read_unaligned(shm_u8.add(OFF_SNAP_TICK) as *const u64);
         core::ptr::write_volatile(shm_u8.add(OFF_SNAP_TICK) as *mut u64, tick.wrapping_add(1));
@@ -5302,33 +5454,54 @@ unsafe fn snapshot_walker_scan(shm: *mut SharedBuffer) {
     let mut regions: usize = 0;
     let mut flags: u32 = SNAP_FLAG_ENABLED;
 
-    // R1: UnitTable slots (128 pointers × 8 B).
-    let (c, r) = snapshot_add_region(shm, cursor, regions, snap_unit_table_va(), 128 * 8);
-    cursor = c; regions = r;
+    // MINIMAL-walker mode gates the hardcoded R1..R4 reads (UnitTable,
+    // Expansion, Waypoint). In full mode these are mirrored so Go's
+    // `GetRawPlayerUnits` / `WaypointTableData` can serve from snapshot.
+    // In minimal mode we trust the bot-provided static-region table and
+    // skip everything else — surface used by the Arxan-sentinel bisection
+    // when the standard scan trips a honeypot.
+    // Minimal mode skips the hardcoded R1..R4 reads, the entity-row walks,
+    // and the main-player scan. Bit 5 is set on initial SHM flags write in
+    // dispatch_snapshot_init, so the walker runs minimal by default — that's
+    // the only shape proven stable (14:35 live: single-phase Phase 1 with
+    // SNAPSHOT_ENABLE=1+MODE2=1+CLAUDE_MODE=1 survived 60 s, D2R alive). Bot
+    // can clear the bit to opt into full scans once a thread-context shift
+    // (TimerQueue / GetTickCount hook) is in place.
+    let minimal = (flags_now & SNAP_FLAG_WALKER_MINIMAL) != 0;
 
-    // R1b: 8-byte ptr slot at snap_expansion_va(). Go reads
-    //   `gd.Process.ReadUInt(moduleBase + offset.Expansion, Uint64)`
-    // to get the expansion struct address. SnapshotReader must be able to serve
-    // that read, so the 8 bytes AT the static slot must be mirrored too —
-    // separate from the dereferenced target below.
-    let (c, r) = snapshot_add_region(shm, cursor, regions, snap_expansion_va(), 8);
-    cursor = c; regions = r;
-
-    // R2: expansion struct target (dereferenced — needs +0x5C for LoD flag).
-    let exp_ptr_target = d2r_read_u64(snap_expansion_va()) as usize;
-    if exp_ptr_target != 0 {
-        let (c, r) = snapshot_add_region(shm, cursor, regions, exp_ptr_target, 0x80);
+    shm_write_u32(shm, OFF_DEBUG_STEP, 0x61); // R1 about to start
+    if !minimal {
+        // R1: UnitTable slots (128 pointers × 8 B).
+        let (c, r) = snapshot_add_region(shm, cursor, regions, snap_unit_table_va(), 128 * 8);
         cursor = c; regions = r;
-    }
 
-    // R2b: 8-byte ptr slot at snap_waypoint_va(). Go reads
-    //   `gd.Process.ReadUInt(moduleBase + offset.WaypointTableOffset, Uint64)`
-    // in WaypointTableData.
-    let (c, r) = snapshot_add_region(shm, cursor, regions, snap_waypoint_va(), 8);
-    cursor = c; regions = r;
+        shm_write_u32(shm, OFF_DEBUG_STEP, 0x62); // R1b
+        // R1b: 8-byte ptr slot at snap_expansion_va(). Go reads
+        //   `gd.Process.ReadUInt(moduleBase + offset.Expansion, Uint64)`
+        // to get the expansion struct address. SnapshotReader must be able to serve
+        // that read, so the 8 bytes AT the static slot must be mirrored too —
+        // separate from the dereferenced target below.
+        let (c, r) = snapshot_add_region(shm, cursor, regions, snap_expansion_va(), 8);
+        cursor = c; regions = r;
 
-    // R3 + R4: waypoint struct + data (decodeWaypointMasks).
-    let wp_struct_va = d2r_read_u64(snap_waypoint_va()) as usize;
+        shm_write_u32(shm, OFF_DEBUG_STEP, 0x63); // R2
+        // R2: expansion struct target (dereferenced — needs +0x5C for LoD flag).
+        let exp_ptr_target = d2r_read_u64(snap_expansion_va()) as usize;
+        if exp_ptr_target != 0 {
+            let (c, r) = snapshot_add_region(shm, cursor, regions, exp_ptr_target, 0x80);
+            cursor = c; regions = r;
+        }
+
+        shm_write_u32(shm, OFF_DEBUG_STEP, 0x64); // R2b
+        // R2b: 8-byte ptr slot at snap_waypoint_va(). Go reads
+        //   `gd.Process.ReadUInt(moduleBase + offset.WaypointTableOffset, Uint64)`
+        // in WaypointTableData.
+        let (c, r) = snapshot_add_region(shm, cursor, regions, snap_waypoint_va(), 8);
+        cursor = c; regions = r;
+
+        shm_write_u32(shm, OFF_DEBUG_STEP, 0x65); // R3+R4 waypoint
+        // R3 + R4: waypoint struct + data (decodeWaypointMasks).
+        let wp_struct_va = d2r_read_u64(snap_waypoint_va()) as usize;
     if wp_struct_va != 0 {
         let (c, r) = snapshot_add_region(shm, cursor, regions, wp_struct_va, 0x100);
         cursor = c; regions = r;
@@ -5338,17 +5511,36 @@ unsafe fn snapshot_walker_scan(shm: *mut SharedBuffer) {
             let (c, r) = snapshot_add_region(shm, cursor, regions, wp_data_va, 0x200);
             cursor = c; regions = r;
         }
-    }
+        }
+    } // end `if !minimal` gate for R1..R4
 
+    shm_write_u32(shm, OFF_DEBUG_STEP, 0x66); // static regions about to process
     // Generic static-region table — bot enqueues {va, len, role} triples in
     // SHM before CmdSnapshotInit. We mirror each head verbatim every tick so
     // bot can read hover / UI / WidgetStates / FPS / KeyBindings / Quest / TZ
     // / etc. via the same SnapshotReader region lookup. role != REGULAR means
     // "also dereference this head and mirror the chain's inner targets" — B2b.
+    //
+    // In the TRULY-minimal diagnostic mode we skip this block too, so we can
+    // confirm whether Arxan is tripped by any walker read at all or only by
+    // specific chains. Gated by OFF_SNAP_WALKER_PERIOD high bit — any write
+    // with bit 31 set also zeroes the static-region sweep, letting the bot
+    // A/B from HTTP without a rmod rebuild.
+    // High bit of OFF_SNAP_WALKER_PERIOD additionally suppresses every
+    // static-region mirror, letting the bot bisect "is it a chain walker
+    // dereference or a literal head read that trips Arxan?" without a rmod
+    // rebuild. In minimal mode we still honour the literal head writes so
+    // the bot can progressively add regions; clearing this bit plus the
+    // MINIMAL flag gets the full scan back.
+    let no_statics = (raw_period & 0x8000_0000) != 0;
     let shm_u8_entries = shm as *const u8;
-    let static_count = core::ptr::read_unaligned(
-        shm_u8_entries.add(OFF_SNAP_STATIC_COUNT) as *const u32,
-    ) as usize;
+    let static_count = if no_statics {
+        0
+    } else {
+        core::ptr::read_unaligned(
+            shm_u8_entries.add(OFF_SNAP_STATIC_COUNT) as *const u32,
+        ) as usize
+    };
     let clamped = if static_count > SNAP_STATIC_MAX { SNAP_STATIC_MAX } else { static_count };
     for i in 0..clamped {
         let entry_va = shm_u8_entries.add(OFF_SNAP_STATIC_TABLE + i * 16) as *const StaticRegion;
@@ -5362,6 +5554,12 @@ unsafe fn snapshot_walker_scan(shm: *mut SharedBuffer) {
 
         // Role-specific chain walkers. is_safe_va guard (NtQueryVirtualMemory
         // page-mapped check) keeps Present-thread AV-free even on garbage VAs.
+        // In MINIMAL mode we skip the chain walkers entirely — only literal
+        // head regions get mirrored. Lets the bot bisect which derefs are
+        // tripping Arxan by adding them one at a time as explicit regions.
+        if minimal {
+            continue;
+        }
         match entry.role {
             STATIC_ROLE_PING_CHAIN => {
                 // Go: ptrToStructPtr = moduleBase + offset.Ping  → head (mirrored above as 8 B).
@@ -5428,12 +5626,24 @@ unsafe fn snapshot_walker_scan(shm: *mut SharedBuffer) {
         }
     }
 
+    shm_write_u32(shm, OFF_DEBUG_STEP, 0x67); // B3 walker rows about to start
+    // MINIMAL mode skips every deep D2R walk — entity rows and main-player
+    // scan both rely on snap_unit_table_va() and chase pointer chains, which
+    // is exactly the shape that triggered count=338 AVs at period=60 when
+    // walker went full (live 14:22). Literal static regions bot enqueues
+    // still get mirrored above.
+    if !minimal {
+
     // B3 walkers — is_safe_va guard (canonical + 8-byte alignment) blocks
     // most garbage pointers; future SEH wrap will harden further.
     snap_walk_entity_row(shm, &mut cursor, &mut regions, snap_unit_table_va() + 1 * 1024, true);  // monsters/corpses
+    shm_write_u32(shm, OFF_DEBUG_STEP, 0x67 | 0x1000); // monsters done
     snap_walk_entity_row(shm, &mut cursor, &mut regions, snap_unit_table_va() + 2 * 1024, false); // objects
+    shm_write_u32(shm, OFF_DEBUG_STEP, 0x67 | 0x2000); // objects done
     snap_walk_entity_row(shm, &mut cursor, &mut regions, snap_unit_table_va() + 4 * 1024, false); // items (B3.2)
+    shm_write_u32(shm, OFF_DEBUG_STEP, 0x67 | 0x3000); // items done
     snap_walk_entity_row(shm, &mut cursor, &mut regions, snap_unit_table_va() + 5 * 1024, false); // entrances
+    shm_write_u32(shm, OFF_DEBUG_STEP, 0x68); // B3 done, main player scan about to start
 
     // Scan UnitTable for main player (128 slots × 8 bytes, each a linked list head)
     for i in 0..128usize {
@@ -5471,6 +5681,8 @@ unsafe fn snapshot_walker_scan(shm: *mut SharedBuffer) {
             player_unit_va = d2r_read_u64(player_unit_va + 0x158) as usize;
         }
     }
+
+    } // end `if !minimal` gate for B3 walkers + main player scan
 
     // Write header fields (magic/version/base already set by init).
     core::ptr::write_unaligned(shm_u8.add(OFF_SNAP_REGION_COUNT) as *mut u32, regions as u32);

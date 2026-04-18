@@ -718,7 +718,9 @@ func (mng *SupervisorManager) buildSupervisor(supervisorName string, logger *slo
 	}
 
 	gameTitle := supervisorName
-	winproc.SetWindowText.Call(uintptr(hwnd), uintptr(unsafe.Pointer(syscall.StringToUTF16Ptr(gameTitle))))
+	titlePtr2, _ := syscall.UTF16PtrFromString(gameTitle)
+	winproc.SetWindowText.Call(uintptr(hwnd), uintptr(unsafe.Pointer(titlePtr2)))
+	runtime.KeepAlive(titlePtr2)
 	crashDetector := game.NewCrashDetector(supervisorName, int32(pid), uintptr(hwnd), mng.logger, restartFunc)
 
 	return supervisor, crashDetector, nil

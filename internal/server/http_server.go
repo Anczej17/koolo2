@@ -7835,9 +7835,12 @@ func (s *HttpServer) debugRopRead(w http.ResponseWriter, r *http.Request) {
 	fmt.Sscanf(r.URL.Query().Get("src"), "0x%x", &src)
 	fmt.Sscanf(r.URL.Query().Get("dst"), "0x%x", &dst)
 	fmt.Sscanf(r.URL.Query().Get("len"), "0x%x", &length)
-	if src == 0 || dst == 0 || length == 0 {
+	// dst=0 is the rmod sentinel: "use internal SHM scratch buffer".
+	// That path is the safest single-read probe because the destination is
+	// always writable and we don't depend on knowing any app-side VA.
+	if src == 0 || length == 0 {
 		w.WriteHeader(http.StatusBadRequest)
-		fmt.Fprintf(w, `{"error":"src/dst/len required (hex)"}`)
+		fmt.Fprintf(w, `{"error":"src/len required (hex, non-zero)"}`)
 		return
 	}
 	status, err := pres.RopRead(src, dst, length)

@@ -20,6 +20,7 @@ import (
 	"local/internal/svc/internal/bot"
 	"local/internal/svc/internal/config"
 	"local/internal/svc/internal/event"
+	"local/internal/svc/internal/game"
 	"local/internal/svc/internal/gamelib/memory"
 	"local/internal/svc/internal/ntapi"
 	"local/internal/svc/internal/remote/discord"
@@ -147,6 +148,15 @@ func main() {
 			fmt.Fprintf(os.Stderr, "anti-debug detected, exiting\n")
 			os.Exit(0)
 		})
+	}
+
+	// Reap zombie D2R processes from a prior run BEFORE config/logger so any
+	// subsequent OpenProcess-by-name can't latch onto a dead PID. An Arxan
+	// cascade leaves D2R in a state where taskkill cannot release it; our bot
+	// (or a crashed predecessor) holds the handle that pins the EPROCESS.
+	// See internal/game/handle_killer.go:ForceKillZombieD2R for details.
+	if closed, zombies := game.ForceKillZombieD2R(nil); zombies > 0 {
+		fmt.Fprintf(os.Stderr, "zombie_killer: closed=%d zombies=%d at startup\n", closed, zombies)
 	}
 
 	err := config.Load()

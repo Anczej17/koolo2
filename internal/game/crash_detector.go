@@ -54,6 +54,15 @@ func (cd *CrashDetector) Start() {
 		case <-ticker.C:
 			if !cd.isProcessRunning() {
 				cd.logger.Error("Client crash detected ...", slog.Int("PID", int(cd.pid)), slog.String("Supervisor", cd.supervisor))
+				// Pre-restart zombie sweep: if D2R died via Arxan cascade our
+				// bot's handle still pins the EPROCESS. Drain external handles
+				// NOW so the next OpenProcess-by-name can't latch the zombie.
+				if closed, zombies := ForceKillZombieD2R(cd.logger); closed > 0 || zombies > 0 {
+					cd.logger.Info("zombie sweep after crash",
+						slog.String("Supervisor", cd.supervisor),
+						slog.Int("closed", closed),
+						slog.Int("zombies", zombies))
+				}
 				if cd.restartFunc != nil {
 					cd.logger.Info("Attempting to restart client ...", slog.String("Supervisor", cd.supervisor))
 					// Guard restartFunc panics so this goroutine logs + exits
