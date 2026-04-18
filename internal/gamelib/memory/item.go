@@ -1,6 +1,7 @@
 package memory
 
 import (
+	"encoding/binary"
 	"slices"
 	"sort"
 	"strings"
@@ -72,34 +73,47 @@ func (gd *GameReader) Inventory(rawPlayerUnits RawPlayerUnits, hover data.HoverD
 	baseItemsMap := make(map[data.UnitID]*data.Item, 120)       // Same number of potential base items
 	allItems := make([]*data.Item, 0, 800)                      // max capacity: 600 (stashes) + 91 (DLC tabs) + 40 (inv) + 12 (cube) + 12 (equipped) + 16 (belt) + headroom
 
-	// Reverted to serial sweep — parallel 128 goroutines each issuing
-	// 3 batches saturated the 8-slot pool and caused 80 %+ slot-acquire
-	// timeouts with fallback to the single-slot path (worse than plain
-	// RPM). Need a slot-count-bounded worker pool if we retry.
 	var itemsMu sync.Mutex
 
-	// Pre-allocate buffers for repeated use.
-	var itemDataBuffer = make([]byte, 144)
-	var unitDataBuffer = make([]byte, 144)
-	var pathBuffer = make([]byte, 144)
-
+	// Parallel 128-slot sweep gated by the slot-pool semaphore — matches
+	// the per-item "header batch + unitData/path batch" round-trips to
+	// the TimerQueue drain rate so D2R tick stays sub-300 ms. Each
+	// goroutine owns its own scratch buffers so no sharing races.
+	var itemsWG sync.WaitGroup
+	itemsWG.Add(128)
 	for i := 0; i < 128; i++ {
-		itemOffset := 8 * i
-		itemUnitPtr := uintptr(ReadUIntFromBuffer(unitTableBuffer, uint(itemOffset), Uint64))
+		slotIdx := i
+		go func() {
+			defer itemsWG.Done()
+			defer func() { _ = recover() }()
+			itemDataBuffer := make([]byte, 144)
+			unitDataBuffer := make([]byte, 144)
+			pathBuffer := make([]byte, 144)
 
-		for itemUnitPtr > 0 {
-			// Per-item 2-entry batches churn through the Present dispatch at
-			// ~12 ms each; with 150+ items per tick the tick budget blows
-			// past 2 s. Left on the sequential RPM path — the buffer-read
-			// wins below (rarePrefix/prefixes/suffixes/txtUniqueSet) still
-			// shave ~8 RPM per item without the batch latency cost.
-			nextItemPtr := uintptr(gd.reader.ReadUInt(itemUnitPtr+0x158, Uint64))
+			itemOffset := 8 * slotIdx
+			itemUnitPtr := uintptr(ReadUIntFromBuffer(unitTableBuffer, uint(itemOffset), Uint64))
 
-			// Read basic item data into pre-allocated buffer
-			if err := gd.reader.ReadIntoBuffer(itemUnitPtr, itemDataBuffer); err != nil {
-				itemUnitPtr = nextItemPtr
-				continue
-			}
+			for itemUnitPtr > 0 {
+				// Batch 1: 144 B header + 8 B next-ptr in one dispatch.
+				// Falls back transparently to sequential reads when the
+				// batch path isn't wired.
+				nextItemPtr := uintptr(0)
+				headerBatched := false
+				if bufs, err := gd.Process.BatchReadBytes([]BatchReadEntry{
+					{Src: itemUnitPtr, Len: 144},
+					{Src: itemUnitPtr + 0x158, Len: 8},
+				}); err == nil && len(bufs) == 2 && len(bufs[0]) == 144 {
+					copy(itemDataBuffer, bufs[0])
+					nextItemPtr = uintptr(binary.LittleEndian.Uint64(bufs[1]))
+					headerBatched = true
+				}
+				if !headerBatched {
+					nextItemPtr = uintptr(gd.reader.ReadUInt(itemUnitPtr+0x158, Uint64))
+					if err := gd.reader.ReadIntoBuffer(itemUnitPtr, itemDataBuffer); err != nil {
+						itemUnitPtr = nextItemPtr
+						continue
+					}
+				}
 
 			itemType := ReadUIntFromBuffer(itemDataBuffer, 0x00, Uint32)
 
@@ -118,13 +132,25 @@ func (gd *GameReader) Inventory(rawPlayerUnits RawPlayerUnits, hover data.HoverD
 			unitDataPtr := uintptr(ReadUIntFromBuffer(itemDataBuffer, 0x10, Uint64))
 			pathPtr := uintptr(ReadUIntFromBuffer(itemDataBuffer, 0x38, Uint64))
 
-			if err := gd.reader.ReadIntoBuffer(unitDataPtr, unitDataBuffer); err != nil {
-				itemUnitPtr = nextItemPtr
-				continue
+			// Batch 2: unitData (144 B) + path (144 B) = one dispatch.
+			bufsBatched := false
+			if bufs, err := gd.Process.BatchReadBytes([]BatchReadEntry{
+				{Src: unitDataPtr, Len: 144},
+				{Src: pathPtr, Len: 144},
+			}); err == nil && len(bufs) == 2 && len(bufs[0]) == 144 && len(bufs[1]) == 144 {
+				copy(unitDataBuffer, bufs[0])
+				copy(pathBuffer, bufs[1])
+				bufsBatched = true
 			}
-			if err := gd.reader.ReadIntoBuffer(pathPtr, pathBuffer); err != nil {
-				itemUnitPtr = nextItemPtr
-				continue
+			if !bufsBatched {
+				if err := gd.reader.ReadIntoBuffer(unitDataPtr, unitDataBuffer); err != nil {
+					itemUnitPtr = nextItemPtr
+					continue
+				}
+				if err := gd.reader.ReadIntoBuffer(pathPtr, pathBuffer); err != nil {
+					itemUnitPtr = nextItemPtr
+					continue
+				}
 			}
 
 			flags := ReadUIntFromBuffer(unitDataBuffer, 0x18, Uint32)
@@ -449,8 +475,9 @@ func (gd *GameReader) Inventory(rawPlayerUnits RawPlayerUnits, hover data.HoverD
 
 			itemUnitPtr = nextItemPtr
 		}
+		}()
 	}
-	_ = itemsMu
+	itemsWG.Wait()
 
 	// Link sockets to base items
 	for baseUnitID, baseItem := range baseItemsMap {

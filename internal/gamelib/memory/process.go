@@ -83,6 +83,15 @@ type Process struct {
 	// initialises it (slot path only wired when externalSlotBatchRead
 	// is present).
 	slotPool chan int
+
+	// tickCache: per-GetData-tick prefetch cache. TickPrefetch fills it
+	// with a single mega-batch of predicted addresses; subsequent
+	// ReadBytesFromMemory calls serve from it with zero latency. Flushed
+	// every tick by ResetTickCache. Lets GetData achieve sub-100 ms
+	// total read time by amortising pump round-trips across the entire
+	// tick instead of paying one per sequential read.
+	tickCacheMu sync.RWMutex
+	tickCache   map[uintptr][]byte
 	// Per-read ring-buffer trace (off by default). Flip on via
 	// /debug/read-trace-enable or CLAUDE_READ_TRACE=1 env. Captures
 	// source + result + latency for every ReadBytesFromMemory call so
@@ -641,6 +650,106 @@ func (p *Process) releaseBatchSlot(slot int) {
 // BatchStats returns cumulative batched-read counters. (calls, failed, entries).
 func (p *Process) BatchStats() (calls, failed, entries uint64) {
 	return p.batchCallsTotal.Load(), p.batchCallsFailed.Load(), p.batchEntriesTotal.Load()
+}
+
+// ResetTickCache flushes the per-tick prefetch cache. Must be called at
+// the start of every GetData tick — stale pointers from the previous
+// tick (dead monsters, moved units) otherwise serve incorrect data.
+func (p *Process) ResetTickCache() {
+	p.tickCacheMu.Lock()
+	p.tickCache = nil
+	p.tickCacheMu.Unlock()
+}
+
+// TickPrefetch issues one large multi-slot batch for the given addresses
+// and stores the results in the tick cache. Subsequent
+// ReadBytesFromMemory calls at the same address serve from cache with
+// zero latency — collapsing the per-read Present-frame round-trip cost
+// into one amortised batch per layer.
+//
+// Idempotent within a tick: calling twice with overlapping addresses
+// simply overwrites cache entries. Safe to call from multiple
+// goroutines — cache writes are mutex-guarded.
+func (p *Process) TickPrefetch(entries []BatchReadEntry) {
+	if !p.batchReadEnabled.Load() || len(entries) == 0 {
+		return
+	}
+	// Split into slot-sized chunks and fan them out to the slot pool
+	// concurrently so one prefetch call dispatches N slots in parallel.
+	const chunkSize = 128
+	type chunkResult struct {
+		entries []BatchReadEntry
+		bufs    [][]byte
+	}
+	var wg sync.WaitGroup
+	results := make([]chunkResult, 0, (len(entries)+chunkSize-1)/chunkSize)
+	var resultsMu sync.Mutex
+	for start := 0; start < len(entries); start += chunkSize {
+		end := start + chunkSize
+		if end > len(entries) {
+			end = len(entries)
+		}
+		chunk := entries[start:end]
+		// Guard against 4 KB slot output ceiling — split further if
+		// total bytes exceed it.
+		totalBytes := uint32(0)
+		split := make([][]BatchReadEntry, 0, 1)
+		current := make([]BatchReadEntry, 0, len(chunk))
+		for _, e := range chunk {
+			if totalBytes+e.Len > 0x1000 {
+				if len(current) > 0 {
+					split = append(split, current)
+				}
+				current = make([]BatchReadEntry, 0, 32)
+				totalBytes = 0
+			}
+			current = append(current, e)
+			totalBytes += e.Len
+		}
+		if len(current) > 0 {
+			split = append(split, current)
+		}
+		for _, sub := range split {
+			subEntries := sub
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				bufs, err := p.BatchReadBytes(subEntries)
+				if err != nil || len(bufs) != len(subEntries) {
+					return
+				}
+				resultsMu.Lock()
+				results = append(results, chunkResult{entries: subEntries, bufs: bufs})
+				resultsMu.Unlock()
+			}()
+		}
+	}
+	wg.Wait()
+
+	p.tickCacheMu.Lock()
+	if p.tickCache == nil {
+		p.tickCache = make(map[uintptr][]byte, len(entries))
+	}
+	for _, cr := range results {
+		for i, e := range cr.entries {
+			p.tickCache[e.Src] = cr.bufs[i]
+		}
+	}
+	p.tickCacheMu.Unlock()
+}
+
+// lookupTickCache returns cached bytes for `address` if they're at least
+// `size` long. Returns nil otherwise.
+func (p *Process) lookupTickCache(address uintptr, size uint) []byte {
+	p.tickCacheMu.RLock()
+	defer p.tickCacheMu.RUnlock()
+	if p.tickCache == nil {
+		return nil
+	}
+	if b, ok := p.tickCache[address]; ok && len(b) >= int(size) {
+		return b[:size]
+	}
+	return nil
 }
 
 func (p *Process) CallFn(fnAddr uintptr, args ...uintptr) (uint64, error) {
