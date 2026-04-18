@@ -1736,41 +1736,11 @@ unsafe fn dispatch_commands() {
             // settle delay; scan command just CHECKS `is_some()`.
             shm_write_u32(shm, OFF_ROP_DBG, 0xAAAA0008);
 
-            shm_write_u32(shm, OFF_ROP_SCAN_COUNT, G_ROP_GADGETS.count as u32);
+            // DEBUG: SHORT-CIRCUIT — skipping count write, breakdown, and
+            // all post-scan SHM writes to isolate the crashing op. Just
+            // acknowledge DONE. Revert once we've found the specific line
+            // that's crashing.
             shm_write_u32(shm, OFF_ROP_DBG, 0xAAAA0009);
-
-            // Breakdown only runs on the FINAL scan chunk — skipped on
-            // intermediate chunks to keep per-frame budget small. Pool state
-            // doesn't change between chunks unless a scan adds new entries,
-            // so intermediate stale breakdown is fine.
-            if G_ROP_SCAN_COMPLETE {
-                let mut kind_counts = [0u32; 8];
-                let mut pop_mask: u16 = 0;
-                let gcount = G_ROP_GADGETS.count;
-                if gcount <= rop_gadgets::GADGET_POOL_SIZE {
-                    for i in 0..gcount {
-                        let g = &G_ROP_GADGETS.pool[i];
-                        let idx = match g.kind {
-                            rop_gadgets::GadgetKind::Unknown    => 0,
-                            rop_gadgets::GadgetKind::PopReg     => { pop_mask |= g.regs_touched; 1 },
-                            rop_gadgets::GadgetKind::MovRegMem  => 2,
-                            rop_gadgets::GadgetKind::MovMemReg  => 3,
-                            rop_gadgets::GadgetKind::RepMovsb   => 4,
-                            rop_gadgets::GadgetKind::RepMovsq   => 5,
-                            rop_gadgets::GadgetKind::XchgReg    => 6,
-                            rop_gadgets::GadgetKind::Ret        => 7,
-                        };
-                        kind_counts[idx] += 1;
-                    }
-                }
-                shm_write_u32(shm, OFF_ROP_DBG, 0xAAAA000A);
-                for i in 0..8 {
-                    shm_write_u32(shm, OFF_ROP_KIND_COUNTS + i * 4, kind_counts[i]);
-                }
-                shm_write_u32(shm, OFF_ROP_POPREG_MASK, pop_mask as u32);
-                shm_write_u32(shm, OFF_ROP_DBG, 0xAAAA000B);
-            }
-
             let ready = G_ROP_SCAN_COMPLETE
                 && G_ROP_EXECUTOR.is_some()
                 && G_ROP_STACK.is_some()
