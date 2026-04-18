@@ -541,6 +541,19 @@ func (p *Presenter) RopPool() (RopPoolBreakdown, error) {
 	}, nil
 }
 
+// RopDbg reads the current OFF_ROP_DBG marker. Useful for post-init
+// diagnostics (init_from_shm writes 0xC0DE00xx band; Present writes
+// 0xBEEF00xx; worker writes 0xCAFE00xx). If no scan ran yet, last value
+// is the init marker.
+func (p *Presenter) RopDbg() (uint32, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if !p.initialized || p.localView == nil {
+		return 0, fmt.Errorf("presenter not initialized")
+	}
+	return readU32(p.localView, uintptr(OffRopDbg)), nil
+}
+
 // RopWorkerHeartbeat reads the ROP scan worker's heartbeat counter from SHM.
 // Plan B diagnostic: the worker bumps this every ~30 ms. If it stays at 0
 // the thread never spawned; if it increments between calls the worker is

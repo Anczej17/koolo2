@@ -997,6 +997,7 @@ func (s *HttpServer) Listen(port int) error {
 	http.HandleFunc("/debug/rop-scan", s.debugRopScan)
 	http.HandleFunc("/debug/rop-read", s.debugRopRead)
 	http.HandleFunc("/debug/rop-worker-hb", s.debugRopWorkerHb)
+	http.HandleFunc("/debug/rop-dbg", s.debugRopDbg)
 	http.HandleFunc("/debug/dispatch-ping", s.debugDispatchPing)
 	http.HandleFunc("/debug/handle-audit", s.debugHandleAudit)
 	http.HandleFunc("/debug/writemem", s.debugWriteMem)
@@ -7842,6 +7843,31 @@ func (s *HttpServer) debugRopRead(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	fmt.Fprintf(w, `{"ok":true,"status":%d,"note":"2 = ROP handler gated; unit-test trigger first"}`, status)
+}
+
+// debugRopDbg returns the current OFF_ROP_DBG marker. Useful for post-
+// init diagnostics before any scan overwrites it.
+func (s *HttpServer) debugRopDbg(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	character := r.URL.Query().Get("character")
+	ctx := s.manager.GetContext(character)
+	if ctx == nil || ctx.MemoryInjector == nil {
+		w.WriteHeader(http.StatusServiceUnavailable)
+		fmt.Fprintf(w, `{"error":"no supervisor"}`)
+		return
+	}
+	pres := ctx.MemoryInjector.GetPresenter()
+	if pres == nil {
+		w.WriteHeader(http.StatusServiceUnavailable)
+		fmt.Fprintf(w, `{"error":"presenter not initialized"}`)
+		return
+	}
+	dbg, err := pres.RopDbg()
+	if err != nil {
+		fmt.Fprintf(w, `{"ok":false,"error":%q}`, err.Error())
+		return
+	}
+	fmt.Fprintf(w, `{"ok":true,"dbg":"0x%08X"}`, dbg)
 }
 
 // debugRopWorkerHb returns the ROP scan worker's heartbeat counter. Plan B

@@ -112,6 +112,7 @@ extern "system" {
     ) -> HANDLE;
     fn Sleep(dwMilliseconds: DWORD);
     fn CloseHandle(hObject: HANDLE) -> BOOL;
+    fn TerminateThread(hThread: HANDLE, dwExitCode: DWORD) -> BOOL;
     fn OpenThread(dwDesiredAccess: DWORD, bInheritHandle: BOOL, dwThreadId: DWORD) -> HANDLE;
     fn GetCurrentThreadId() -> DWORD;
     fn CreateToolhelp32Snapshot(dwFlags: DWORD, th32ProcessID: DWORD) -> HANDLE;
@@ -1074,20 +1075,46 @@ unsafe fn init_from_shm(shm: *mut SharedBuffer) -> Result<(), u32> {
     // Pre-allocate ROP chain buffers + spawn scan worker.
     // Same as init_all's 3d/3e — init_from_shm is the APC-preferred path
     // so this MUST also create the worker or Plan B never activates.
+    //
+    // Spawn-diag markers go to OFF_ROP_DBG, NOT OFF_ROP_WORKER_HB — the
+    // worker owns the heartbeat slot and a concurrent init shouldn't be
+    // allowed to clobber its counter. Markers: 0xC0DE0001 entered,
+    // 0xC0DE0002 alloc'd, 0xC0DE0033 CreateThread ok, 0xC0DE00EE CT
+    // returned NULL, 0xC0DE0044 thread already existed (re-init).
+    shm_write_u32(shm, OFF_ROP_DBG, 0xC0DE0001);
     let target_va = G_D2R_BASE;
     G_ROP_EXECUTOR    = executor::Executor::new(target_va);
     G_ROP_STACK       = alloc_mgr::AllocatedMemory::new(0x1000);
     G_ROP_TRIGGER_BUF = alloc_mgr::AllocatedMemory::new(0x1000);
+    shm_write_u32(shm, OFF_ROP_DBG, 0xC0DE0002);
     G_ROP_WORKER_SHM = shm;
-    if G_ROP_WORKER_THREAD.is_null() {
+    // If there's a leftover thread handle from a previous load, terminate
+    // it unconditionally and respawn. Even if it's still running, it's
+    // stuck writing to a stale SHM from the previous app.exe session —
+    // that mapping is gone, so every heartbeat write goes nowhere (or
+    // AVs silently). Fresh thread with the current shm as its param is
+    // the only way to get heartbeats into this session's SHM.
+    if !G_ROP_WORKER_THREAD.is_null() {
+        TerminateThread(G_ROP_WORKER_THREAD, 0);
+        CloseHandle(G_ROP_WORKER_THREAD);
+        G_ROP_WORKER_THREAD = core::ptr::null_mut();
+    }
+    {
         G_ROP_WORKER_THREAD = CreateThread(
             core::ptr::null(),
             0,
             rop_scan_worker_thread_fn,
-            core::ptr::null_mut(),
+            shm as *mut core::ffi::c_void,
             0,
             core::ptr::null_mut(),
         );
+        if !G_ROP_WORKER_THREAD.is_null() {
+            shm_write_u32(shm, OFF_ROP_DBG, 0xC0DE0033);
+        } else {
+            shm_write_u32(shm, OFF_ROP_DBG, 0xC0DE00EE);
+        }
+    } else {
+        shm_write_u32(shm, OFF_ROP_DBG, 0xC0DE0044);
     }
 
     shm_write_u32(shm, OFF_DEBUG_STEP, 0x0F);
@@ -1170,7 +1197,7 @@ unsafe fn init_all() -> Result<(), u32> {
             core::ptr::null(),
             0,
             rop_scan_worker_thread_fn,
-            core::ptr::null_mut(),
+            shm as *mut core::ffi::c_void,
             0,
             core::ptr::null_mut(),
         );
@@ -5359,12 +5386,15 @@ unsafe extern "system" fn snapshot_worker_thread_fn(_param: *mut core::ffi::c_vo
 ///  4. Write count + kind_counts + pop_mask into SHM.
 ///  5. Set G_ROP_WORKER_COMPLETE so Present's next CMD_ROP_SCAN returns
 ///     ready=1.
-unsafe extern "system" fn rop_scan_worker_thread_fn(_param: *mut core::ffi::c_void) -> DWORD {
-    // Write a one-shot "worker started" marker BEFORE entering the loop so
-    // post-mortem inspection shows the thread actually got scheduled.
-    let shm_first = G_ROP_WORKER_SHM;
-    if !shm_first.is_null() {
-        shm_write_u32(shm_first, OFF_ROP_WORKER_HB, 1); // seeded at 1; loop bumps
+unsafe extern "system" fn rop_scan_worker_thread_fn(param: *mut core::ffi::c_void) -> DWORD {
+    // Take the shm pointer from the CreateThread param so we don't race
+    // with whatever thread set G_ROP_WORKER_SHM — even if that static
+    // write is still in the other core's cache when we start, our own
+    // param was pushed on the kernel stack at CreateThread time and
+    // arrives via the thread start-up sequence.
+    let initial_shm = param as *mut SharedBuffer;
+    if !initial_shm.is_null() {
+        shm_write_u32(initial_shm, OFF_ROP_WORKER_HB, 1);
     }
     let mut heartbeat: u32 = 1;
     loop {
@@ -5372,7 +5402,9 @@ unsafe extern "system" fn rop_scan_worker_thread_fn(_param: *mut core::ffi::c_vo
             break;
         }
         Sleep(30);
-        let shm = G_ROP_WORKER_SHM;
+        // Prefer the param-captured shm; fall back to the global only
+        // after startup has clearly settled.
+        let shm = if !initial_shm.is_null() { initial_shm } else { core::ptr::read_volatile(&raw const G_ROP_WORKER_SHM) };
         if shm.is_null() {
             continue;
         }
