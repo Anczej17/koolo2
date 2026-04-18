@@ -292,11 +292,12 @@ func closeWindowAndTerminateProcess(hwnd windows.HWND, pid uint32) {
 }
 
 func StartGame(username string, password string, authmethod string, authToken string, realm string, arguments string, useCustomSettings bool) (uint32, win.HWND, error) {
-	// 30 attempts with increasing delays. GPU-P / Hyper-V VMs sometimes
-	// need minutes of GPU pressure to clear — giving up at 8 attempts
-	// broke multi-instance launches where the 5th bot would routinely
-	// fall into a state the first 4 had left behind.
-	const maxGPURetries = 30
+	// Retry effectively forever. GPU-P / Hyper-V VMs sometimes sit in
+	// a starved state for minutes — the user's mandate is "just keep
+	// trying until it launches" because giving up strands all sibling
+	// supervisors in multi-instance runs. Cap at 1000 so a genuinely
+	// broken env eventually surfaces an error instead of hanging.
+	const maxGPURetries = 1000
 
 	// First check for other instances of the game and kill the handles, otherwise we will not be able to start the game
 	err := KillAllClientHandles()
@@ -447,13 +448,16 @@ func StartGame(username string, password string, authmethod string, authToken st
 		if isGPUErrorWindow(foundHwnd) {
 			// Progressive backoff: short waits early, longer waits later.
 			// Measured on the GPU-P VM: first 3-5 attempts fail instantly
-			// (GPU still pinned by previous D2R), then it clears. Using
-			// longer delays past attempt 8 gives Hyper-V vGPU time to
-			// reclaim resources when multi-instance pressure builds.
+			// (GPU still pinned by previous D2R), then it clears. Longer
+			// delays past attempt 8 give Hyper-V vGPU time to reclaim
+			// resources when multi-instance pressure builds. Past 30 we
+			// sit at 30 s — any faster just wastes CPU on a genuinely
+			// starved GPU.
 			gpuRetryDelay := 3 * time.Second
 			if attempt >= 4 { gpuRetryDelay = 5 * time.Second }
 			if attempt >= 8 { gpuRetryDelay = 10 * time.Second }
 			if attempt >= 16 { gpuRetryDelay = 20 * time.Second }
+			if attempt >= 30 { gpuRetryDelay = 30 * time.Second }
 			fmt.Printf("GPU initialization error detected (attempt %d/%d), retrying in %v...\n", attempt+1, maxGPURetries, gpuRetryDelay)
 			closeWindowAndTerminateProcess(foundHwnd, uint32(cmd.Process.Pid))
 			time.Sleep(gpuRetryDelay)
