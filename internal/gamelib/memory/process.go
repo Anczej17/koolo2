@@ -60,8 +60,9 @@ type Process struct {
 	// (GameReader.GetData) can collect all the PlayerUnit chain reads and
 	// service them in one Present frame instead of N. The single-shot
 	// RopReadToScratch stays as a fallback for callers not yet batched.
-	externalBatchRead func(entries []BatchReadEntry) ([][]byte, error)
-	batchReadEnabled  atomic.Bool
+	externalBatchRead     func(entries []BatchReadEntry) ([][]byte, error)
+	externalSlotBatchRead func(slot int, entries []BatchReadEntry) ([][]byte, error)
+	batchReadEnabled      atomic.Bool
 
 	// Async batch pump — coalesces multiple Read*FromMemory calls into
 	// single CMD_ROP_READ_BATCH dispatches. Each caller parks on a
@@ -74,6 +75,14 @@ type Process struct {
 	batchPumpStop    chan struct{}
 	batchPumpRunning atomic.Bool
 	batchPumpWake    chan struct{}
+
+	// slotPool: free-slot indices for the multi-slot batch pool. Any
+	// goroutine (pump drain, explicit BatchReadBytes) competes for a
+	// slot; whoever gets one owns it until release. Buffered equal to
+	// slot count so releases never block. Nil until startBatchPump
+	// initialises it (slot path only wired when externalSlotBatchRead
+	// is present).
+	slotPool chan int
 	// Per-read ring-buffer trace (off by default). Flip on via
 	// /debug/read-trace-enable or CLAUDE_READ_TRACE=1 env. Captures
 	// source + result + latency for every ReadBytesFromMemory call so
@@ -345,6 +354,16 @@ func (p *Process) SetExternalBatchRead(fn func(entries []BatchReadEntry) ([][]by
 	p.externalBatchRead = fn
 }
 
+// SetExternalSlotBatchRead installs the multi-slot batched-read hook
+// (presenter.RopReadSlotBatch). The pump uses it when available so
+// multiple pump drain calls can dispatch in parallel instead of
+// serialising on the single command flag.
+func (p *Process) SetExternalSlotBatchRead(fn func(slot int, entries []BatchReadEntry) ([][]byte, error)) {
+	p.sendPacketMu.Lock()
+	defer p.sendPacketMu.Unlock()
+	p.externalSlotBatchRead = fn
+}
+
 // EnableBatchRead flips the batched-read path on. When set, callers can use
 // BatchReadBytes for multi-address reads in one Present round-trip, AND
 // individual ReadBytesFromMemory / ReadUInt / ReadString calls coalesce
@@ -372,17 +391,37 @@ type pendingReadResult struct {
 	err  error
 }
 
-// startBatchPump launches the drain goroutine that coalesces queued reads
-// into CMD_ROP_READ_BATCH dispatches. Safe to call multiple times — second
-// and later calls are no-ops.
+// startBatchPump launches the drain goroutines that coalesce queued reads
+// into batched dispatches. When the multi-slot hook is wired we spawn one
+// worker per SHM slot so dispatches pipeline at rmod's Present rate × N
+// instead of single-file. Falls back to one worker using the single-slot
+// CMD_ROP_READ_BATCH path when SlotBatchRead isn't set. Safe to call
+// multiple times — second and later calls are no-ops.
 func (p *Process) startBatchPump() {
 	if !p.batchPumpRunning.CompareAndSwap(false, true) {
 		return
 	}
 	p.batchPumpStop = make(chan struct{})
 	p.batchPumpWake = make(chan struct{}, 1)
+	p.sendPacketMu.Lock()
+	slotFn := p.externalSlotBatchRead
+	p.sendPacketMu.Unlock()
+	if slotFn != nil {
+		p.slotPool = make(chan int, presenterRopBatchSlotCount)
+		for i := 0; i < presenterRopBatchSlotCount; i++ {
+			p.slotPool <- i
+		}
+	}
+	// Single drain goroutine — it competes for pool slots alongside
+	// direct BatchReadBytes callers. More drain goroutines wouldn't
+	// help because each slot dispatches in parallel anyway.
 	go p.batchPumpLoop()
 }
+
+// presenterRopBatchSlotCount mirrors presenter.RopBatchSlotCount without
+// pulling in a cross-package import. Kept as a package-private constant so
+// the pump can iterate the slot pool.
+const presenterRopBatchSlotCount = 8
 
 // stopBatchPump signals the drain goroutine to exit and flushes every
 // pending reader with an error so they drop to RPM instead of hanging.
@@ -401,22 +440,20 @@ func (p *Process) stopBatchPump() {
 }
 
 func (p *Process) batchPumpLoop() {
-	// Flushing cadence matches Present rate (~16 ms). Rmod processes one
-	// CMD_ROP_READ_BATCH per Present callback, so draining faster than
-	// that just queues up round-trips back-to-back; draining slower
-	// starves the frame. Wake signal still fires when pending hits
-	// batchWakeThreshold so a full 128-wide burst ships sooner.
+	// One drain goroutine + 8-slot pool = many dispatches pipeline in
+	// parallel. Each drain takes up to maxBatch pending reads, acquires
+	// a free slot, fires the slot dispatch on ITS OWN goroutine so the
+	// drain can immediately pick up more pending without waiting for
+	// the Present round-trip.
 	const maxBatch = 128
-	const flushInterval = 15 * time.Millisecond
+	const flushInterval = 5 * time.Millisecond
 
 	for {
 		select {
 		case <-p.batchPumpStop:
 			return
 		case <-p.batchPumpWake:
-			// Short pause before drain — lets follow-up reads from
-			// concurrent goroutines pile into the same dispatch.
-			time.Sleep(2 * time.Millisecond)
+			time.Sleep(1 * time.Millisecond)
 		case <-time.After(flushInterval):
 		}
 
@@ -434,37 +471,69 @@ func (p *Process) batchPumpLoop() {
 			p.batchPumpPending = p.batchPumpPending[n:]
 			p.batchPumpMu.Unlock()
 
-			entries := make([]BatchReadEntry, n)
-			for i, pr := range drain {
-				entries[i] = BatchReadEntry{Src: pr.addr, Len: pr.size}
-			}
-			p.sendPacketMu.Lock()
-			fn := p.externalBatchRead
-			p.sendPacketMu.Unlock()
-			if fn == nil {
-				for _, pr := range drain {
-					pr.done <- pendingReadResult{err: errors.New("batch hook not installed")}
-				}
-				continue
-			}
+			p.dispatchPumpDrain(drain)
+		}
+	}
+}
 
-			p.batchCallsTotal.Add(1)
-			bufs, err := fn(entries)
-			if err != nil {
-				p.batchCallsFailed.Add(1)
-				for _, pr := range drain {
-					pr.done <- pendingReadResult{err: err}
+// dispatchPumpDrain ships one batch of pending reads. Picks a free slot
+// from the pool and fires dispatch asynchronously so the pump loop can
+// immediately draft the next drain without waiting for Present.
+func (p *Process) dispatchPumpDrain(drain []*pendingRead) {
+	entries := make([]BatchReadEntry, len(drain))
+	for i, pr := range drain {
+		entries[i] = BatchReadEntry{Src: pr.addr, Len: pr.size}
+	}
+
+	// Try multi-slot path first.
+	p.sendPacketMu.Lock()
+	slotFn := p.externalSlotBatchRead
+	singleFn := p.externalBatchRead
+	p.sendPacketMu.Unlock()
+
+	if slotFn != nil {
+		slot, ok := p.acquireBatchSlot()
+		if ok {
+			go func(slot int, drain []*pendingRead, entries []BatchReadEntry) {
+				defer p.releaseBatchSlot(slot)
+				p.batchCallsTotal.Add(1)
+				bufs, err := slotFn(slot, entries)
+				if err != nil {
+					p.batchCallsFailed.Add(1)
+					for _, pr := range drain {
+						pr.done <- pendingReadResult{err: err}
+					}
+					return
 				}
-				continue
-			}
-			p.batchEntriesTotal.Add(uint64(n))
-			for i, pr := range drain {
-				pr.done <- pendingReadResult{data: bufs[i]}
-			}
+				p.batchEntriesTotal.Add(uint64(len(drain)))
+				for i, pr := range drain {
+					pr.done <- pendingReadResult{data: bufs[i]}
+				}
+			}(slot, drain, entries)
+			return
 		}
 	}
 
-	_ = batchWakeThreshold
+	// Fallback: single-slot path, synchronous in this goroutine.
+	if singleFn == nil {
+		for _, pr := range drain {
+			pr.done <- pendingReadResult{err: errors.New("batch hook not installed")}
+		}
+		return
+	}
+	p.batchCallsTotal.Add(1)
+	bufs, err := singleFn(entries)
+	if err != nil {
+		p.batchCallsFailed.Add(1)
+		for _, pr := range drain {
+			pr.done <- pendingReadResult{err: err}
+		}
+		return
+	}
+	p.batchEntriesTotal.Add(uint64(len(drain)))
+	for i, pr := range drain {
+		pr.done <- pendingReadResult{data: bufs[i]}
+	}
 }
 
 // enqueuePumpRead parks the reader on the async batch pump. Returns bytes
@@ -504,13 +573,33 @@ func (p *Process) enqueuePumpRead(addr uintptr, size uint32) ([]byte, error) {
 // BatchReadBytes services N reads in one rmod round-trip. Returns nil + error
 // when the batched path isn't enabled or rmod reports per-entry failure; the
 // caller should fall back to RPM (plain ReadBytesFromMemory loop).
+//
+// Uses the multi-slot pool when available so parallel callers don't
+// serialise on the single CMD_ROP_READ_BATCH flag. Falls back to the
+// single-slot path otherwise.
 func (p *Process) BatchReadBytes(entries []BatchReadEntry) ([][]byte, error) {
 	if !p.batchReadEnabled.Load() {
 		return nil, errors.New("batch read not enabled")
 	}
 	p.sendPacketMu.Lock()
+	slotFn := p.externalSlotBatchRead
 	fn := p.externalBatchRead
 	p.sendPacketMu.Unlock()
+	if slotFn != nil {
+		slot, ok := p.acquireBatchSlot()
+		if ok {
+			defer p.releaseBatchSlot(slot)
+			p.batchCallsTotal.Add(1)
+			out, err := slotFn(slot, entries)
+			if err != nil {
+				p.batchCallsFailed.Add(1)
+			} else {
+				p.batchEntriesTotal.Add(uint64(len(entries)))
+			}
+			return out, err
+		}
+		// All slots busy — fall through to single-slot path below.
+	}
 	if fn == nil {
 		return nil, errors.New("batch read hook not installed")
 	}
@@ -522,6 +611,31 @@ func (p *Process) BatchReadBytes(entries []BatchReadEntry) ([][]byte, error) {
 		p.batchEntriesTotal.Add(uint64(len(entries)))
 	}
 	return out, err
+}
+
+// acquireBatchSlot picks a free slot index from the pool. Blocks up to
+// 50 ms; returns (0, false) if the pool is empty that long (caller falls
+// back to single-slot dispatch).
+func (p *Process) acquireBatchSlot() (int, bool) {
+	if p.slotPool == nil {
+		return 0, false
+	}
+	select {
+	case s := <-p.slotPool:
+		return s, true
+	case <-time.After(50 * time.Millisecond):
+		return 0, false
+	}
+}
+
+func (p *Process) releaseBatchSlot(slot int) {
+	if p.slotPool == nil {
+		return
+	}
+	select {
+	case p.slotPool <- slot:
+	default:
+	}
 }
 
 // BatchStats returns cumulative batched-read counters. (calls, failed, entries).

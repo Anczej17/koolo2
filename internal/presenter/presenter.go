@@ -763,6 +763,91 @@ func (p *Presenter) RopReadBatch(entries []BatchReadEntry) ([][]byte, error) {
 	return out, nil
 }
 
+// RopReadSlotBatch dispatches on one of the multi-slot pool entries
+// instead of the single CmdRopReadBatch slot. Multiple goroutines can
+// use different slots concurrently; rmod drains every pending slot each
+// Present frame. `slot` must be in [0, RopBatchSlotCount). Caller must
+// have ensured exclusive ownership of the slot (typically via a fixed
+// pool and an atomic acquire/release).
+func (p *Presenter) RopReadSlotBatch(slot int, entries []BatchReadEntry) ([][]byte, error) {
+	if len(entries) == 0 {
+		return nil, nil
+	}
+	if slot < 0 || slot >= RopBatchSlotCount {
+		return nil, fmt.Errorf("slot %d out of range", slot)
+	}
+	if len(entries) > RopBatchMax {
+		return nil, fmt.Errorf("batch size %d exceeds RopBatchMax (%d)", len(entries), RopBatchMax)
+	}
+	total := uint32(0)
+	for i, e := range entries {
+		if e.Len == 0 {
+			return nil, fmt.Errorf("batch entry %d: zero length", i)
+		}
+		total += e.Len
+		if total > uint32(RopBatchSlotOutputSize) {
+			return nil, fmt.Errorf("batch total %d exceeds slot output (%d)", total, RopBatchSlotOutputSize)
+		}
+	}
+
+	// Slot writes don't need presenter.mu — each slot is its own mailbox.
+	// We still need to be sure the SHM view is mapped.
+	if !p.initialized || p.localView == nil {
+		return nil, fmt.Errorf("presenter not initialized")
+	}
+
+	slotBase := uintptr(OffRopBatchSlots + slot*RopBatchSlotSize)
+
+	// Safety: only dispatch when the slot is idle. Caller should have
+	// owned it via an atomic, but double-check in case of misuse.
+	if readU32(p.localView, slotBase+uintptr(RopBatchSlotOffFlag)) != 0 {
+		return nil, fmt.Errorf("slot %d busy", slot)
+	}
+
+	// Write entries.
+	writeU32(p.localView, slotBase+uintptr(RopBatchSlotOffCount), uint32(len(entries)))
+	for i, e := range entries {
+		entryOff := slotBase + uintptr(RopBatchSlotOffEntries+i*RopBatchEntrySize)
+		writeU64(p.localView, entryOff, uint64(e.Src))
+		writeU32(p.localView, entryOff+8, e.Len)
+		writeU32(p.localView, entryOff+12, 0)
+	}
+
+	// Arm — flag=1 signals rmod to process on next Present frame.
+	writeU32(p.localView, slotBase+uintptr(RopBatchSlotOffFlag), 1)
+
+	// Poll for flag back to 0 (rmod done).
+	deadline := time.Now().Add(200 * time.Millisecond)
+	for time.Now().Before(deadline) {
+		if readU32(p.localView, slotBase+uintptr(RopBatchSlotOffFlag)) == 0 {
+			break
+		}
+		time.Sleep(200 * time.Microsecond)
+	}
+	if readU32(p.localView, slotBase+uintptr(RopBatchSlotOffFlag)) != 0 {
+		return nil, fmt.Errorf("slot %d timeout", slot)
+	}
+
+	// Read per-entry status + slice out bytes.
+	statusBase := uintptr(p.localView) + slotBase + uintptr(RopBatchSlotOffStatus)
+	bufBase := uintptr(p.localView) + slotBase + uintptr(RopBatchSlotOffOutput)
+	out := make([][]byte, len(entries))
+	offset := uint32(0)
+	for i, e := range entries {
+		st := *(*byte)(unsafe.Pointer(statusBase + uintptr(i)))
+		if st != 0 {
+			return nil, fmt.Errorf("slot %d entry %d status=%d", slot, i, st)
+		}
+		buf := make([]byte, e.Len)
+		for j := uint32(0); j < e.Len; j++ {
+			buf[j] = *(*byte)(unsafe.Pointer(bufBase + uintptr(offset+j)))
+		}
+		out[i] = buf
+		offset += e.Len
+	}
+	return out, nil
+}
+
 // UninstallDetour instructs rmod (in D2R's address space) to restore the
 // Present prologue, remove VEHs, and null out G_SHM before this process exits.
 // Without this call, app.exe termination leaves rmod's Present detour pointing

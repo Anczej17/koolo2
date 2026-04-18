@@ -1667,6 +1667,16 @@ func (s *SinglePlayerSupervisor) initClaudePresenter() {
 		}
 		return pres.RopReadBatch(conv)
 	})
+	// Multi-slot pipelined path — the pump uses this when set so multiple
+	// slot workers dispatch in parallel instead of serialising on the
+	// single CMD_ROP_READ_BATCH flag.
+	gr.Process.SetExternalSlotBatchRead(func(slot int, entries []memory.BatchReadEntry) ([][]byte, error) {
+		conv := make([]presenter.BatchReadEntry, len(entries))
+		for i, e := range entries {
+			conv[i] = presenter.BatchReadEntry{Src: e.Src, Len: e.Len}
+		}
+		return pres.RopReadSlotBatch(slot, conv)
+	})
 	if os.Getenv("ROP_READ") == "1" {
 		// ROP_READ was found to be architecturally wrong for per-read use:
 		// each CMD_ROP_READ round-trips through a Present frame (~16 ms at

@@ -343,6 +343,27 @@ const (
 	RopBatchMax         = 128
 	RopBatchEntrySize   = 16
 
+	// Multi-slot batch pool — 8 slots at 0x8200, each 8 KB. Lets
+	// goroutines pipeline batch requests through independent slots, so
+	// rmod can process up to ROP_BATCH_SLOT_COUNT batches per Present
+	// frame instead of the single-slot one-per-frame ceiling. Per slot:
+	//   0x00 flag (0 idle, 1 pending, 2..ignored)
+	//   0x04 count
+	//   0x08 total_len
+	//   0x10 entries[128] × 16
+	//   0x810 status[128]
+	//   0x1000 output[4096]
+	OffRopBatchSlots      = 0x8200
+	RopBatchSlotSize      = 0x2000
+	RopBatchSlotCount     = 8
+	RopBatchSlotOffFlag     = 0x0000
+	RopBatchSlotOffCount    = 0x0004
+	RopBatchSlotOffTotalLen = 0x0008
+	RopBatchSlotOffEntries  = 0x0010
+	RopBatchSlotOffStatus   = 0x0810
+	RopBatchSlotOffOutput   = 0x1000
+	RopBatchSlotOutputSize  = 0x1000
+
 	OffSnapRegions     = 0x4200 // RegionEntry[1024] × 16 B  (B3: grown 256→1024 for monster/object/entrance walker budget)
 	SnapRegionMax      = 1024
 	SnapRegionEntrySz  = 16 // va u64 | len u32 | offset u32

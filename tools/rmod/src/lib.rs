@@ -423,6 +423,37 @@ const OFF_ROP_BATCH_ENTRIES:   usize = 0x3080;  // BatchEntry[128], 16 B each �
 const OFF_ROP_BATCH_STATUS:    usize = 0x3880;  // u8[128] — 0 ok, 1 partial/failed NtRVM, 2 invalid / oversize
 const ROP_BATCH_MAX:           usize = 128;
 
+// Multi-slot batch pool — flag-driven parallel dispatch. Rmod's Present
+// callback walks all ROP_BATCH_SLOT_COUNT slots every frame, processes
+// any with flag=1 (pending). Lets multiple Go goroutines pipeline batch
+// requests: each picks a free slot, writes entries, flags pending, polls
+// flag=0 (done). Rmod serves up to N slots per Present frame (~60 Hz),
+// breaking the single-command-slot bottleneck that capped throughput at
+// 60 batches/sec.
+//
+// Layout per slot (0x2000 = 8 KB):
+//   +0x0000  flag u32  (0=idle, 1=pending, 2=done-bot-reads-reset-to-0)
+//   +0x0004  count u32
+//   +0x0008  total_len u32
+//   +0x000C  reserved
+//   +0x0010  entries[128] × 16 B  (0x010..0x810)
+//   +0x0810  status[128]          (0x810..0x890)
+//   +0x1000  output[4096]         (0x1000..0x2000)
+//
+// Slots start at 0x8200 (was snapshot data blob, unused when
+// SNAPSHOT_ENABLE=0). 8 slots × 8 KB = 64 KB, fits in the 98 KB free
+// window up to 0x20000.
+const ROP_BATCH_SLOT_COUNT:    usize = 8;
+const OFF_ROP_BATCH_SLOTS:     usize = 0x8200;
+const ROP_BATCH_SLOT_SIZE:     usize = 0x2000;
+const ROP_BATCH_SLOT_OFF_FLAG:       usize = 0x0000;
+const ROP_BATCH_SLOT_OFF_COUNT:      usize = 0x0004;
+const ROP_BATCH_SLOT_OFF_TOTAL_LEN:  usize = 0x0008;
+const ROP_BATCH_SLOT_OFF_ENTRIES:    usize = 0x0010;
+const ROP_BATCH_SLOT_OFF_STATUS:     usize = 0x0810;
+const ROP_BATCH_SLOT_OFF_OUTPUT:     usize = 0x1000;
+const ROP_BATCH_SLOT_OUTPUT_SIZE:    usize = 0x1000;
+
 // HWBP commands — match Go protocol.go (CmdHwbpInstall=6 etc).
 const CMD_HWBP_INSTALL:   u32 = 6;          // install DR0=target on every D2R thread
 const CMD_HWBP_UNINSTALL: u32 = 7;          // clear DR0/DR7 on every D2R thread
@@ -1759,6 +1790,56 @@ impl ThunkWriter {
 // ---------------------------------------------------------------------------
 
 /// Called every frame from the Present detour.  Must be fast on the idle path.
+/// Drain every pending multi-slot batch. Called once per Present frame.
+/// Each slot is independent — bot picks a free one via CAS on its flag,
+/// fills entries, sets flag=1, polls for flag back to 0 (done).
+unsafe fn dispatch_batch_slots(shm: *mut SharedBuffer) {
+    for slot in 0..ROP_BATCH_SLOT_COUNT {
+        let slot_base = OFF_ROP_BATCH_SLOTS + slot * ROP_BATCH_SLOT_SIZE;
+        let flag = shm_read_u32(shm as *const SharedBuffer, slot_base + ROP_BATCH_SLOT_OFF_FLAG);
+        if flag != 1 {
+            continue;
+        }
+        let raw_count = shm_read_u32(shm as *const SharedBuffer, slot_base + ROP_BATCH_SLOT_OFF_COUNT) as usize;
+        let count = if raw_count > ROP_BATCH_MAX { ROP_BATCH_MAX } else { raw_count };
+        let entries_base = (shm as *const u8).add(slot_base + ROP_BATCH_SLOT_OFF_ENTRIES);
+        let status_base  = (shm as *mut u8).add(slot_base + ROP_BATCH_SLOT_OFF_STATUS);
+        let output_base  = (shm as *mut u8).add(slot_base + ROP_BATCH_SLOT_OFF_OUTPUT);
+        let mut total: usize = 0;
+        for i in 0..count {
+            let entry_ptr = entries_base.add(i * 16);
+            let src = core::ptr::read_unaligned(entry_ptr as *const u64) as usize;
+            let len = core::ptr::read_unaligned(entry_ptr.add(8) as *const u32) as usize;
+            if len == 0 || total.saturating_add(len) > ROP_BATCH_SLOT_OUTPUT_SIZE {
+                core::ptr::write_volatile(status_base.add(i), 2u8);
+                continue;
+            }
+            if !is_user_va(src) {
+                core::ptr::write_volatile(status_base.add(i), 2u8);
+                continue;
+            }
+            let mut br: usize = 0;
+            let st = NtReadVirtualMemory(
+                GetCurrentProcess(),
+                src as *const core::ffi::c_void,
+                output_base.add(total) as *mut core::ffi::c_void,
+                len,
+                &mut br as *mut usize,
+            );
+            if st != 0 || br != len {
+                core::ptr::write_volatile(status_base.add(i), 1u8);
+                core::ptr::write_bytes(output_base.add(total), 0u8, len);
+            } else {
+                core::ptr::write_volatile(status_base.add(i), 0u8);
+            }
+            total += len;
+        }
+        shm_write_u32(shm, slot_base + ROP_BATCH_SLOT_OFF_TOTAL_LEN, total as u32);
+        // Flag goes back to 0 — bot sees "done" and reads status + output.
+        shm_write_u32(shm, slot_base + ROP_BATCH_SLOT_OFF_FLAG, 0);
+    }
+}
+
 unsafe fn dispatch_commands() {
     let shm = G_SHM;
     if shm.is_null() {
@@ -1801,6 +1882,12 @@ unsafe fn dispatch_commands() {
     if G_SNAPSHOT_ENABLED {
         snapshot_tick_write(shm);
     }
+
+    // Multi-slot batch pool — walk all slots and process any pending
+    // batches. Lets multiple Go goroutines pipeline requests rather than
+    // serialising on a single command flag. Independent of G_SNAPSHOT_ENABLED
+    // so the bot can run pump traffic even without a snapshot walker.
+    dispatch_batch_slots(shm);
 
     // Fast path: no pending command.
     if shm_read_u32(shm, OFF_COMMAND_FLAG) == 0 {
