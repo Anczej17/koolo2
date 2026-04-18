@@ -1,43 +1,53 @@
 package packet
 
-// 0x4B / 0x43 — TP destination select + travel confirm (sniffed 2026-04-15
-// in capture_live.log packets [86]/[88], [92]/[94], [112]/[114], [224]/[226]
-// — always paired in this order after a 0x41 TP-interact). 0x41 opens the TP
-// dialog; 0x4B with a destination byte selects target area; 0x43 confirms
-// and triggers map transition.
+import "encoding/binary"
+
+// 0x4B / 0x43 — TP destination select + travel confirm. Updated 2026-04-18
+// to the 13 B wire format from logs/live_captures_2026_04_15/05_waypoint_travel.json
+// buf1 mirror (which reveals the actual transmitted bytes including the
+// FFFFFFFF trailer). Previous 5 B / 9 B builders came from buf0 "pre-wrap"
+// observations and never matched the server's expected shape.
 //
-// 0x4B wire format: 5 bytes `4B <dest:u8> 00 00 00` (buf1 mirror = 2 B head).
-//   dest byte values seen: 0x01, 0x04, 0x05, 0x1B (likely area.ID lower byte
-//   or dialog row index — needs live verification with controlled TP).
+// 0x4B wire format (13 B):
+//   [0x4B][dest:u32][action:u32][trailer:u32=0xFFFFFFFF]
+//   action observed = 0x00000002 across all TP selects (waypoint + party TP).
 //
-// 0x43 wire format: 9 bytes `43 01 00 00 00 01 00 00 00` (buf1 mirror = 6 B
-//   head). All fields constant in observed captures — likely a fixed "travel
-//   confirm" marker, no parameters needed.
+// 0x43 wire format (13 B):
+//   [0x43][act:u32=0x00000001][arg:u32=0x00000001][trailer:u32=0xFFFFFFFF]
+//   All fields constant in observed captures — fixed "travel confirm" marker.
 
 type TpDestinationSelect struct {
-	PacketID    byte // 0x4B
-	Destination byte
+	Destination uint32
+	Action      uint32
 }
 
 func NewTpDestinationSelect(dest byte) *TpDestinationSelect {
 	return &TpDestinationSelect{
-		PacketID:    0x4B,
-		Destination: dest,
+		Destination: uint32(dest),
+		Action:      0x00000002,
 	}
 }
 
 func (p *TpDestinationSelect) GetPayload() []byte {
-	return []byte{p.PacketID, p.Destination, 0, 0, 0}
+	buf := make([]byte, 13)
+	buf[0] = 0x4B
+	binary.LittleEndian.PutUint32(buf[1:5], p.Destination)
+	binary.LittleEndian.PutUint32(buf[5:9], p.Action)
+	binary.LittleEndian.PutUint32(buf[9:13], 0xFFFFFFFF)
+	return buf
 }
 
-type TpConfirmTravel struct {
-	PacketID byte // 0x43
-}
+type TpConfirmTravel struct{}
 
 func NewTpConfirmTravel() *TpConfirmTravel {
-	return &TpConfirmTravel{PacketID: 0x43}
+	return &TpConfirmTravel{}
 }
 
 func (p *TpConfirmTravel) GetPayload() []byte {
-	return []byte{p.PacketID, 0x01, 0, 0, 0, 0x01, 0, 0, 0}
+	buf := make([]byte, 13)
+	buf[0] = 0x43
+	binary.LittleEndian.PutUint32(buf[1:5], 0x00000001)
+	binary.LittleEndian.PutUint32(buf[5:9], 0x00000001)
+	binary.LittleEndian.PutUint32(buf[9:13], 0xFFFFFFFF)
+	return buf
 }

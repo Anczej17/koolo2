@@ -5536,10 +5536,11 @@ unsafe fn snap_walk_main_player(
     let (c, r) = snapshot_add_region(shm, *cursor, *regions, inventory_va, 0x80);
     *cursor = c; *regions = r;
 
-    // pUnitData (name struct) at playerUnit+0x10
+    // pUnitData (name struct) at playerUnit+0x10 — bumped 0x40 → 0xB0 to
+    // match snap_walk_entity_row's item coverage (item.go uses +0x9C/+0xA0).
     let p_unit_data_va = d2r_read_u64(player_unit_va + 0x10) as usize;
     if p_unit_data_va != 0 {
-        let (c, r) = snapshot_add_region(shm, *cursor, *regions, p_unit_data_va, 0x40);
+        let (c, r) = snapshot_add_region(shm, *cursor, *regions, p_unit_data_va, 0xB0);
         *cursor = c; *regions = r;
         // playerName at pUnitData+0x00
         let name_va = d2r_read_u64(p_unit_data_va) as usize;
@@ -5692,11 +5693,13 @@ unsafe fn snap_walk_entity_row(
             let (c, r) = snapshot_add_region(shm, *cursor, *regions, unit_va, 0x1B0);
             *cursor = c; *regions = r;
 
-            // unitData (+0x10 deref) — 0x60 B covers interactType @+0x08,
-            // owner string @+0x34 (32 B) extending to +0x54.
+            // unitData (+0x10 deref) — 0xB0 B covers interactType @+0x08,
+            // owner string @+0x34 (32 B extending to +0x54), PLUS item.go
+            // reads +0x9C and +0xA0. Previously only 0x60 → silent walker
+            // miss on item rows (gamelib fell through to RPM).
             let unit_data_va = d2r_read_u64(unit_va + 0x10) as usize;
             if unit_data_va != 0 {
-                let (c, r) = snapshot_add_region(shm, *cursor, *regions, unit_data_va, 0x60);
+                let (c, r) = snapshot_add_region(shm, *cursor, *regions, unit_data_va, 0xB0);
                 *cursor = c; *regions = r;
             }
 

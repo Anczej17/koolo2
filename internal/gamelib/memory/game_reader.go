@@ -34,6 +34,14 @@ type GameReader struct {
 	cachedMonsters  data.Monsters
 	cachedInventory data.Inventory
 	cachedObjects   []data.Object
+
+	// Per-tick widget-state cache. GetWidgetState walks an FNV-hash chain
+	// in D2R via 11 RPM reads per call; GetActiveWeaponSlot alone fires it
+	// every tick, and a few other paths (cursor item check, inventory UI
+	// toggle) add more — audited at ~20-30 RPM/tick total just for widget
+	// lookups. Caching per tick cuts that to 1 (first lookup) + hits.
+	widgetStateCache   map[uint64]int
+	widgetStateCacheAt time.Time
 }
 
 type MercOption struct {
@@ -144,6 +152,7 @@ func (gd *GameReader) GetData() data.Data {
 	// Layer 3: flush per-tick chunk cache so field reads load fresh data.
 	// No-op when STEALTH_READ is off (cache never populated).
 	gd.Process.FlushChunkCache()
+	gd.resetWidgetStateCache()
 
 	// Prerequisites (order-dependent — consumed by downstream dispatches).
 	rawPlayerUnits := gd.GetRawPlayerUnits()
@@ -628,7 +637,16 @@ func (gd *GameReader) HasMerc() bool {
 }
 
 // GetWidgetState reference : https://github.com/ResurrectedTrader/ResurrectedTrade/blob/f121ec02dd3fbe1c574f713e5a0c2db92ccca821/ResurrectedTrade.AgentBase/Capture.cs#L618
+//
+// Per-tick cache: the hash-chain walk costs ~11 RPM calls and the audit
+// flagged this as the single hottest forced-RPM path (20-30/tick when
+// multiple callers repeat the same lookup). `GetData` seeds the cache by
+// calling `resetWidgetStateCache` at the start of each tick; subsequent
+// GetWidgetState calls return from cache on flag match.
 func (gd *GameReader) GetWidgetState(stateFlag uint64) (int, error) {
+	if v, ok := gd.widgetStateCache[stateFlag]; ok {
+		return v, nil
+	}
 	// Get widget states pointer
 	stateFlags := uint64(gd.Process.ReadUInt(gd.moduleBaseAddressPtr+gd.offset.WidgetStatesOffset, Uint64))
 	if stateFlags == 0 {
@@ -658,10 +676,30 @@ func (gd *GameReader) GetWidgetState(stateFlag uint64) (int, error) {
 	if ir != 0 {
 		ptr1 := uint64(gd.Process.ReadUInt(uintptr(ir)+16, Uint64))
 		ptr2 := uint64(gd.Process.ReadUInt(uintptr(ptr1)+16, Uint64))
-		return int(gd.Process.ReadUInt(uintptr(ptr2), Uint8)), nil
+		result := int(gd.Process.ReadUInt(uintptr(ptr2), Uint8))
+		if gd.widgetStateCache != nil {
+			gd.widgetStateCache[stateFlag] = result
+		}
+		return result, nil
 	}
 
+	if gd.widgetStateCache != nil {
+		gd.widgetStateCache[stateFlag] = 0
+	}
 	return 0, nil
+}
+
+// resetWidgetStateCache is called at the start of GetData each tick so
+// widget lookups reflect current state while still sharing a hash walk
+// within the tick. Zero cost when the map is empty (most ticks).
+func (gd *GameReader) resetWidgetStateCache() {
+	if gd.widgetStateCache == nil {
+		gd.widgetStateCache = make(map[uint64]int, 8)
+		return
+	}
+	for k := range gd.widgetStateCache {
+		delete(gd.widgetStateCache, k)
+	}
 }
 
 func (gd *GameReader) GetActiveWeaponSlot() int {

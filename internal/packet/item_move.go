@@ -48,12 +48,16 @@ func newItemMove19(itemGID, marker, col, row uint32) []byte {
 }
 
 func newItemMove18(itemGID, marker, col, row uint32) []byte {
-	buf := make([]byte, 21)
+	// 0x18 live-capture 2026-04-15 is 22 B, not 21 — the previous off-by-1
+	// dropped the final trailer byte. With the truncated version the server
+	// silently ignored the move (no disconnect, no action), which is how the
+	// off-by-1 hid for so long.
+	buf := make([]byte, 22)
 	buf[0] = 0x18
 	binary.LittleEndian.PutUint32(buf[1:5], itemGID)
 	binary.LittleEndian.PutUint32(buf[5:9], marker)
 	binary.LittleEndian.PutUint32(buf[9:13], col)
 	binary.LittleEndian.PutUint32(buf[13:17], row)
-	// buf[17:21] = 0 (padding)
+	// buf[17:22] zero-filled (observed as sentinel).
 	return buf
 }
