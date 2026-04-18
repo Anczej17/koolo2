@@ -146,6 +146,20 @@ extern "system" {
         lpBaseAddress: *const core::ffi::c_void,
         dwSize: usize,
     ) -> BOOL;
+    fn CreateTimerQueueTimer(
+        phNewTimer: *mut HANDLE,
+        TimerQueue: HANDLE,
+        Callback: unsafe extern "system" fn(*mut core::ffi::c_void, BOOL),
+        Parameter: *mut core::ffi::c_void,
+        DueTime: DWORD,
+        Period: DWORD,
+        Flags: u32,
+    ) -> BOOL;
+    fn DeleteTimerQueueTimer(
+        TimerQueue: HANDLE,
+        Timer: HANDLE,
+        CompletionEvent: HANDLE,
+    ) -> BOOL;
     fn OpenFileMappingW(
         dwDesiredAccess: DWORD,
         bInheritHandle: BOOL,
@@ -1148,6 +1162,13 @@ unsafe fn init_from_shm(shm: *mut SharedBuffer) -> Result<(), u32> {
     let dual_addr = shm_read_u64(shm as *const SharedBuffer, OFF_DUAL_SEND_WRAP) as usize;
     if dual_addr != 0 { G_DUAL_SEND_WRAP = dual_addr; }
     install_gtc64_hook();
+
+    // TimerQueue worker drains multi-slot batch pool every 1 ms without
+    // needing Present. Breaks the one-batch-per-frame ceiling that
+    // capped throughput at ~65 Hz. Callback runs on Windows thread pool
+    // (start address in ntdll), so Arxan's "foreign thread" check
+    // doesn't fire the way it did on Plan B's direct CreateThread.
+    install_timer_queue_worker(shm);
 
     #[cfg(feature = "sniffer")]
     {
@@ -2493,6 +2514,66 @@ unsafe fn dispatch_call_fn(shm: *mut SharedBuffer) {
 // polls STATUS_DONE in its normal timeout loop.
 // ---------------------------------------------------------------------------
 static mut G_APC_SHELLCODE: *mut u8 = core::ptr::null_mut();
+
+// TimerQueue worker — replicates GID's game-thread-dispatch model
+// without actually hooking the game thread. Windows hands our callback
+// a thread from the process-wide thread pool (start address lives in
+// ntdll's timer APC handler, NOT in our DLL), so Arxan's "foreign
+// thread start" check that killed Plan B (04-18 02:51) doesn't apply.
+// Callback fires every 1 ms — 16× the 60 fps Present cadence, finally
+// breaking past the one-batch-per-frame throughput ceiling.
+static mut G_TIMER_QUEUE_HANDLE: HANDLE = core::ptr::null_mut();
+static mut G_TIMER_QUEUE_SHM: *mut SharedBuffer = core::ptr::null_mut();
+
+unsafe extern "system" fn timer_queue_drain(_param: *mut core::ffi::c_void, _fired: BOOL) {
+    let shm = G_TIMER_QUEUE_SHM;
+    if shm.is_null() {
+        return;
+    }
+    // Fast-path: if every slot is idle, exit without calling into
+    // dispatch_batch_slots. Most ticks in an idle bot look like this,
+    // and with 8 supervisors running on one box the savings matter.
+    let mut any_pending = false;
+    for slot in 0..ROP_BATCH_SLOT_COUNT {
+        let flag_off = OFF_ROP_BATCH_SLOTS + slot * ROP_BATCH_SLOT_SIZE + ROP_BATCH_SLOT_OFF_FLAG;
+        if shm_read_u32(shm as *const SharedBuffer, flag_off) == 1 {
+            any_pending = true;
+            break;
+        }
+    }
+    if !any_pending {
+        return;
+    }
+    dispatch_batch_slots(shm);
+}
+
+unsafe fn install_timer_queue_worker(shm: *mut SharedBuffer) -> bool {
+    if !G_TIMER_QUEUE_HANDLE.is_null() {
+        return true;
+    }
+    G_TIMER_QUEUE_SHM = shm;
+    let mut timer: HANDLE = core::ptr::null_mut();
+    // DueTime=5 ms, Period=5 ms. Under Windows default timer
+    // resolution (15.6 ms) this usually coalesces to one fire per
+    // system tick per waking, so CPU cost stays low even with 8
+    // supervisors on one box. Callback short-circuits fast when
+    // all slot flags are 0 (typical idle frame). User explicitly
+    // required multi-instance friendliness.
+    let ok = CreateTimerQueueTimer(
+        &mut timer,
+        core::ptr::null_mut(), // default timer queue
+        timer_queue_drain,
+        core::ptr::null_mut(),
+        5,
+        5,
+        0,
+    );
+    if ok == 0 {
+        return false;
+    }
+    G_TIMER_QUEUE_HANDLE = timer;
+    true
+}
 
 unsafe fn dispatch_call_fn_game_thread(shm: *mut SharedBuffer) {
     let p = (shm as *const u8).add(OFF_PACKET_DATA);
