@@ -401,22 +401,22 @@ func (p *Process) stopBatchPump() {
 }
 
 func (p *Process) batchPumpLoop() {
-	// Coalescing window. Short enough that bot ticks feel responsive,
-	// long enough that concurrent readers pile up into one dispatch.
-	// Wake fires from enqueuePumpRead when pending >= batchWakeThreshold
-	// (typical hot-path GetData burst fills 128 entries in a few ms).
+	// Flushing cadence matches Present rate (~16 ms). Rmod processes one
+	// CMD_ROP_READ_BATCH per Present callback, so draining faster than
+	// that just queues up round-trips back-to-back; draining slower
+	// starves the frame. Wake signal still fires when pending hits
+	// batchWakeThreshold so a full 128-wide burst ships sooner.
 	const maxBatch = 128
-	const batchWakeThreshold = 64
-	const flushInterval = 3 * time.Millisecond
+	const flushInterval = 15 * time.Millisecond
 
 	for {
 		select {
 		case <-p.batchPumpStop:
 			return
 		case <-p.batchPumpWake:
-			// Give late arrivals one more coalescing window — typical
-			// GetData burst enqueues 200+ over ~5 ms.
-			time.Sleep(500 * time.Microsecond)
+			// Short pause before drain — lets follow-up reads from
+			// concurrent goroutines pile into the same dispatch.
+			time.Sleep(2 * time.Millisecond)
 		case <-time.After(flushInterval):
 		}
 
@@ -469,10 +469,11 @@ func (p *Process) batchPumpLoop() {
 
 // enqueuePumpRead parks the reader on the async batch pump. Returns bytes
 // (on success) or error (pump disabled, dispatch failed, or timeout).
-// Wake is signalled only when pending crosses the batchWakeThreshold so
-// small bursts have time to pile into a full-width dispatch.
+// Wake is signalled when pending crosses the batchWakeThreshold so a
+// backlog from concurrent goroutines dispatches immediately without
+// waiting for the idle timer.
 func (p *Process) enqueuePumpRead(addr uintptr, size uint32) ([]byte, error) {
-	const batchWakeThreshold = 64
+	const batchWakeThreshold = 16
 	if !p.batchReadEnabled.Load() || !p.batchPumpRunning.Load() {
 		return nil, errors.New("batch pump not running")
 	}

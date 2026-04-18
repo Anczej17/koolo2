@@ -2,6 +2,7 @@ package memory
 
 import (
 	"encoding/binary"
+	"sync"
 
 	"local/internal/svc/internal/gamelib/data/mode"
 
@@ -37,16 +38,33 @@ func (gd *GameReader) GetRawPlayerUnits() RawPlayerUnits {
 		isMainOffset = 0x70
 	}
 
+	// Parallelise the 128-slot sweep. Each slot is independent — its
+	// only shared state is the append into rawPlayerUnits (guarded by
+	// mu). Running concurrently lets the async batch pump coalesce the
+	// per-playerUnit fixed-offset reads across goroutines into
+	// 128-wide CMD_ROP_READ_BATCH dispatches.
+	var mu sync.Mutex
+	var wg sync.WaitGroup
+	wg.Add(128)
 	for i := 0; i < 128; i++ {
-		var playerUnit uintptr
-		if unitTableBuf != nil {
-			playerUnit = uintptr(binary.LittleEndian.Uint64(unitTableBuf[i*8:]))
-		} else {
-			unitOffset := gd.offset.UnitTable + uintptr(i*8)
-			playerUnitAddr := gd.Process.moduleBaseAddressPtr + unitOffset
-			playerUnit = uintptr(gd.reader.ReadUInt(playerUnitAddr, Uint64))
-		}
-		for playerUnit > 0 {
+		slotIdx := i
+		go func() {
+			defer wg.Done()
+			defer func() {
+				if r := recover(); r != nil {
+					// Slot panic stays local — don't take the tick down.
+					_ = r
+				}
+			}()
+			var playerUnit uintptr
+			if unitTableBuf != nil {
+				playerUnit = uintptr(binary.LittleEndian.Uint64(unitTableBuf[slotIdx*8:]))
+			} else {
+				unitOffset := gd.offset.UnitTable + uintptr(slotIdx*8)
+				playerUnitAddr := gd.Process.moduleBaseAddressPtr + unitOffset
+				playerUnit = uintptr(gd.reader.ReadUInt(playerUnitAddr, Uint64))
+			}
+			for playerUnit > 0 {
 			// Batch the per-playerUnit fixed-offset reads. 7 fields collapsed
 			// into a single CMD_ROP_READ_BATCH dispatch when ROP_READ=batch.
 			// Byte field layout mirrors the list below so parsing stays in
@@ -109,6 +127,7 @@ func (gd *GameReader) GetRawPlayerUnits() RawPlayerUnits {
 			stats := gd.getStatsList(statsListExPtr + 0xA8)
 			states := gd.GetStates(statsListExPtr)
 
+			mu.Lock()
 			rawPlayerUnits = append(rawPlayerUnits, RawPlayerUnit{
 				UnitID:       data.UnitID(unitID),
 				Address:      playerUnit,
@@ -126,9 +145,12 @@ func (gd *GameReader) GetRawPlayerUnits() RawPlayerUnits {
 				BaseStats: baseStats,
 				Mode:      playerMode,
 			})
+			mu.Unlock()
 			playerUnit = nextPlayer
 		}
+		}()
 	}
+	wg.Wait()
 
 	return rawPlayerUnits
 }

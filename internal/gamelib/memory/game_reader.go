@@ -243,6 +243,11 @@ func (gd *GameReader) GetData() data.Data {
 		},
 	}
 
+	// Parallel dispatches were attempted but several dispatch bodies
+	// share GameReader state (cached*, *LastUpdate, widgetStateCache)
+	// that isn't goroutine-safe. Race corruption produced hangs and
+	// stale snapshots. Serial order preserved — pump-level coalescing
+	// inside *each* dispatch's own reads is where the win lives now.
 	order := dispatchOrder(len(dispatches))
 	for _, i := range order {
 		dispatches[i]()
