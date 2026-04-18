@@ -389,6 +389,7 @@ const CMD_SNAPSHOT_INIT: u32 = 24;          // Phase A P1-GID: enable per-Presen
 const CMD_UNINSTALL_DETOUR: u32 = 25;       // Graceful shutdown: restore Present prologue before app.exe exits
 const CMD_ROP_SCAN: u32 = 26;               // GID-4: scan .text region for ROP gadgets, populate G_ROP_GADGETS
 const CMD_ROP_READ: u32 = 27;               // GID-5: execute build_memcpy ROP chain — D2R reads own memory via its own gadgets
+const CMD_ROP_READ_BATCH: u32 = 29;         // batch N (src_va, len) tuples in one Present frame — amortises round-trip
 
 // ROP command SHM layout (u64 args, u32 status) — placed in the 0x3000 free
 // band between HWBP (0x2000-0x2100) and snapshot header (0x4000).
@@ -407,9 +408,20 @@ const OFF_ROP_WORKER_HB:    usize = 0x3060;  // u32 — ROP worker thread heartb
 // GID-6 scratch buffer. Rmod's CMD_ROP_READ memcpys D2R VAs into this area;
 // app.exe reads back from the same SHM offset. 4 KB is enough for any single
 // D2R struct the bot reads per tick (PlayerUnit chain = ~0x200 B, inventory
-// rows ~0x100 B each).
+// rows ~0x100 B each). CMD_ROP_READ_BATCH reuses the same buffer — bot reads
+// concatenated bytes in entry order.
 const OFF_ROP_READ_BUFFER:  usize = 0x8000;  // u8[0x1000] — ROP-mirrored D2R bytes
 const OFF_ROP_READ_BUFFER_SIZE: usize = 0x1000;
+
+// CMD_ROP_READ_BATCH protocol. Bot fills COUNT + ENTRIES, rmod loops
+// NtRVM for each entry writing contiguous bytes into OFF_ROP_READ_BUFFER
+// (order-preserved), writes per-entry u8 status into STATUS, sum of len
+// into TOTAL_LEN. One Present round-trip replaces N.
+const OFF_ROP_BATCH_COUNT:     usize = 0x3070;  // u32 — entries to process
+const OFF_ROP_BATCH_TOTAL_LEN: usize = 0x3074;  // u32 — out: bytes written to OFF_ROP_READ_BUFFER
+const OFF_ROP_BATCH_ENTRIES:   usize = 0x3080;  // BatchEntry[64], 16 B each — src_va u64, len u32, _pad u32
+const OFF_ROP_BATCH_STATUS:    usize = 0x3480;  // u8[64] — 0 ok, 1 partial/failed NtRVM, 2 invalid / oversize
+const ROP_BATCH_MAX:           usize = 64;
 
 // HWBP commands — match Go protocol.go (CmdHwbpInstall=6 etc).
 const CMD_HWBP_INSTALL:   u32 = 6;          // install DR0=target on every D2R thread
@@ -2018,6 +2030,59 @@ unsafe fn dispatch_commands() {
 
             shm_write_u32(shm, OFF_ROP_READ_STATUS, 0);
             shm_write_u32(shm, OFF_ROP_DBG, 0xBBBB000F);
+            shm_write_u32(shm, OFF_STATUS_FLAG, STATUS_DONE);
+            shm_write_u32(shm, OFF_COMMAND_FLAG, 0);
+        }
+        CMD_ROP_READ_BATCH => {
+            // Batch form of CMD_ROP_READ — loop NtReadVirtualMemory for each
+            // (src_va, len) tuple, packing results contiguously into the
+            // scratch buffer (order-preserving). The whole batch is one
+            // Present round-trip, which is the only way to replace koolo's
+            // RPM hot path (2400 reads/tick × 16 ms/round-trip = 38 s/tick
+            // on single-shot — unusable).
+            //
+            // Status encoding per entry (u8 at OFF_ROP_BATCH_STATUS+i):
+            //   0 = ok (bytes copied into buffer[off..off+len])
+            //   1 = NtRVM failed / partial
+            //   2 = invalid (len=0 or would overflow scratch buffer)
+            shm_write_u32(shm, OFF_ROP_DBG, 0xBA7C0001);
+            let raw_count = shm_read_u32(shm, OFF_ROP_BATCH_COUNT) as usize;
+            let count = if raw_count > ROP_BATCH_MAX { ROP_BATCH_MAX } else { raw_count };
+            let buf_base = (shm as *mut u8).add(OFF_ROP_READ_BUFFER);
+            let status_base = (shm as *mut u8).add(OFF_ROP_BATCH_STATUS);
+            let entries_base = (shm as *const u8).add(OFF_ROP_BATCH_ENTRIES);
+            let mut total: usize = 0;
+            for i in 0..count {
+                let entry_ptr = entries_base.add(i * 16);
+                let src = core::ptr::read_unaligned(entry_ptr as *const u64) as usize;
+                let len = core::ptr::read_unaligned(entry_ptr.add(8) as *const u32) as usize;
+                if len == 0 || total.saturating_add(len) > OFF_ROP_READ_BUFFER_SIZE {
+                    core::ptr::write_volatile(status_base.add(i), 2u8);
+                    continue;
+                }
+                if !is_user_va(src) {
+                    core::ptr::write_volatile(status_base.add(i), 2u8);
+                    continue;
+                }
+                let mut br: usize = 0;
+                let st = NtReadVirtualMemory(
+                    GetCurrentProcess(),
+                    src as *const core::ffi::c_void,
+                    buf_base.add(total) as *mut core::ffi::c_void,
+                    len,
+                    &mut br as *mut usize,
+                );
+                if st != 0 || br != len {
+                    core::ptr::write_volatile(status_base.add(i), 1u8);
+                    // Zero the slot so bot doesn't read partial garbage.
+                    core::ptr::write_bytes(buf_base.add(total), 0u8, len);
+                } else {
+                    core::ptr::write_volatile(status_base.add(i), 0u8);
+                }
+                total += len;
+            }
+            shm_write_u32(shm, OFF_ROP_BATCH_TOTAL_LEN, total as u32);
+            shm_write_u32(shm, OFF_ROP_DBG, 0xBA7C000F);
             shm_write_u32(shm, OFF_STATUS_FLAG, STATUS_DONE);
             shm_write_u32(shm, OFF_COMMAND_FLAG, 0);
         }

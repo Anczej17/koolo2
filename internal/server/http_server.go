@@ -996,6 +996,7 @@ func (s *HttpServer) Listen(port int) error {
 	http.HandleFunc("/debug/rpm-counter", s.debugRPMCounter)
 	http.HandleFunc("/debug/rop-scan", s.debugRopScan)
 	http.HandleFunc("/debug/rop-read", s.debugRopRead)
+	http.HandleFunc("/debug/rop-read-batch", s.debugRopReadBatch)
 	http.HandleFunc("/debug/rop-worker-hb", s.debugRopWorkerHb)
 	http.HandleFunc("/debug/rop-dbg", s.debugRopDbg)
 	http.HandleFunc("/debug/read-trace", s.debugReadTrace)
@@ -7849,6 +7850,81 @@ func (s *HttpServer) debugRopRead(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	fmt.Fprintf(w, `{"ok":true,"status":%d,"note":"2 = ROP handler gated; unit-test trigger first"}`, status)
+}
+
+// debugRopReadBatch dispatches CMD_ROP_READ_BATCH with N entries parsed from
+// the URL. Entries is a comma-separated list of "<hex_src>:<dec_len>".
+//
+// Usage: GET /debug/rop-read-batch?character=Blizzard&entries=0x7ff691f56600:8,0x7ff691f56608:16
+func (s *HttpServer) debugRopReadBatch(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	character := r.URL.Query().Get("character")
+	if character == "" {
+		w.WriteHeader(http.StatusBadRequest)
+		fmt.Fprintf(w, `{"error":"missing character parameter"}`)
+		return
+	}
+	ctx := s.manager.GetContext(character)
+	if ctx == nil || ctx.MemoryInjector == nil {
+		w.WriteHeader(http.StatusServiceUnavailable)
+		fmt.Fprintf(w, `{"error":"no supervisor"}`)
+		return
+	}
+	pres := ctx.MemoryInjector.GetPresenter()
+	if pres == nil {
+		w.WriteHeader(http.StatusServiceUnavailable)
+		fmt.Fprintf(w, `{"error":"presenter not initialized"}`)
+		return
+	}
+	raw := r.URL.Query().Get("entries")
+	if raw == "" {
+		w.WriteHeader(http.StatusBadRequest)
+		fmt.Fprintf(w, `{"error":"entries required: hex_src:dec_len comma-separated"}`)
+		return
+	}
+	var batch []presenter.BatchReadEntry
+	for _, tok := range strings.Split(raw, ",") {
+		tok = strings.TrimSpace(tok)
+		if tok == "" {
+			continue
+		}
+		parts := strings.SplitN(tok, ":", 2)
+		if len(parts) != 2 {
+			fmt.Fprintf(w, `{"error":"bad entry %q — expect hex_src:dec_len"}`, tok)
+			return
+		}
+		var src uint64
+		var length uint32
+		if _, err := fmt.Sscanf(parts[0], "0x%x", &src); err != nil || src == 0 {
+			fmt.Fprintf(w, `{"error":"entry %q src parse failed"}`, tok)
+			return
+		}
+		if _, err := fmt.Sscanf(parts[1], "%d", &length); err != nil || length == 0 {
+			fmt.Fprintf(w, `{"error":"entry %q len parse failed"}`, tok)
+			return
+		}
+		batch = append(batch, presenter.BatchReadEntry{Src: uintptr(src), Len: length})
+	}
+	started := time.Now()
+	out, err := pres.RopReadBatch(batch)
+	elapsed := time.Since(started)
+	if err != nil {
+		fmt.Fprintf(w, `{"ok":false,"error":%q,"elapsed_ms":%.2f}`, err.Error(), float64(elapsed.Microseconds())/1000)
+		return
+	}
+	// Report first 16 bytes of each entry's read.
+	fmt.Fprintf(w, `{"ok":true,"count":%d,"elapsed_ms":%.2f,"entries":[`, len(out), float64(elapsed.Microseconds())/1000)
+	for i, buf := range out {
+		if i > 0 {
+			fmt.Fprint(w, ",")
+		}
+		preview := buf
+		if len(preview) > 16 {
+			preview = preview[:16]
+		}
+		fmt.Fprintf(w, `{"len":%d,"first":"%x"}`, len(buf), preview)
+	}
+	fmt.Fprint(w, "]}")
 }
 
 // debugReadTrace dumps the ring buffer of recent ReadBytesFromMemory calls.

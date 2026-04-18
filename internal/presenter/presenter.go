@@ -664,6 +664,103 @@ func (p *Presenter) RopRead(srcVA, dstVA, length uint64) (status uint32, err err
 	return 0, fmt.Errorf("rop read timeout (rmod didn't ack CmdRopRead within 2 s)")
 }
 
+// BatchReadEntry is one request in a CMD_ROP_READ_BATCH payload. Len must be
+// non-zero; sum of Len across a batch must stay <= OffRopReadBufferSize.
+type BatchReadEntry struct {
+	Src uintptr
+	Len uint32
+}
+
+// RopReadBatch packs N (src, len) tuples into the batch table and asks rmod
+// to NtReadVirtualMemory each, concatenated into the scratch buffer in entry
+// order. Returns the per-entry byte slices aligned with the input order.
+//
+// Caller guarantees len(entries) <= RopBatchMax and sum(Len) <=
+// OffRopReadBufferSize (enforced defensively). Single-entry failure status
+// surfaces as an error so the caller can drop to RPM or retry; other entries
+// still have their bytes populated (zeroed on failure), so partial success is
+// NOT preserved — we treat the batch as all-or-nothing at the API level.
+func (p *Presenter) RopReadBatch(entries []BatchReadEntry) ([][]byte, error) {
+	if len(entries) == 0 {
+		return nil, nil
+	}
+	if len(entries) > RopBatchMax {
+		return nil, fmt.Errorf("batch size %d exceeds RopBatchMax (%d)", len(entries), RopBatchMax)
+	}
+	total := uint32(0)
+	for i, e := range entries {
+		if e.Len == 0 {
+			return nil, fmt.Errorf("batch entry %d: zero length", i)
+		}
+		total += e.Len
+		if total > uint32(OffRopReadBufferSize) {
+			return nil, fmt.Errorf("batch total %d exceeds OffRopReadBufferSize (%d)", total, OffRopReadBufferSize)
+		}
+	}
+
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if !p.initialized || p.localView == nil {
+		return nil, fmt.Errorf("presenter not initialized")
+	}
+
+	// Write entries table + count.
+	writeU32(p.localView, uintptr(OffRopBatchCount), uint32(len(entries)))
+	for i, e := range entries {
+		entryOff := uintptr(OffRopBatchEntries + i*RopBatchEntrySize)
+		writeU64(p.localView, entryOff, uint64(e.Src))
+		writeU32(p.localView, entryOff+8, e.Len)
+		writeU32(p.localView, entryOff+12, 0) // reserved
+	}
+
+	// Dispatch.
+	writeU32(p.localView, uintptr(offCommandType), CmdRopReadBatch)
+	writeU32(p.localView, uintptr(offStatusFlag), StatusBusy)
+	writeU32(p.localView, uintptr(offCommandFlag), 1)
+
+	// Deadline — same 50 ms budget as RopReadToScratch. One Present frame
+	// should comfortably serve 64 NtRVM calls; 3 frames is slack.
+	deadline := time.Now().Add(50 * time.Millisecond)
+	for time.Now().Before(deadline) {
+		sflag := readU32(p.localView, uintptr(offStatusFlag))
+		if sflag == StatusDone {
+			break
+		}
+		if sflag == StatusError {
+			return nil, fmt.Errorf("rop batch rmod status=ERROR")
+		}
+		time.Sleep(200 * time.Microsecond)
+	}
+	if readU32(p.localView, uintptr(offStatusFlag)) != StatusDone {
+		sflag := readU32(p.localView, uintptr(offStatusFlag))
+		cmd := readU32(p.localView, uintptr(offCommandType))
+		cflag := readU32(p.localView, uintptr(offCommandFlag))
+		dbg := readU32(p.localView, uintptr(OffRopDbg))
+		total := readU32(p.localView, uintptr(OffRopBatchTotalLen))
+		return nil, fmt.Errorf("rop batch timeout status=%d cmd=%d cflag=%d dbg=0x%X total=%d",
+			sflag, cmd, cflag, dbg, total)
+	}
+
+	// Read per-entry status + slice out bytes from scratch.
+	statusBase := uintptr(p.localView) + uintptr(OffRopBatchStatus)
+	bufBase := uintptr(p.localView) + uintptr(OffRopReadBuffer)
+	out := make([][]byte, len(entries))
+	offset := uint32(0)
+	for i, e := range entries {
+		st := *(*byte)(unsafe.Pointer(statusBase + uintptr(i)))
+		if st != 0 {
+			return nil, fmt.Errorf("rop batch entry %d status=%d", i, st)
+		}
+		buf := make([]byte, e.Len)
+		for j := uint32(0); j < e.Len; j++ {
+			buf[j] = *(*byte)(unsafe.Pointer(bufBase + uintptr(offset+j)))
+		}
+		out[i] = buf
+		offset += e.Len
+	}
+	return out, nil
+}
+
 // UninstallDetour instructs rmod (in D2R's address space) to restore the
 // Present prologue, remove VEHs, and null out G_SHM before this process exits.
 // Without this call, app.exe termination leaves rmod's Present detour pointing

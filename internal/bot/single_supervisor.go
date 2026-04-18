@@ -1657,26 +1657,37 @@ func (s *SinglePlayerSupervisor) initClaudePresenter() {
 	// read as build_memcpy fails repeatedly, so callers should only opt in
 	// after /debug/rop-scan returns a complete breakdown.
 	gr.Process.SetExternalRopRead(pres.RopReadToScratch)
+	// Batched ROP-read path: N (src, len) tuples in one Present round-trip.
+	// Adapter bridges presenter.BatchReadEntry <-> memory.BatchReadEntry so
+	// gamelib stays free of a presenter import.
+	gr.Process.SetExternalBatchRead(func(entries []memory.BatchReadEntry) ([][]byte, error) {
+		conv := make([]presenter.BatchReadEntry, len(entries))
+		for i, e := range entries {
+			conv[i] = presenter.BatchReadEntry{Src: e.Src, Len: e.Len}
+		}
+		return pres.RopReadBatch(conv)
+	})
 	if os.Getenv("ROP_READ") == "1" {
 		// ROP_READ was found to be architecturally wrong for per-read use:
 		// each CMD_ROP_READ round-trips through a Present frame (~16 ms at
 		// 60 fps), and live trace showed the bot issues ~2400 reads per
 		// GetData tick. 2400 × 16 ms = 38 s/tick — unusable.
 		//
-		// The correct zero-external-RPM path is (1) snapshot walker
-		// mirroring all D2R structures to SHM once per tick so reads are
-		// SHM-local (zero frame cost), OR (2) batched CMD_ROP_READ_BATCH
-		// that copies many regions in one Present frame. Both are TODO.
-		//
-		// Keep hook registered + opt-in via ROP_READ=force for manual
-		// /debug/rop-read validation. Default path: stealth RPM (fast,
-		// production-stable). Trace ring remains enabled for observability.
+		// ROP_READ=batch is the fix — CMD_ROP_READ_BATCH serves 1..64 reads
+		// per round-trip. Bot collects the tick's addresses, issues one
+		// BatchReadBytes, then serves individual reads from the returned
+		// slices. Ceiling (how many entries before Arxan trips) is measured
+		// live; default ships conservative.
 		if os.Getenv("ROP_READ") == "force" {
 			gr.Process.EnableRopRead(true)
 			s.bot.ctx.Logger.Info("ROP_READ: ACTIVE (force mode — reads slow, diagnostic only)")
 		} else {
 			s.bot.ctx.Logger.Info("ROP_READ: infra available via /debug/rop-read; hot path stays on RPM (per-read Present round-trip is too slow)")
 		}
+	}
+	if os.Getenv("ROP_READ") == "batch" {
+		gr.Process.EnableBatchRead(true)
+		s.bot.ctx.Logger.Info("ROP_READ=batch: CMD_ROP_READ_BATCH active; GameReader.GetData will group hot-path reads")
 	}
 	// Keep classic APC for SendPacket (game-state opcodes like 0x3C).
 	// UI sender: DON'T use rmod (render thread crashes D2R).

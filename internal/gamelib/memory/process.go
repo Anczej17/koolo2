@@ -55,6 +55,13 @@ type Process struct {
 	// OFF_ROP_READ_BUFFER_SIZE (4 KB); caller chunks above that.
 	externalRopRead   func(src uintptr, length uint32) ([]byte, error)
 	ropReadEnabled    atomic.Bool
+	// externalBatchRead: bot packs N (src, len) tuples into a single rmod
+	// round-trip. When wired and ropReadEnabled is set, the hot-path tick
+	// (GameReader.GetData) can collect all the PlayerUnit chain reads and
+	// service them in one Present frame instead of N. The single-shot
+	// RopReadToScratch stays as a fallback for callers not yet batched.
+	externalBatchRead func(entries []BatchReadEntry) ([][]byte, error)
+	batchReadEnabled  atomic.Bool
 	// Per-read ring-buffer trace (off by default). Flip on via
 	// /debug/read-trace-enable or CLAUDE_READ_TRACE=1 env. Captures
 	// source + result + latency for every ReadBytesFromMemory call so
@@ -303,6 +310,43 @@ func (p *Process) SetExternalRopRead(fn func(src uintptr, length uint32) ([]byte
 // is harvested and /debug/rop-read validates end-to-end.
 func (p *Process) EnableRopRead(on bool) {
 	p.ropReadEnabled.Store(on)
+}
+
+// BatchReadEntry mirrors presenter.BatchReadEntry; duplicated here to keep
+// the gamelib package free of a presenter import (cycle otherwise).
+type BatchReadEntry struct {
+	Src uintptr
+	Len uint32
+}
+
+// SetExternalBatchRead installs the batched-read hook. Arg matches the
+// presenter.RopReadBatch signature.
+func (p *Process) SetExternalBatchRead(fn func(entries []BatchReadEntry) ([][]byte, error)) {
+	p.sendPacketMu.Lock()
+	defer p.sendPacketMu.Unlock()
+	p.externalBatchRead = fn
+}
+
+// EnableBatchRead flips the batched-read path on. When set, callers can use
+// BatchReadBytes for multi-address reads in one Present round-trip.
+func (p *Process) EnableBatchRead(on bool) {
+	p.batchReadEnabled.Store(on)
+}
+
+// BatchReadBytes services N reads in one rmod round-trip. Returns nil + error
+// when the batched path isn't enabled or rmod reports per-entry failure; the
+// caller should fall back to RPM (plain ReadBytesFromMemory loop).
+func (p *Process) BatchReadBytes(entries []BatchReadEntry) ([][]byte, error) {
+	if !p.batchReadEnabled.Load() {
+		return nil, errors.New("batch read not enabled")
+	}
+	p.sendPacketMu.Lock()
+	fn := p.externalBatchRead
+	p.sendPacketMu.Unlock()
+	if fn == nil {
+		return nil, errors.New("batch read hook not installed")
+	}
+	return fn(entries)
 }
 
 func (p *Process) CallFn(fnAddr uintptr, args ...uintptr) (uint64, error) {

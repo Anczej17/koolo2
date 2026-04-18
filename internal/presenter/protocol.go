@@ -45,6 +45,7 @@ const (
 	CmdUninstallDetour = 25 // Graceful shutdown — restore Present prologue + remove VEHs
 	CmdRopScan        = 26 // GID-4: scan D2R .text for ROP gadgets (ret-ending sequences), populate G_ROP_GADGETS
 	CmdRopRead        = 27 // GID-5: copy D2R bytes via chained D2R gadgets (memcpy ROP). Currently gated (returns status=2 until trigger encoding verified).
+	CmdRopReadBatch   = 29 // batch N (src_va, len) tuples in one Present frame — amortises round-trip
 
 	// Status values written by the Rust DLL, polled by Go.
 	StatusBusy  = 0
@@ -327,8 +328,20 @@ const (
 	OffRopWorkerHB    = 0x3060 // u32 — ROP worker thread heartbeat counter (Plan B diagnostic)
 	// GID-6 scratch buffer mirrored in SHM. rmod's CMD_ROP_READ_SCRATCH
 	// writes here; Go-side reads from its own SHM view at the same offset.
+	// CMD_ROP_READ_BATCH reuses the same buffer; entries' bytes are packed
+	// contiguously in entry order.
 	OffRopReadBuffer     = 0x8000 // u8[0x1000] — ROP-mirrored D2R bytes
 	OffRopReadBufferSize = 0x1000
+
+	// CMD_ROP_READ_BATCH protocol. Bot writes COUNT + ENTRIES; rmod writes
+	// packed bytes into OFF_ROP_READ_BUFFER, TOTAL_LEN, and per-entry
+	// STATUS (u8 per slot, 0 ok / 1 partial / 2 invalid).
+	OffRopBatchCount    = 0x3070 // u32 — entries to process
+	OffRopBatchTotalLen = 0x3074 // u32 — out: bytes packed into OffRopReadBuffer
+	OffRopBatchEntries  = 0x3080 // BatchEntry[64], 16 B each: src_va u64, len u32, _pad u32
+	OffRopBatchStatus   = 0x3480 // u8[64]
+	RopBatchMax         = 64
+	RopBatchEntrySize   = 16
 
 	OffSnapRegions     = 0x4200 // RegionEntry[1024] × 16 B  (B3: grown 256→1024 for monster/object/entrance walker budget)
 	SnapRegionMax      = 1024
