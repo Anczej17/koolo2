@@ -7984,7 +7984,9 @@ func (s *HttpServer) debugReadTraceStats(w http.ResponseWriter, r *http.Request)
 		fmt.Fprintf(w, `{"error":"trace not initialised"}`)
 		return
 	}
-	fmt.Fprintf(w, `{"ok":true,"enabled":%t,"counters":%q}`, tr.Enabled(), tr.Stats())
+	bcalls, bfail, bentries := ctx.GameReader.Process.BatchStats()
+	fmt.Fprintf(w, `{"ok":true,"enabled":%t,"counters":%q,"batch":{"calls":%d,"failed":%d,"entries":%d}}`,
+		tr.Enabled(), tr.Stats(), bcalls, bfail, bentries)
 }
 
 // debugReadTraceEnable toggles the trace on/off at runtime.

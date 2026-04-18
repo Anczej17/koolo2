@@ -718,9 +718,11 @@ func (p *Presenter) RopReadBatch(entries []BatchReadEntry) ([][]byte, error) {
 	writeU32(p.localView, uintptr(offStatusFlag), StatusBusy)
 	writeU32(p.localView, uintptr(offCommandFlag), 1)
 
-	// Deadline — same 50 ms budget as RopReadToScratch. One Present frame
-	// should comfortably serve 64 NtRVM calls; 3 frames is slack.
-	deadline := time.Now().Add(50 * time.Millisecond)
+	// Deadline — 200 ms covers 10+ Present frames of slack. Tight 50 ms
+	// deadlines produced high spurious-timeout rate on live bot ticks that
+	// fire BatchReadBytes from multiple goroutines within the same tick
+	// (GetData + refresh race briefly queues the command ring).
+	deadline := time.Now().Add(200 * time.Millisecond)
 	for time.Now().Before(deadline) {
 		sflag := readU32(p.localView, uintptr(offStatusFlag))
 		if sflag == StatusDone {

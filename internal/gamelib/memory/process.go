@@ -85,6 +85,12 @@ type Process struct {
 	rpmReadStringCalls atomic.Uint64
 	rpmReadBufferCalls atomic.Uint64
 	rpmBytesTotal      atomic.Uint64
+
+	// Batch path counters (Phase 3). Growing `batchEntriesTotal` with flat
+	// `rpmBytesTotal` is the headline win: each entry replaces one RPM read.
+	batchCallsTotal    atomic.Uint64
+	batchCallsFailed   atomic.Uint64
+	batchEntriesTotal  atomic.Uint64
 }
 
 // RPMStats returns a snapshot of per-path RPM activity counters. Zero values
@@ -346,7 +352,19 @@ func (p *Process) BatchReadBytes(entries []BatchReadEntry) ([][]byte, error) {
 	if fn == nil {
 		return nil, errors.New("batch read hook not installed")
 	}
-	return fn(entries)
+	p.batchCallsTotal.Add(1)
+	out, err := fn(entries)
+	if err != nil {
+		p.batchCallsFailed.Add(1)
+	} else {
+		p.batchEntriesTotal.Add(uint64(len(entries)))
+	}
+	return out, err
+}
+
+// BatchStats returns cumulative batched-read counters. (calls, failed, entries).
+func (p *Process) BatchStats() (calls, failed, entries uint64) {
+	return p.batchCallsTotal.Load(), p.batchCallsFailed.Load(), p.batchEntriesTotal.Load()
 }
 
 func (p *Process) CallFn(fnAddr uintptr, args ...uintptr) (uint64, error) {

@@ -1,6 +1,7 @@
 package memory
 
 import (
+	"encoding/binary"
 	"sort"
 
 	"local/internal/svc/internal/gamelib/data/entrance"
@@ -28,21 +29,59 @@ func (gd *GameReader) Objects(playerPosition data.Position, hover data.HoverData
 		objectUnitPtr := uintptr(ReadUIntFromBuffer(unitTableBuffer, uint(objectOffset), Uint64))
 
 		for objectUnitPtr > 0 {
-			// Read minimal data first to check object type
-			objectType := gd.reader.ReadUInt(objectUnitPtr+0x00, Uint32)
+			// Batch the per-object header reads — 8 fixed-offset fields.
+			// Collapses 8 individual NtRVM calls into one CMD_ROP_READ_BATCH
+			// round-trip when ROP_READ=batch is active, otherwise falls
+			// through to sequential reads.
+			var (
+				objectType   uint
+				rawTxtFileNo uint
+				unitID       uint
+				objectMode   mode.ObjectMode
+				unitDataPtr  uintptr
+				pathPtr      uintptr
+				shrineTextPtr uintptr
+				nextUnit     uintptr
+			)
+			batched := false
+			if bufs, err := gd.Process.BatchReadBytes([]BatchReadEntry{
+				{Src: objectUnitPtr + 0x00, Len: 4}, // 0 objectType
+				{Src: objectUnitPtr + 0x04, Len: 4}, // 1 rawTxtFileNo
+				{Src: objectUnitPtr + 0x08, Len: 4}, // 2 unitID
+				{Src: objectUnitPtr + 0x0c, Len: 4}, // 3 objectMode
+				{Src: objectUnitPtr + 0x10, Len: 8}, // 4 unitDataPtr
+				{Src: objectUnitPtr + 0x38, Len: 8}, // 5 pathPtr
+				{Src: objectUnitPtr + 0x0A, Len: 8}, // 6 shrineTextPtr
+				{Src: objectUnitPtr + 0x158, Len: 8}, // 7 next
+			}); err == nil && len(bufs) == 8 {
+				objectType = uint(binary.LittleEndian.Uint32(bufs[0]))
+				rawTxtFileNo = uint(binary.LittleEndian.Uint32(bufs[1]))
+				unitID = uint(binary.LittleEndian.Uint32(bufs[2]))
+				objectMode = mode.ObjectMode(binary.LittleEndian.Uint32(bufs[3]))
+				unitDataPtr = uintptr(binary.LittleEndian.Uint64(bufs[4]))
+				pathPtr = uintptr(binary.LittleEndian.Uint64(bufs[5]))
+				shrineTextPtr = uintptr(binary.LittleEndian.Uint64(bufs[6]))
+				nextUnit = uintptr(binary.LittleEndian.Uint64(bufs[7]))
+				batched = true
+			}
+			if !batched {
+				objectType = gd.reader.ReadUInt(objectUnitPtr+0x00, Uint32)
+			}
 
 			if objectType == 2 {
-				rawTxtFileNo := gd.reader.ReadUInt(objectUnitPtr+0x04, Uint32) // Extract actual txtFileNo
-				txtFileNo := rawTxtFileNo & 0xFFFF
-				unitID := gd.reader.ReadUInt(objectUnitPtr+0x08, Uint32)
-				objectMode := mode.ObjectMode(gd.reader.ReadUInt(objectUnitPtr+0x0c, Uint32))
-				unitDataPtr := uintptr(gd.reader.ReadUInt(objectUnitPtr+0x10, Uint64))
-
-				//This offset gives timer for each mode to keep progress in real time. exemple: Mode.Operating fresh timer then Mode.Opened new timer (for objects)
-				// timerValue := uint32(gd.reader.ReadUInt(objectUnitPtr+0x5C, Uint32))
-
-				// Path and position data
-				pathPtr := uintptr(gd.reader.ReadUInt(objectUnitPtr+0x38, Uint64))
+				var txtFileNo uint
+				if batched {
+					txtFileNo = rawTxtFileNo & 0xFFFF
+				} else {
+					rawTxtFileNo = gd.reader.ReadUInt(objectUnitPtr+0x04, Uint32)
+					txtFileNo = rawTxtFileNo & 0xFFFF
+					unitID = gd.reader.ReadUInt(objectUnitPtr+0x08, Uint32)
+					objectMode = mode.ObjectMode(gd.reader.ReadUInt(objectUnitPtr+0x0c, Uint32))
+					unitDataPtr = uintptr(gd.reader.ReadUInt(objectUnitPtr+0x10, Uint64))
+					pathPtr = uintptr(gd.reader.ReadUInt(objectUnitPtr+0x38, Uint64))
+					shrineTextPtr = uintptr(gd.reader.ReadUInt(objectUnitPtr+0x0A, Uint64))
+				}
+				_ = rawTxtFileNo
 				// Coordinates (X, Y)
 				posX := gd.reader.ReadUInt(pathPtr+0x10, Uint16)
 				posY := gd.reader.ReadUInt(pathPtr+0x14, Uint16)
@@ -58,7 +97,10 @@ func (gd *GameReader) Objects(playerPosition data.Position, hover data.HoverData
 					portalData.DestArea = destArea
 					// Handle Shrines
 				} else {
-					shrineTextPtr := uintptr(gd.reader.ReadUInt(objectUnitPtr+0x0A, Uint64))
+					// shrineTextPtr already prefetched in the header batch.
+					if !batched {
+						shrineTextPtr = uintptr(gd.reader.ReadUInt(objectUnitPtr+0x0A, Uint64))
+					}
 					if shrineTextPtr > 0 {
 						shrineType := gd.reader.ReadUInt(unitDataPtr+0x08, Uint8)
 						shrineData = object.ShrineData{
@@ -84,7 +126,11 @@ func (gd *GameReader) Objects(playerPosition data.Position, hover data.HoverData
 					PortalData: portalData,
 				})
 			}
-			objectUnitPtr = uintptr(gd.reader.ReadUInt(objectUnitPtr+0x158, Uint64))
+			if batched {
+				objectUnitPtr = nextUnit
+			} else {
+				objectUnitPtr = uintptr(gd.reader.ReadUInt(objectUnitPtr+0x158, Uint64))
+			}
 		}
 	}
 

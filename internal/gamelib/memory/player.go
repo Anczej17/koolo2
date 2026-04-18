@@ -15,41 +15,99 @@ import (
 func (gd *GameReader) GetRawPlayerUnits() RawPlayerUnits {
 	rawPlayerUnits := make(RawPlayerUnits, 0)
 	hover := gd.HoveredData()
-	for i := 0; i < 128; i++ {
-		unitOffset := gd.offset.UnitTable + uintptr(i*8)
-		playerUnitAddr := gd.Process.moduleBaseAddressPtr + unitOffset
-		playerUnit := uintptr(gd.reader.ReadUInt(playerUnitAddr, Uint64))
-		for playerUnit > 0 {
-			unitID := gd.reader.ReadUInt(playerUnit+0x08, Uint32)
-			pInventory := playerUnit + 0x90
-			inventoryAddr := uintptr(gd.reader.ReadUInt(pInventory, Uint64))
 
-			pPath := playerUnit + 0x38
-			pathAddress := uintptr(gd.reader.ReadUInt(pPath, Uint64))
+	// Phase 3 — when ROP_READ=batch is wired, prefetch the whole UnitTable
+	// (128 × u64 = 1 KB) in one CMD_ROP_READ_BATCH entry instead of 128
+	// per-slot NtReadVirtualMemory calls. Falls back transparently to the
+	// per-slot RPM read when the batch path isn't available.
+	var unitTableBuf []byte
+	if bufs, err := gd.Process.BatchReadBytes([]BatchReadEntry{{
+		Src: gd.Process.moduleBaseAddressPtr + gd.offset.UnitTable,
+		Len: 128 * 8,
+	}}); err == nil && len(bufs) == 1 {
+		unitTableBuf = bufs[0]
+	}
+
+	// Cache expansion-char LoD flag per call — it's invariant across the
+	// 128-slot sweep. Saves 2 reads per non-null player on the hot path.
+	expCharPtr := uintptr(gd.reader.ReadUInt(gd.moduleBaseAddressPtr+gd.offset.Expansion, Uint64))
+	expChar := gd.reader.ReadUInt(expCharPtr+0x5C, Uint16)
+	isMainOffset := uintptr(0x30)
+	if expChar >= uint(game.CharLoD) {
+		isMainOffset = 0x70
+	}
+
+	for i := 0; i < 128; i++ {
+		var playerUnit uintptr
+		if unitTableBuf != nil {
+			playerUnit = uintptr(binary.LittleEndian.Uint64(unitTableBuf[i*8:]))
+		} else {
+			unitOffset := gd.offset.UnitTable + uintptr(i*8)
+			playerUnitAddr := gd.Process.moduleBaseAddressPtr + unitOffset
+			playerUnit = uintptr(gd.reader.ReadUInt(playerUnitAddr, Uint64))
+		}
+		for playerUnit > 0 {
+			// Batch the per-playerUnit fixed-offset reads. 7 fields collapsed
+			// into a single CMD_ROP_READ_BATCH dispatch when ROP_READ=batch.
+			// Byte field layout mirrors the list below so parsing stays in
+			// lock-step with it.
+			var (
+				unitID         uint32
+				inventoryAddr  uintptr
+				pathAddress    uintptr
+				playerNameAddr uintptr
+				statsListExPtr uintptr
+				playerMode     mode.PlayerMode
+				isCorpse       uint
+				nextPlayer     uintptr
+			)
+			batched := false
+			if bufs, err := gd.Process.BatchReadBytes([]BatchReadEntry{
+				{Src: playerUnit + 0x08, Len: 4},   // 0 unitID u32
+				{Src: playerUnit + 0x90, Len: 8},   // 1 inventory ptr
+				{Src: playerUnit + 0x38, Len: 8},   // 2 path ptr
+				{Src: playerUnit + 0x10, Len: 8},   // 3 unitData ptr (name)
+				{Src: playerUnit + 0x1AE, Len: 1},  // 4 isCorpse u8
+				{Src: playerUnit + 0x88, Len: 8},   // 5 statsListEx ptr
+				{Src: playerUnit + 0x0C, Len: 4},   // 6 playerMode u32
+				{Src: playerUnit + 0x158, Len: 8},  // 7 next
+			}); err == nil && len(bufs) == 8 {
+				unitID = binary.LittleEndian.Uint32(bufs[0])
+				inventoryAddr = uintptr(binary.LittleEndian.Uint64(bufs[1]))
+				pathAddress = uintptr(binary.LittleEndian.Uint64(bufs[2]))
+				playerNameAddr = uintptr(binary.LittleEndian.Uint64(bufs[3]))
+				isCorpse = uint(bufs[4][0])
+				statsListExPtr = uintptr(binary.LittleEndian.Uint64(bufs[5]))
+				playerMode = mode.PlayerMode(binary.LittleEndian.Uint32(bufs[6]))
+				nextPlayer = uintptr(binary.LittleEndian.Uint64(bufs[7]))
+				batched = true
+			}
+			if !batched {
+				unitID = uint32(gd.reader.ReadUInt(playerUnit+0x08, Uint32))
+				inventoryAddr = uintptr(gd.reader.ReadUInt(playerUnit+0x90, Uint64))
+				pathAddress = uintptr(gd.reader.ReadUInt(playerUnit+0x38, Uint64))
+				playerNameAddr = uintptr(gd.reader.ReadUInt(playerUnit+0x10, Uint64))
+				isCorpse = gd.reader.ReadUInt(playerUnit+0x1AE, Uint8)
+				statsListExPtr = uintptr(gd.reader.ReadUInt(playerUnit+0x88, Uint64))
+				playerMode = mode.PlayerMode(gd.reader.ReadUInt(playerUnit+0x0c, Uint32))
+				nextPlayer = uintptr(gd.reader.ReadUInt(playerUnit+0x158, Uint64))
+			}
+
+			// Path-chain dereferences remain sequential (each read depends on
+			// the previous) so batching helps no further here.
 			room1Ptr := uintptr(gd.reader.ReadUInt(pathAddress+0x20, Uint64))
 			room2Ptr := uintptr(gd.reader.ReadUInt(room1Ptr+0x18, Uint64))
 			levelPtr := uintptr(gd.reader.ReadUInt(room2Ptr+0x90, Uint64))
 			levelNo := gd.reader.ReadUInt(levelPtr+0x1F8, Uint32)
-
 			xPos := gd.reader.ReadUInt(pathAddress+0x02, Uint16)
 			yPos := gd.reader.ReadUInt(pathAddress+0x06, Uint16)
-			pUnitData := playerUnit + 0x10
-			playerNameAddr := uintptr(gd.reader.ReadUInt(pUnitData, Uint64))
 			name := gd.reader.ReadStringFromMemory(playerNameAddr, 0)
 
-			expCharPtr := uintptr(gd.reader.ReadUInt(gd.moduleBaseAddressPtr+gd.offset.Expansion, Uint64))
-			expChar := gd.reader.ReadUInt(expCharPtr+0x5C, Uint16)
-			isMainPlayer := gd.reader.ReadUInt(inventoryAddr+0x30, Uint16)
-			if expChar >= uint(game.CharLoD) {
-				isMainPlayer = gd.reader.ReadUInt(inventoryAddr+0x70, Uint16)
-			}
-			isCorpse := gd.reader.ReadUInt(playerUnit+0x1AE, Uint8)
+			isMainPlayer := gd.reader.ReadUInt(inventoryAddr+isMainOffset, Uint16)
 
-			statsListExPtr := uintptr(gd.reader.ReadUInt(playerUnit+0x88, Uint64))
 			baseStats := gd.getStatsList(statsListExPtr + 0x30)
 			stats := gd.getStatsList(statsListExPtr + 0xA8)
 			states := gd.GetStates(statsListExPtr)
-			playerMode := mode.PlayerMode(gd.reader.ReadUInt(playerUnit+0x0c, Uint32))
 
 			rawPlayerUnits = append(rawPlayerUnits, RawPlayerUnit{
 				UnitID:       data.UnitID(unitID),
@@ -68,7 +126,7 @@ func (gd *GameReader) GetRawPlayerUnits() RawPlayerUnits {
 				BaseStats: baseStats,
 				Mode:      playerMode,
 			})
-			playerUnit = uintptr(gd.reader.ReadUInt(playerUnit+0x158, Uint64))
+			playerUnit = nextPlayer
 		}
 	}
 
@@ -212,6 +270,26 @@ func (gd *GameReader) getSkills(skillListPtr uintptr) map[skill.ID]skill.Points 
 
 func (gd *GameReader) GetStates(statsListExPtr uintptr) state.States {
 	var states state.States
+
+	// Batch path — 8 fixed-offset u32 reads at statsListEx+0xAF0 stride 4.
+	// One CMD_ROP_READ_BATCH round-trip replaces 8 individual RPM calls when
+	// ROP_READ=batch is wired. Falls back to sequential reads otherwise.
+	entries := make([]BatchReadEntry, 8)
+	for i := 0; i < 8; i++ {
+		entries[i] = BatchReadEntry{
+			Src: statsListExPtr + 0xAF0 + uintptr(i*4),
+			Len: 4,
+		}
+	}
+	if bufs, err := gd.Process.BatchReadBytes(entries); err == nil && len(bufs) == 8 {
+		for i, buf := range bufs {
+			stateByte := uint(binary.LittleEndian.Uint32(buf))
+			offset := (32 * i) - 1
+			states = append(states, calculateStates(stateByte, uint(offset))...)
+		}
+		return states
+	}
+
 	for i := 0; i < 8; i++ {
 		offset := i * 4
 		stateByte := gd.reader.ReadUInt(statsListExPtr+0xAF0+uintptr(offset), Uint32)
