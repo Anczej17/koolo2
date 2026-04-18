@@ -389,6 +389,7 @@ const OFF_ROP_READY:        usize = 0x3034;  // u32 — 1 when G_ROP_EXECUTOR/G_
 const OFF_ROP_DBG:          usize = 0x3038;  // u32 — step marker (0xAAAA00xx); Go reads on timeout to see where handler got stuck
 const OFF_ROP_KIND_COUNTS:  usize = 0x303C;  // u32[8] — GadgetKind breakdown: [Unknown,PopReg,MovRegMem,MovMemReg,RepMovsb,RepMovsq,XchgReg,Ret]
 const OFF_ROP_POPREG_MASK:  usize = 0x305C;  // u16 — bitmask of popable regs in pool (bit0=rax..bit15=r15)
+const OFF_ROP_WORKER_HB:    usize = 0x3060;  // u32 — ROP worker thread heartbeat counter (Plan B diagnostic)
 
 // HWBP commands — match Go protocol.go (CmdHwbpInstall=6 etc).
 const CMD_HWBP_INSTALL:   u32 = 6;          // install DR0=target on every D2R thread
@@ -1070,6 +1071,25 @@ unsafe fn init_from_shm(shm: *mut SharedBuffer) -> Result<(), u32> {
         }
     }
 
+    // Pre-allocate ROP chain buffers + spawn scan worker.
+    // Same as init_all's 3d/3e — init_from_shm is the APC-preferred path
+    // so this MUST also create the worker or Plan B never activates.
+    let target_va = G_D2R_BASE;
+    G_ROP_EXECUTOR    = executor::Executor::new(target_va);
+    G_ROP_STACK       = alloc_mgr::AllocatedMemory::new(0x1000);
+    G_ROP_TRIGGER_BUF = alloc_mgr::AllocatedMemory::new(0x1000);
+    G_ROP_WORKER_SHM = shm;
+    if G_ROP_WORKER_THREAD.is_null() {
+        G_ROP_WORKER_THREAD = CreateThread(
+            core::ptr::null(),
+            0,
+            rop_scan_worker_thread_fn,
+            core::ptr::null_mut(),
+            0,
+            core::ptr::null_mut(),
+        );
+    }
+
     shm_write_u32(shm, OFF_DEBUG_STEP, 0x0F);
     shm_write_u32(shm, OFF_READY_FLAG, 1);
 
@@ -1744,15 +1764,33 @@ unsafe fn dispatch_commands() {
             // Only hand a NEW request to the worker when it's idle and its
             // last scan is consumed. If it's still running, just ack so the
             // Go polling loop can keep checking.
-            if !G_ROP_REQ_PENDING {
-                // Fresh request when the previous scan completed OR the base
-                // we were asked to scan changed. Consumer clears
-                // G_ROP_WORKER_COMPLETE by issuing a new base; here we always
-                // accept the new params.
-                G_ROP_REQ_BASE      = base_va;
-                G_ROP_REQ_LEN       = total;
-                G_ROP_WORKER_COMPLETE = false;
-                G_ROP_REQ_PENDING   = true;
+            // Volatile reads/writes on the cross-thread flags so neither
+            // the compiler nor the CPU caches them away. Without this the
+            // worker's busy-wait can hoist the !pending check out of the
+            // loop and never see our set-true.
+            let pending_ptr  = &raw mut G_ROP_REQ_PENDING;
+            let complete_ptr = &raw mut G_ROP_WORKER_COMPLETE;
+            let base_ptr     = &raw mut G_ROP_REQ_BASE;
+            let len_ptr      = &raw mut G_ROP_REQ_LEN;
+            let currently_pending = core::ptr::read_volatile(pending_ptr);
+            let currently_complete = core::ptr::read_volatile(complete_ptr);
+            let cur_base = core::ptr::read_volatile(base_ptr);
+            let cur_len  = core::ptr::read_volatile(len_ptr);
+            let same_target = cur_base == base_va && cur_len == total;
+
+            if currently_complete && same_target {
+                // Worker already produced results for this (base, len). Don't
+                // re-queue — that would wipe COMPLETE and make Go's polling
+                // loop spin forever. Present falls through to report
+                // ready=1 below.
+                shm_write_u32(shm, OFF_ROP_DBG, 0xBEEF0004);
+            } else if !currently_pending && !(currently_complete && same_target) {
+                // Fresh request — different base/len, OR previous scan not
+                // yet complete. Queue it for the worker.
+                core::ptr::write_volatile(base_ptr,     base_va);
+                core::ptr::write_volatile(len_ptr,      total);
+                core::ptr::write_volatile(complete_ptr, false);
+                core::ptr::write_volatile(pending_ptr,  true);
                 shm_write_u32(shm, OFF_ROP_DBG, 0xBEEF0002);
             } else {
                 shm_write_u32(shm, OFF_ROP_DBG, 0xBEEF0003); // worker still busy — poll again
@@ -1762,7 +1800,8 @@ unsafe fn dispatch_commands() {
             // the pre-allocated buffers exist. We read is_some() on Options
             // that were populated at init — they live forever after that, so
             // this is cold-cached and Arxan's sentinel timing shouldn't apply.
-            let ready = G_ROP_WORKER_COMPLETE
+            let worker_done = core::ptr::read_volatile(complete_ptr);
+            let ready = worker_done
                 && G_ROP_EXECUTOR.is_some()
                 && G_ROP_STACK.is_some()
                 && G_ROP_TRIGGER_BUF.is_some();
@@ -5321,6 +5360,13 @@ unsafe extern "system" fn snapshot_worker_thread_fn(_param: *mut core::ffi::c_vo
 ///  5. Set G_ROP_WORKER_COMPLETE so Present's next CMD_ROP_SCAN returns
 ///     ready=1.
 unsafe extern "system" fn rop_scan_worker_thread_fn(_param: *mut core::ffi::c_void) -> DWORD {
+    // Write a one-shot "worker started" marker BEFORE entering the loop so
+    // post-mortem inspection shows the thread actually got scheduled.
+    let shm_first = G_ROP_WORKER_SHM;
+    if !shm_first.is_null() {
+        shm_write_u32(shm_first, OFF_ROP_WORKER_HB, 1); // seeded at 1; loop bumps
+    }
+    let mut heartbeat: u32 = 1;
     loop {
         if G_WORKER_STOP {
             break;
@@ -5330,15 +5376,27 @@ unsafe extern "system" fn rop_scan_worker_thread_fn(_param: *mut core::ffi::c_vo
         if shm.is_null() {
             continue;
         }
-        if !G_ROP_REQ_PENDING {
+        // Bump heartbeat so Go can verify the worker is actively looping
+        // without relying on the OFF_ROP_DBG marker (which Present
+        // overwrites every CMD_ROP_SCAN call).
+        heartbeat = heartbeat.wrapping_add(1);
+        shm_write_u32(shm, OFF_ROP_WORKER_HB, heartbeat);
+        // Volatile read — without this the compiler can hoist the flag
+        // check out of the loop and we spin forever without seeing the
+        // Present thread flipping it to true.
+        let pending_ptr  = &raw mut G_ROP_REQ_PENDING;
+        let complete_ptr = &raw mut G_ROP_WORKER_COMPLETE;
+        let base_ptr     = &raw mut G_ROP_REQ_BASE;
+        let len_ptr      = &raw mut G_ROP_REQ_LEN;
+        if !core::ptr::read_volatile(pending_ptr) {
             continue;
         }
 
         // Snapshot request + clear the pending flag so a follow-up request
         // can be queued without racing with our in-flight work.
-        let base = G_ROP_REQ_BASE as *const u8;
-        let total = G_ROP_REQ_LEN;
-        G_ROP_REQ_PENDING = false;
+        let base = core::ptr::read_volatile(base_ptr) as *const u8;
+        let total = core::ptr::read_volatile(len_ptr);
+        core::ptr::write_volatile(pending_ptr, false);
         shm_write_u32(shm, OFF_ROP_DBG, 0xCAFE0001);
 
         // Reset pool for the new range, then scan. `scan` reads D2R .text
@@ -5387,8 +5445,9 @@ unsafe extern "system" fn rop_scan_worker_thread_fn(_param: *mut core::ffi::c_vo
         shm_write_u32(shm, OFF_ROP_POPREG_MASK, pop_mask as u32);
 
         // Mark this request complete AFTER all results are in SHM so
-        // Present's ready=... check sees a consistent snapshot.
-        G_ROP_WORKER_COMPLETE = true;
+        // Present's ready=... check sees a consistent snapshot. Volatile
+        // write so Present sees the update on its next poll.
+        core::ptr::write_volatile(complete_ptr, true);
         shm_write_u32(shm, OFF_ROP_DBG, 0xCAFE000F);
     }
     0

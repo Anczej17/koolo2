@@ -996,6 +996,7 @@ func (s *HttpServer) Listen(port int) error {
 	http.HandleFunc("/debug/rpm-counter", s.debugRPMCounter)
 	http.HandleFunc("/debug/rop-scan", s.debugRopScan)
 	http.HandleFunc("/debug/rop-read", s.debugRopRead)
+	http.HandleFunc("/debug/rop-worker-hb", s.debugRopWorkerHb)
 	http.HandleFunc("/debug/dispatch-ping", s.debugDispatchPing)
 	http.HandleFunc("/debug/handle-audit", s.debugHandleAudit)
 	http.HandleFunc("/debug/writemem", s.debugWriteMem)
@@ -7841,6 +7842,39 @@ func (s *HttpServer) debugRopRead(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	fmt.Fprintf(w, `{"ok":true,"status":%d,"note":"2 = ROP handler gated; unit-test trigger first"}`, status)
+}
+
+// debugRopWorkerHb returns the ROP scan worker's heartbeat counter. Plan B
+// diagnostic — the worker bumps it every ~30 ms. Counter stays at 0 if the
+// worker thread never spawned; stays at 1 if it got past spawn but never
+// entered the loop body; and increments monotonically if actively looping.
+// Usage: GET /debug/rop-worker-hb?character=Blizzard
+func (s *HttpServer) debugRopWorkerHb(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	character := r.URL.Query().Get("character")
+	if character == "" {
+		w.WriteHeader(http.StatusBadRequest)
+		fmt.Fprintf(w, `{"error":"missing character parameter"}`)
+		return
+	}
+	ctx := s.manager.GetContext(character)
+	if ctx == nil || ctx.MemoryInjector == nil {
+		w.WriteHeader(http.StatusServiceUnavailable)
+		fmt.Fprintf(w, `{"error":"no supervisor"}`)
+		return
+	}
+	pres := ctx.MemoryInjector.GetPresenter()
+	if pres == nil {
+		w.WriteHeader(http.StatusServiceUnavailable)
+		fmt.Fprintf(w, `{"error":"presenter not initialized"}`)
+		return
+	}
+	hb, err := pres.RopWorkerHeartbeat()
+	if err != nil {
+		fmt.Fprintf(w, `{"ok":false,"error":%q}`, err.Error())
+		return
+	}
+	fmt.Fprintf(w, `{"ok":true,"heartbeat":%d}`, hb)
 }
 
 // debugDispatchPing sends CMD_NOP and measures round-trip time. Used to

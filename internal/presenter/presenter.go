@@ -541,6 +541,19 @@ func (p *Presenter) RopPool() (RopPoolBreakdown, error) {
 	}, nil
 }
 
+// RopWorkerHeartbeat reads the ROP scan worker's heartbeat counter from SHM.
+// Plan B diagnostic: the worker bumps this every ~30 ms. If it stays at 0
+// the thread never spawned; if it increments between calls the worker is
+// actively looping.
+func (p *Presenter) RopWorkerHeartbeat() (uint32, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if !p.initialized || p.localView == nil {
+		return 0, fmt.Errorf("presenter not initialized")
+	}
+	return readU32(p.localView, uintptr(OffRopWorkerHB)), nil
+}
+
 // RopRead asks rmod to execute a ROP-chain memcpy: copy `length` bytes
 // from `srcVA` (a D2R virtual address) to `dstVA` (typically a scratch VA
 // allocated in our SHM so we can read back). Returns the rmod-reported

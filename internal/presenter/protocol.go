@@ -324,6 +324,7 @@ const (
 	OffRopDbg         = 0x3038 // u32 — step marker (0xAAAA00xx); read on timeout to locate hang
 	OffRopKindCounts  = 0x303C // u32[8] — [Unknown,PopReg,MovRegMem,MovMemReg,RepMovsb,RepMovsq,XchgReg,Ret]
 	OffRopPopRegMask  = 0x305C // u32 — bitmask of popable regs in pool (bit0=rax..bit15=r15)
+	OffRopWorkerHB    = 0x3060 // u32 — ROP worker thread heartbeat counter (Plan B diagnostic)
 
 	OffSnapRegions     = 0x4200 // RegionEntry[1024] × 16 B  (B3: grown 256→1024 for monster/object/entrance walker budget)
 	SnapRegionMax      = 1024
