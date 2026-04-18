@@ -1,7 +1,6 @@
 package memory
 
 import (
-	"encoding/binary"
 	"sort"
 
 	"local/internal/svc/internal/gamelib/data/mode"
@@ -29,26 +28,10 @@ func (gd *GameReader) Monsters(playerPosition data.Position, hover data.HoverDat
 		monsterOffset := 8 * i
 		monsterUnitPtr := uintptr(ReadUIntFromBuffer(unitTableBuffer, uint(monsterOffset), Uint64))
 		for monsterUnitPtr > 0 {
-			// Batch isCorpse + next so the skip-branch reads are 1 round-trip.
-			var isCorpse uint
-			var nextMonster uintptr
-			batched := false
-			if bufs, err := gd.Process.BatchReadBytes([]BatchReadEntry{
-				{Src: monsterUnitPtr + 0x1AE, Len: 1},
-				{Src: monsterUnitPtr + 0x158, Len: 8},
-			}); err == nil && len(bufs) == 2 {
-				isCorpse = uint(bufs[0][0])
-				nextMonster = uintptr(binary.LittleEndian.Uint64(bufs[1]))
-				batched = true
-			} else {
-				isCorpse = gd.reader.ReadUInt(monsterUnitPtr+0x1AE, Uint8)
-			}
+			// Quick corpse check first
+			isCorpse := gd.reader.ReadUInt(monsterUnitPtr+0x1AE, Uint8)
 			if isCorpse != 0 {
-				if batched {
-					monsterUnitPtr = nextMonster
-				} else {
-					monsterUnitPtr = uintptr(gd.reader.ReadUInt(monsterUnitPtr+0x158, Uint64))
-				}
+				monsterUnitPtr = uintptr(gd.reader.ReadUInt(monsterUnitPtr+0x158, Uint64))
 				continue
 			}
 
@@ -90,11 +73,7 @@ func (gd *GameReader) Monsters(playerPosition data.Position, hover data.HoverDat
 				})
 			}
 
-			if batched {
-				monsterUnitPtr = nextMonster
-			} else {
-				monsterUnitPtr = uintptr(gd.reader.ReadUInt(monsterUnitPtr+0x158, Uint64))
-			}
+			monsterUnitPtr = uintptr(gd.reader.ReadUInt(monsterUnitPtr+0x158, Uint64))
 		}
 	}
 
@@ -126,25 +105,9 @@ func (gd *GameReader) Corpses(playerPosition data.Position, hover data.HoverData
 		monsterOffset := 8 * i
 		monsterUnitPtr := uintptr(ReadUIntFromBuffer(unitTableBuffer, uint(monsterOffset), Uint64))
 		for monsterUnitPtr > 0 {
-			var isCorpse uint
-			var nextMonster uintptr
-			batched := false
-			if bufs, err := gd.Process.BatchReadBytes([]BatchReadEntry{
-				{Src: monsterUnitPtr + 0x1AE, Len: 1},
-				{Src: monsterUnitPtr + 0x158, Len: 8},
-			}); err == nil && len(bufs) == 2 {
-				isCorpse = uint(bufs[0][0])
-				nextMonster = uintptr(binary.LittleEndian.Uint64(bufs[1]))
-				batched = true
-			} else {
-				isCorpse = gd.reader.ReadUInt(monsterUnitPtr+0x1AE, Uint8)
-			}
+			isCorpse := gd.reader.ReadUInt(monsterUnitPtr+0x1AE, Uint8)
 			if isCorpse == 0 {
-				if batched {
-					monsterUnitPtr = nextMonster
-				} else {
-					monsterUnitPtr = uintptr(gd.reader.ReadUInt(monsterUnitPtr+0x158, Uint64))
-				}
+				monsterUnitPtr = uintptr(gd.reader.ReadUInt(monsterUnitPtr+0x158, Uint64))
 				continue
 			}
 
@@ -181,11 +144,7 @@ func (gd *GameReader) Corpses(playerPosition data.Position, hover data.HoverData
 				})
 			}
 
-			if batched {
-				monsterUnitPtr = nextMonster
-			} else {
-				monsterUnitPtr = uintptr(gd.reader.ReadUInt(monsterUnitPtr+0x158, Uint64))
-			}
+			monsterUnitPtr = uintptr(gd.reader.ReadUInt(monsterUnitPtr+0x158, Uint64))
 		}
 	}
 

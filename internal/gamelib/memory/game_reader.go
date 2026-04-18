@@ -357,6 +357,9 @@ func (gd *GameReader) HoveredData() data.HoverData {
 }
 
 func (gd *GameReader) getStatsList(statListPtr uintptr) stat.Stats {
+	// Kept sequential. Both reads are 1-entry batches which would still
+	// pay ~10 ms Present latency each — plain RPM is microseconds. Only
+	// worth batching here if we can bundle across multiple callers.
 	statsListBuffer := gd.reader.ReadBytesFromMemory(statListPtr, 0x10)
 	statList := ReadUIntFromBuffer(statsListBuffer, 0, Uint64)
 	statCount := ReadUIntFromBuffer(statsListBuffer, 0x08, Uint64)

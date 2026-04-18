@@ -82,6 +82,11 @@ func (gd *GameReader) Inventory(rawPlayerUnits RawPlayerUnits, hover data.HoverD
 		itemUnitPtr := uintptr(ReadUIntFromBuffer(unitTableBuffer, uint(itemOffset), Uint64))
 
 		for itemUnitPtr > 0 {
+			// Per-item 2-entry batches churn through the Present dispatch at
+			// ~12 ms each; with 150+ items per tick the tick budget blows
+			// past 2 s. Left on the sequential RPM path — the buffer-read
+			// wins below (rarePrefix/prefixes/suffixes/txtUniqueSet) still
+			// shave ~8 RPM per item without the batch latency cost.
 			nextItemPtr := uintptr(gd.reader.ReadUInt(itemUnitPtr+0x158, Uint64))
 
 			// Read basic item data into pre-allocated buffer
@@ -105,7 +110,13 @@ func (gd *GameReader) Inventory(rawPlayerUnits RawPlayerUnits, hover data.HoverD
 			itemLoc := ReadUIntFromBuffer(itemDataBuffer, 0x0C, Uint32)
 
 			unitDataPtr := uintptr(ReadUIntFromBuffer(itemDataBuffer, 0x10, Uint64))
+			pathPtr := uintptr(ReadUIntFromBuffer(itemDataBuffer, 0x38, Uint64))
+
 			if err := gd.reader.ReadIntoBuffer(unitDataPtr, unitDataBuffer); err != nil {
+				itemUnitPtr = nextItemPtr
+				continue
+			}
+			if err := gd.reader.ReadIntoBuffer(pathPtr, pathBuffer); err != nil {
 				itemUnitPtr = nextItemPtr
 				continue
 			}
@@ -115,15 +126,11 @@ func (gd *GameReader) Inventory(rawPlayerUnits RawPlayerUnits, hover data.HoverD
 			itemQuality := ReadUIntFromBuffer(unitDataBuffer, 0x00, Uint32)
 			itemOwnerNPC := ReadUIntFromBuffer(unitDataBuffer, 0x0C, Uint32)
 
-			// Link to uniqueitems.txt, setitems.txt
-			txtUniqueSet := int32(gd.reader.ReadUInt(unitDataPtr+0x34, Uint32))
+			// txtUniqueSet at +0x34 fits inside the 144-byte unitDataBuffer
+			// already loaded above; no extra RPM / round-trip needed.
+			txtUniqueSet := int32(ReadUIntFromBuffer(unitDataBuffer, 0x34, Uint32))
 
-			pathPtr := uintptr(ReadUIntFromBuffer(itemDataBuffer, 0x38, Uint64))
-			if err := gd.reader.ReadIntoBuffer(pathPtr, pathBuffer); err != nil {
-				itemUnitPtr = nextItemPtr
-				continue
-			}
-			// Item coordinates (X, Y)
+			// Item coordinates (X, Y) — already fetched into pathBuffer above.
 			itemX := ReadUIntFromBuffer(pathBuffer, 0x10, Uint16)
 			itemY := ReadUIntFromBuffer(pathBuffer, 0x14, Uint16)
 
@@ -145,17 +152,18 @@ func (gd *GameReader) Inventory(rawPlayerUnits RawPlayerUnits, hover data.HoverD
 			// Set item properties
 			setProperties(itm, uint32(flags))
 
-			// Read rare affixes
-			rarePrefix := int16(gd.reader.ReadUInt(unitDataPtr+0x42, Uint16))
-			rareSuffix := int16(gd.reader.ReadUInt(unitDataPtr+0x44, Uint16))
-			//autoAffix := int16(gd.reader.ReadUInt(unitDataPtr+0x46, Uint16))
-
-			// Read magic affixes
+			// Affixes at 0x42/0x44 (rare) and 0x48..0x4E/0x4E..0x54 (magic
+			// prefixes/suffixes) are all inside the 144 B unitDataBuffer we
+			// already loaded — read from the buffer instead of firing 8 RPM
+			// per item. 8 RPM × ~150 items = 1200 RPM/tick saved.
+			rarePrefix := int16(ReadUIntFromBuffer(unitDataBuffer, 0x42, Uint16))
+			rareSuffix := int16(ReadUIntFromBuffer(unitDataBuffer, 0x44, Uint16))
+			//autoAffix := int16(ReadUIntFromBuffer(unitDataBuffer, 0x46, Uint16))
 			var prefixes [3]int16
 			var suffixes [3]int16
 			for i := 0; i < 3; i++ {
-				prefixes[i] = int16(gd.reader.ReadUInt(unitDataPtr+0x48+uintptr(i*2), Uint16))
-				suffixes[i] = int16(gd.reader.ReadUInt(unitDataPtr+0x4E+uintptr(i*2), Uint16))
+				prefixes[i] = int16(ReadUIntFromBuffer(unitDataBuffer, uint(0x48+i*2), Uint16))
+				suffixes[i] = int16(ReadUIntFromBuffer(unitDataBuffer, uint(0x4E+i*2), Uint16))
 			}
 
 			itm.Affixes = data.ItemAffixes{

@@ -240,38 +240,15 @@ func (gd *GameReader) getSkills(skillListPtr uintptr) map[skill.ID]skill.Points 
 	skillPtr := uintptr(gd.reader.ReadUInt(skillListPtr, Uint64))
 
 	for skillPtr != 0 {
-		// 5 fixed-offset reads per skill (txtPtr, lvl, qty, charges, next)
-		// packed into one CMD_ROP_READ_BATCH. Character with 30+ skills saves
-		// ~120 round-trips per GetData tick.
-		var (
-			skillTxtPtr uintptr
-			lvl, qty, charges uint
-			nextSkill uintptr
-		)
-		batched := false
-		if bufs, err := gd.Process.BatchReadBytes([]BatchReadEntry{
-			{Src: skillPtr, Len: 8},        // 0 skillTxtPtr
-			{Src: skillPtr + 0x40, Len: 2}, // 1 lvl
-			{Src: skillPtr + 0x48, Len: 2}, // 2 qty
-			{Src: skillPtr + 0x50, Len: 2}, // 3 charges
-			{Src: skillPtr + 0x08, Len: 8}, // 4 next
-		}); err == nil && len(bufs) == 5 {
-			skillTxtPtr = uintptr(binary.LittleEndian.Uint64(bufs[0]))
-			lvl = uint(binary.LittleEndian.Uint16(bufs[1]))
-			qty = uint(binary.LittleEndian.Uint16(bufs[2]))
-			charges = uint(binary.LittleEndian.Uint16(bufs[3]))
-			nextSkill = uintptr(binary.LittleEndian.Uint64(bufs[4]))
-			batched = true
-		}
-		if !batched {
-			skillTxtPtr = uintptr(gd.reader.ReadUInt(skillPtr, Uint64))
-			lvl = gd.reader.ReadUInt(skillPtr+0x40, Uint16)
-			qty = gd.reader.ReadUInt(skillPtr+0x48, Uint16)
-			charges = gd.reader.ReadUInt(skillPtr+0x50, Uint16)
-		}
-		// skillTxt is dereferenced from skillTxtPtr — depends on prior read,
-		// has to stay a separate round-trip.
+		// NOTE: batching these 5 fixed-offset reads per skill looked like a
+		// win (30+ skills × 4 RPM saved) but each batch pays a full Present-
+		// frame wait (~10-16 ms). For tight linked-list iteration that
+		// overhead eclipses the RPM savings by 10×. Kept sequential.
+		skillTxtPtr := uintptr(gd.reader.ReadUInt(skillPtr, Uint64))
 		skillTxt := uintptr(gd.reader.ReadUInt(skillTxtPtr, Uint16))
+		lvl := gd.reader.ReadUInt(skillPtr+0x40, Uint16)
+		qty := gd.reader.ReadUInt(skillPtr+0x48, Uint16)
+		charges := gd.reader.ReadUInt(skillPtr+0x50, Uint16)
 
 		shouldSetSkill := true
 		existingSkill, exists := skills[skill.ID(skillTxt)]
@@ -289,11 +266,7 @@ func (gd *GameReader) getSkills(skillListPtr uintptr) map[skill.ID]skill.Points 
 			}
 		}
 
-		if batched {
-			skillPtr = nextSkill
-		} else {
-			skillPtr = uintptr(gd.reader.ReadUInt(skillPtr+0x08, Uint64))
-		}
+		skillPtr = uintptr(gd.reader.ReadUInt(skillPtr+0x08, Uint64))
 	}
 
 	return skills
