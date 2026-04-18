@@ -2018,6 +2018,12 @@ unsafe fn dispatch_commands() {
             } else {
                 0
             };
+            // Leak the NTSTATUS + bytes-read pair into the rop-dbg band so
+            // operators can decode what's going wrong without instrumenting
+            // every call site. Status is in the upper 16 bits (0xNNNN prefix
+            // per the existing BBBB/CAFE/BEEF scheme), bytes_read in low.
+            shm_write_u32(shm, OFF_ROP_DBG, 0xBB00_0000u32 | ((status as u32) & 0x0000FFFFu32));
+            shm_write_u32(shm, OFF_ROP_READ_LEN + 4, bytes_read as u32); // diag: high 32 of len slot
             if status != 0 || bytes_read != len {
                 shm_write_u32(shm, OFF_ROP_READ_STATUS, 5);
                 shm_write_u32(shm, OFF_STATUS_FLAG, STATUS_DONE);

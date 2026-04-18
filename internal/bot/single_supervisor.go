@@ -1658,13 +1658,25 @@ func (s *SinglePlayerSupervisor) initClaudePresenter() {
 	// after /debug/rop-scan returns a complete breakdown.
 	gr.Process.SetExternalRopRead(pres.RopReadToScratch)
 	if os.Getenv("ROP_READ") == "1" {
-		// CMD_ROP_READ is in-process `ptr::copy_nonoverlapping` inside rmod
-		// with a VirtualQuery guard (page probe before touching src). Each
-		// read is microseconds on the rmod side; the Present-frame gating
-		// bounds it to ~1 ms at 60 fps. Fast enough for per-tick hot-path
-		// reads. Falls back to stealth RPM on any error (bad src page etc.).
-		gr.Process.EnableRopRead(true)
-		s.bot.ctx.Logger.Info("ROP_READ: ACTIVE — reads via rmod in-process copy (zero external RPM)")
+		// ROP_READ was found to be architecturally wrong for per-read use:
+		// each CMD_ROP_READ round-trips through a Present frame (~16 ms at
+		// 60 fps), and live trace showed the bot issues ~2400 reads per
+		// GetData tick. 2400 × 16 ms = 38 s/tick — unusable.
+		//
+		// The correct zero-external-RPM path is (1) snapshot walker
+		// mirroring all D2R structures to SHM once per tick so reads are
+		// SHM-local (zero frame cost), OR (2) batched CMD_ROP_READ_BATCH
+		// that copies many regions in one Present frame. Both are TODO.
+		//
+		// Keep hook registered + opt-in via ROP_READ=force for manual
+		// /debug/rop-read validation. Default path: stealth RPM (fast,
+		// production-stable). Trace ring remains enabled for observability.
+		if os.Getenv("ROP_READ") == "force" {
+			gr.Process.EnableRopRead(true)
+			s.bot.ctx.Logger.Info("ROP_READ: ACTIVE (force mode — reads slow, diagnostic only)")
+		} else {
+			s.bot.ctx.Logger.Info("ROP_READ: infra available via /debug/rop-read; hot path stays on RPM (per-read Present round-trip is too slow)")
+		}
 	}
 	// Keep classic APC for SendPacket (game-state opcodes like 0x3C).
 	// UI sender: DON'T use rmod (render thread crashes D2R).
