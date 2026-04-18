@@ -187,8 +187,12 @@ func NewProcessForPID(pid uint32) (*Process, error) {
 		pid:                  module.ProcessID,
 		moduleBaseAddressPtr: module.ModuleBaseAddress,
 		moduleBaseSize:       module.ModuleBaseSize,
+		readTrace:            NewReadTrace(1024),
 	}
 	StartChaffReader(p)
+	if os.Getenv("CLAUDE_READ_TRACE") == "1" {
+		p.readTrace.Enable(true)
+	}
 	return p, nil
 }
 
