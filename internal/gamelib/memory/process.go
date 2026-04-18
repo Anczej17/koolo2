@@ -62,6 +62,18 @@ type Process struct {
 	// RopReadToScratch stays as a fallback for callers not yet batched.
 	externalBatchRead func(entries []BatchReadEntry) ([][]byte, error)
 	batchReadEnabled  atomic.Bool
+
+	// Async batch pump — coalesces multiple Read*FromMemory calls into
+	// single CMD_ROP_READ_BATCH dispatches. Each caller parks on a
+	// one-shot channel; a dedicated goroutine drains the queue every
+	// few hundred microseconds, issuing one rmod round-trip per drain.
+	// Amortises the Present-frame latency across N reads: 1 Present
+	// frame (~16 ms) carries up to 128 reads instead of 1.
+	batchPumpMu      sync.Mutex
+	batchPumpPending []*pendingRead
+	batchPumpStop    chan struct{}
+	batchPumpRunning atomic.Bool
+	batchPumpWake    chan struct{}
 	// Per-read ring-buffer trace (off by default). Flip on via
 	// /debug/read-trace-enable or CLAUDE_READ_TRACE=1 env. Captures
 	// source + result + latency for every ReadBytesFromMemory call so
@@ -334,9 +346,158 @@ func (p *Process) SetExternalBatchRead(fn func(entries []BatchReadEntry) ([][]by
 }
 
 // EnableBatchRead flips the batched-read path on. When set, callers can use
-// BatchReadBytes for multi-address reads in one Present round-trip.
+// BatchReadBytes for multi-address reads in one Present round-trip, AND
+// individual ReadBytesFromMemory / ReadUInt / ReadString calls coalesce
+// into the async batch pump so the amortisation is transparent.
 func (p *Process) EnableBatchRead(on bool) {
 	p.batchReadEnabled.Store(on)
+	if on {
+		p.startBatchPump()
+	} else {
+		p.stopBatchPump()
+	}
+}
+
+// pendingRead is one ReadBytes call parked on the async batch pump until a
+// flush delivers its bytes. err is set if the batch dispatch failed and the
+// caller should drop to RPM.
+type pendingRead struct {
+	addr uintptr
+	size uint32
+	done chan pendingReadResult
+}
+
+type pendingReadResult struct {
+	data []byte
+	err  error
+}
+
+// startBatchPump launches the drain goroutine that coalesces queued reads
+// into CMD_ROP_READ_BATCH dispatches. Safe to call multiple times — second
+// and later calls are no-ops.
+func (p *Process) startBatchPump() {
+	if !p.batchPumpRunning.CompareAndSwap(false, true) {
+		return
+	}
+	p.batchPumpStop = make(chan struct{})
+	p.batchPumpWake = make(chan struct{}, 1)
+	go p.batchPumpLoop()
+}
+
+// stopBatchPump signals the drain goroutine to exit and flushes every
+// pending reader with an error so they drop to RPM instead of hanging.
+func (p *Process) stopBatchPump() {
+	if !p.batchPumpRunning.CompareAndSwap(true, false) {
+		return
+	}
+	close(p.batchPumpStop)
+	p.batchPumpMu.Lock()
+	pending := p.batchPumpPending
+	p.batchPumpPending = nil
+	p.batchPumpMu.Unlock()
+	for _, pr := range pending {
+		pr.done <- pendingReadResult{err: errors.New("batch pump stopped")}
+	}
+}
+
+func (p *Process) batchPumpLoop() {
+	// Coalescing window. Short enough that bot ticks feel responsive,
+	// long enough that concurrent readers pile up into one dispatch.
+	// Wake fires from enqueuePumpRead when pending >= batchWakeThreshold
+	// (typical hot-path GetData burst fills 128 entries in a few ms).
+	const maxBatch = 128
+	const batchWakeThreshold = 64
+	const flushInterval = 3 * time.Millisecond
+
+	for {
+		select {
+		case <-p.batchPumpStop:
+			return
+		case <-p.batchPumpWake:
+			// Give late arrivals one more coalescing window — typical
+			// GetData burst enqueues 200+ over ~5 ms.
+			time.Sleep(500 * time.Microsecond)
+		case <-time.After(flushInterval):
+		}
+
+		for {
+			p.batchPumpMu.Lock()
+			if len(p.batchPumpPending) == 0 {
+				p.batchPumpMu.Unlock()
+				break
+			}
+			n := len(p.batchPumpPending)
+			if n > maxBatch {
+				n = maxBatch
+			}
+			drain := p.batchPumpPending[:n]
+			p.batchPumpPending = p.batchPumpPending[n:]
+			p.batchPumpMu.Unlock()
+
+			entries := make([]BatchReadEntry, n)
+			for i, pr := range drain {
+				entries[i] = BatchReadEntry{Src: pr.addr, Len: pr.size}
+			}
+			p.sendPacketMu.Lock()
+			fn := p.externalBatchRead
+			p.sendPacketMu.Unlock()
+			if fn == nil {
+				for _, pr := range drain {
+					pr.done <- pendingReadResult{err: errors.New("batch hook not installed")}
+				}
+				continue
+			}
+
+			p.batchCallsTotal.Add(1)
+			bufs, err := fn(entries)
+			if err != nil {
+				p.batchCallsFailed.Add(1)
+				for _, pr := range drain {
+					pr.done <- pendingReadResult{err: err}
+				}
+				continue
+			}
+			p.batchEntriesTotal.Add(uint64(n))
+			for i, pr := range drain {
+				pr.done <- pendingReadResult{data: bufs[i]}
+			}
+		}
+	}
+
+	_ = batchWakeThreshold
+}
+
+// enqueuePumpRead parks the reader on the async batch pump. Returns bytes
+// (on success) or error (pump disabled, dispatch failed, or timeout).
+// Wake is signalled only when pending crosses the batchWakeThreshold so
+// small bursts have time to pile into a full-width dispatch.
+func (p *Process) enqueuePumpRead(addr uintptr, size uint32) ([]byte, error) {
+	const batchWakeThreshold = 64
+	if !p.batchReadEnabled.Load() || !p.batchPumpRunning.Load() {
+		return nil, errors.New("batch pump not running")
+	}
+	pr := &pendingRead{
+		addr: addr,
+		size: size,
+		done: make(chan pendingReadResult, 1),
+	}
+	p.batchPumpMu.Lock()
+	p.batchPumpPending = append(p.batchPumpPending, pr)
+	shouldWake := len(p.batchPumpPending) >= batchWakeThreshold
+	p.batchPumpMu.Unlock()
+	if shouldWake {
+		select {
+		case p.batchPumpWake <- struct{}{}:
+		default:
+		}
+	}
+
+	select {
+	case res := <-pr.done:
+		return res.data, res.err
+	case <-time.After(500 * time.Millisecond):
+		return nil, errors.New("pump timeout")
+	}
 }
 
 // BatchReadBytes services N reads in one rmod round-trip. Returns nil + error
@@ -526,6 +687,22 @@ func (p *Process) ReadBytesFromMemory(address uintptr, size uint) []byte {
 	var traceStart time.Time
 	if traceOn {
 		traceStart = time.Now()
+	}
+
+	// Async batch pump: when batchReadEnabled is set, every read parks on
+	// the pump and a background goroutine coalesces pending entries into
+	// 128-wide CMD_ROP_READ_BATCH dispatches. Achieves zero external RPM
+	// without the per-read Present-round-trip cost that single-shot
+	// CMD_ROP_READ pays. On error the caller drops to RPM below.
+	if p.batchReadEnabled.Load() && size > 0 && size <= uint(0x1000) {
+		if out, err := p.enqueuePumpRead(address, uint32(size)); err == nil && len(out) == int(size) {
+			if traceOn {
+				p.readTrace.Record(address, uint32(size), ReadSourceROP, ReadResultOK, time.Since(traceStart))
+			}
+			return out
+		} else if traceOn {
+			p.readTrace.Record(address, uint32(size), ReadSourceROP, ReadResultFallback, time.Since(traceStart))
+		}
 	}
 
 	// GID-6: prefer ROP-chain memcpy when enabled. rmod's rep-movsb gadget

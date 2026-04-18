@@ -338,9 +338,9 @@ const (
 	// STATUS (u8 per slot, 0 ok / 1 partial / 2 invalid).
 	OffRopBatchCount    = 0x3070 // u32 — entries to process
 	OffRopBatchTotalLen = 0x3074 // u32 — out: bytes packed into OffRopReadBuffer
-	OffRopBatchEntries  = 0x3080 // BatchEntry[64], 16 B each: src_va u64, len u32, _pad u32
-	OffRopBatchStatus   = 0x3480 // u8[64]
-	RopBatchMax         = 64
+	OffRopBatchEntries  = 0x3080 // BatchEntry[128], 16 B each: src_va u64, len u32, _pad u32
+	OffRopBatchStatus   = 0x3880 // u8[128]
+	RopBatchMax         = 128
 	RopBatchEntrySize   = 16
 
 	OffSnapRegions     = 0x4200 // RegionEntry[1024] × 16 B  (B3: grown 256→1024 for monster/object/entrance walker budget)

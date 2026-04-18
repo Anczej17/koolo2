@@ -419,9 +419,9 @@ const OFF_ROP_READ_BUFFER_SIZE: usize = 0x1000;
 // into TOTAL_LEN. One Present round-trip replaces N.
 const OFF_ROP_BATCH_COUNT:     usize = 0x3070;  // u32 — entries to process
 const OFF_ROP_BATCH_TOTAL_LEN: usize = 0x3074;  // u32 — out: bytes written to OFF_ROP_READ_BUFFER
-const OFF_ROP_BATCH_ENTRIES:   usize = 0x3080;  // BatchEntry[64], 16 B each — src_va u64, len u32, _pad u32
-const OFF_ROP_BATCH_STATUS:    usize = 0x3480;  // u8[64] — 0 ok, 1 partial/failed NtRVM, 2 invalid / oversize
-const ROP_BATCH_MAX:           usize = 64;
+const OFF_ROP_BATCH_ENTRIES:   usize = 0x3080;  // BatchEntry[128], 16 B each — src_va u64, len u32, _pad u32
+const OFF_ROP_BATCH_STATUS:    usize = 0x3880;  // u8[128] — 0 ok, 1 partial/failed NtRVM, 2 invalid / oversize
+const ROP_BATCH_MAX:           usize = 128;
 
 // HWBP commands — match Go protocol.go (CmdHwbpInstall=6 etc).
 const CMD_HWBP_INSTALL:   u32 = 6;          // install DR0=target on every D2R thread
