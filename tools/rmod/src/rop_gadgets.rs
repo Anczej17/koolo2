@@ -21,8 +21,14 @@
 
 use crate::asm::decode_insn;
 
-pub const GADGET_POOL_SIZE: usize = 256;
+pub const GADGET_POOL_SIZE: usize = 1024;
 pub const MAX_GADGET_LEN:   usize = 10; // bytes of gadget prologue before ret
+// Cap on lone-Ret gadgets. D2R's .text has thousands of bare `ret`
+// bytes; if we let them all into the pool a 64 KB scan saturates at
+// 256 slots without harvesting a single useful kind. Cap to a handful
+// so the remaining ~1000 slots are available for PopReg / RepMovsb
+// etc.
+pub const MAX_LONE_RET_GADGETS: usize = 8;
 
 /// Compact categorisation of common useful gadgets. One gadget may match
 /// multiple categories (e.g., `pop rax; nop; ret` is `PopReg`).
@@ -166,6 +172,17 @@ impl ROPGadgets {
         if kind == GadgetKind::Unknown && n_insn > 1 {
             return None;
         }
+        // Cap lone-Ret gadgets — we need a few for epilogue stack pivot
+        // but D2R.text has thousands and they'd saturate the pool, leaving
+        // no room for PopReg / RepMovsb. build_memcpy only uses one Ret,
+        // so 8 is way more than needed.
+        if kind == GadgetKind::Ret {
+            let mut ret_count = 0usize;
+            for i in 0..self.count {
+                if self.pool[i].kind == GadgetKind::Ret { ret_count += 1; }
+            }
+            if ret_count >= MAX_LONE_RET_GADGETS { return None; }
+        }
         self.pool[self.count] = Gadget {
             va:   start as u64,
             len:  len as u8,
@@ -226,9 +243,13 @@ impl ROPGadgets {
     /// Pick a random gadget of `kind` using `tick` as seed. Returns None if
     /// no gadget matches. Walks pool linearly — O(N) but N ≤ 256.
     pub fn get_random_of_kind(&self, kind: GadgetKind, tick: u64) -> Option<&Gadget> {
-        let mut matches: [usize; GADGET_POOL_SIZE] = [0; GADGET_POOL_SIZE];
+        // Cap matches array at 64 — no caller needs more than a handful of
+// candidates per kind, and GADGET_POOL_SIZE = 1024 × 8 B would blow
+// past the __chkstk threshold without pulling in the msvcrt stub.
+let mut matches: [usize; 64] = [0; 64];
         let mut n = 0usize;
         for i in 0..self.count {
+            if n >= 64 { break; }
             if self.pool[i].kind == kind {
                 matches[n] = i;
                 n += 1;
@@ -241,9 +262,13 @@ impl ROPGadgets {
     /// Find any gadget writing to the specified register. Used when the
     /// caller needs e.g., `pop rdi; ret` to set up an arg for memcpy.
     pub fn find_pop_reg(&self, reg_bit: u16, tick: u64) -> Option<&Gadget> {
-        let mut matches: [usize; GADGET_POOL_SIZE] = [0; GADGET_POOL_SIZE];
+        // Cap matches array at 64 — no caller needs more than a handful of
+// candidates per kind, and GADGET_POOL_SIZE = 1024 × 8 B would blow
+// past the __chkstk threshold without pulling in the msvcrt stub.
+let mut matches: [usize; 64] = [0; 64];
         let mut n = 0usize;
         for i in 0..self.count {
+            if n >= 64 { break; }
             if self.pool[i].kind == GadgetKind::PopReg
                 && (self.pool[i].regs_touched & reg_bit) != 0
             {
