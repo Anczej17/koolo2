@@ -1658,38 +1658,13 @@ func (s *SinglePlayerSupervisor) initClaudePresenter() {
 	// after /debug/rop-scan returns a complete breakdown.
 	gr.Process.SetExternalRopRead(pres.RopReadToScratch)
 	if os.Getenv("ROP_READ") == "1" {
-		// Fire-and-forget goroutine: report pool health, but DO NOT auto-enable
-		// ROP_READ yet. First live run with synthetic gadgets + build_memcpy
-		// chain (commit b0dbb3a / 17995b0) crashed D2R at the first
-		// trigger_fn() — the chain encoding has an off-by-something in its
-		// stack layout (fault_va=0x...16 is a tiny number from a popped-but-
-		// wrong ret target). Gate the actual EnableRopRead flip behind
-		// ROP_READ=force until the chain is unit-tested; log the pool state
-		// so operators can confirm the pool's there without D2R risk.
-		go func() {
-			time.Sleep(2 * time.Second)
-			const wantMask = (1 << 1) | (1 << 6) | (1 << 7)
-			pool, err := pres.RopPool()
-			if err != nil {
-				s.bot.ctx.Logger.Warn("ROP_READ: pool read failed", slog.Any("err", err))
-				return
-			}
-			s.bot.ctx.Logger.Info("ROP_READ pool state",
-				slog.String("popRegMask", fmt.Sprintf("0x%X", pool.PopRegMask)),
-				slog.Uint64("popReg", uint64(pool.PopReg)),
-				slog.Uint64("repMovsb", uint64(pool.RepMovsb)))
-			healthy := (pool.PopRegMask&wantMask) == wantMask && (pool.RepMovsb > 0 || pool.RepMovsq > 0)
-			if !healthy {
-				s.bot.ctx.Logger.Warn("ROP_READ: baseline pool missing required kinds")
-				return
-			}
-			if os.Getenv("ROP_READ") == "force" {
-				gr.Process.EnableRopRead(true)
-				s.bot.ctx.Logger.Info("ROP_READ: ACTIVE (ROP_READ=force) — D2R crash risk if build_memcpy encoding still broken")
-			} else {
-				s.bot.ctx.Logger.Info("ROP_READ: pool healthy, staying on RPM. Set ROP_READ=force to opt in after validating /debug/rop-read len=1 returns status=0.")
-			}
-		}()
+		// CMD_ROP_READ is in-process `ptr::copy_nonoverlapping` inside rmod
+		// with a VirtualQuery guard (page probe before touching src). Each
+		// read is microseconds on the rmod side; the Present-frame gating
+		// bounds it to ~1 ms at 60 fps. Fast enough for per-tick hot-path
+		// reads. Falls back to stealth RPM on any error (bad src page etc.).
+		gr.Process.EnableRopRead(true)
+		s.bot.ctx.Logger.Info("ROP_READ: ACTIVE — reads via rmod in-process copy (zero external RPM)")
 	}
 	// Keep classic APC for SendPacket (game-state opcodes like 0x3C).
 	// UI sender: DON'T use rmod (render thread crashes D2R).

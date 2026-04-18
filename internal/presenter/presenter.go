@@ -603,7 +603,10 @@ func (p *Presenter) RopReadToScratch(srcVA uintptr, size uint32) ([]byte, error)
 	writeU32(p.localView, uintptr(offStatusFlag), StatusBusy)
 	writeU32(p.localView, uintptr(offCommandFlag), 1)
 
-	deadline := time.Now().Add(2 * time.Second)
+	// 50 ms deadline — a healthy Present frame is 16 ms at 60 fps; allowing
+	// 3 frames gives the in-process copy plenty of time without stalling
+	// the bot's tick. Failure means RPM fallback (fast).
+	deadline := time.Now().Add(50 * time.Millisecond)
 	for time.Now().Before(deadline) {
 		sflag := readU32(p.localView, uintptr(offStatusFlag))
 		if sflag == StatusDone {
@@ -612,7 +615,7 @@ func (p *Presenter) RopReadToScratch(srcVA uintptr, size uint32) ([]byte, error)
 		if sflag == StatusError {
 			return nil, fmt.Errorf("rop read rmod status=ERROR")
 		}
-		time.Sleep(500 * time.Microsecond)
+		time.Sleep(200 * time.Microsecond)
 	}
 	if readU32(p.localView, uintptr(offStatusFlag)) != StatusDone {
 		return nil, fmt.Errorf("rop read timeout")

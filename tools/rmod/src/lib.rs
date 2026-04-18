@@ -1944,95 +1944,85 @@ unsafe fn dispatch_commands() {
             shm_write_u32(shm, OFF_COMMAND_FLAG, 0);
         }
         CMD_ROP_READ => {
-            // Un-gated GID-6. Build memcpy(src, dst, len) chain using harvested
-            // D2R gadgets, execute via in-process trigger thunk. On success the
-            // `len` bytes at src now live at dst (bot supplies dst as a scratch
-            // VA within our SHM or our own alloc_mgr buffer).
+            // GID-6 in-process memory copy. rmod is injected INTO D2R, so
+            // `core::ptr::copy_nonoverlapping` from (src_va) to the SHM
+            // scratch buffer is an in-process read — no cross-process
+            // NtReadVirtualMemory is issued, no Warden RPM signature emitted.
+            // That's the whole point of ROP_READ: eliminating the RPM trace.
+            //
+            // Previous builds tried to route via a synthetic gadget chain +
+            // build_memcpy trigger thunk (commit 9a970f4 / b0dbb3a) for the
+            // "use D2R's own code" stealth angle. Live-testing proved the
+            // chain encoding wasn't right (first trigger_fn() crashed D2R at
+            // fault_va=synth_page+0x16). A plain in-process copy achieves the
+            // same external-observer stealth with 10× less moving parts and
+            // zero integrity risk, so we ship that first and revisit the
+            // stack-pivot chain only if a deeper stealth layer is needed.
             //
             // Status encoding:
-            //   0 = ok
-            //   1 = gadget pool missing (caller must run CMD_ROP_SCAN first)
-            //   2 = chain build failed (pool lacked required gadget kind)
-            //   3 = trigger_va invalid
-            //
-            // CAUTION: first live chain run is a D2R-integrity risk. If anything
-            // is encoded wrong the whole process AVs. Diagnostic marker in
-            // OFF_ROP_DBG (0xBBBB00xx band) lets Go trace final state on crash.
+            //   0 = ok (len bytes copied from src to dst/scratch)
+            //   4 = len too big for scratch buffer (>4 KB)
+            //   5 = copy faulted (caught by crash_diag VEH as recoverable AV)
             shm_write_u32(shm, OFF_ROP_DBG, 0xBBBB0001);
 
             let src_va = shm_read_u64(shm, OFF_ROP_READ_SRC) as usize;
             let mut dst_va = shm_read_u64(shm, OFF_ROP_READ_DST) as usize;
             let len    = shm_read_u64(shm, OFF_ROP_READ_LEN) as usize;
             // Sentinel: dst_va == 0 means "use internal SHM scratch buffer".
-            // This is the GID-6 production path — Process.ReadBytesFromMemory
-            // calls RopReadToScratch which sets DST=0 and reads from
-            // OffRopReadBuffer after the chain completes. Clamp to buffer
-            // size so the chain can't run past the scratch region.
             if dst_va == 0 {
                 if len > OFF_ROP_READ_BUFFER_SIZE {
-                    shm_write_u32(shm, OFF_ROP_READ_STATUS, 4); // too big for scratch
+                    shm_write_u32(shm, OFF_ROP_READ_STATUS, 4);
                     shm_write_u32(shm, OFF_STATUS_FLAG, STATUS_DONE);
                     shm_write_u32(shm, OFF_COMMAND_FLAG, 0);
                     return;
                 }
                 dst_va = (shm as *mut u8).add(OFF_ROP_READ_BUFFER) as usize;
             }
-
-            if G_ROP_GADGETS.count == 0
-                || G_ROP_EXECUTOR.is_none()
-                || G_ROP_STACK.is_none()
-                || G_ROP_TRIGGER_BUF.is_none()
-            {
-                shm_write_u32(shm, OFF_ROP_DBG, 0xBBBB00E1);
-                shm_write_u32(shm, OFF_ROP_READ_STATUS, 1);
-                shm_write_u32(shm, OFF_STATUS_FLAG, STATUS_DONE);
-                shm_write_u32(shm, OFF_COMMAND_FLAG, 0);
-                return;
-            }
-
             shm_write_u32(shm, OFF_ROP_DBG, 0xBBBB0002);
-            let stack   = G_ROP_STACK.as_ref().unwrap();
-            let trigger = G_ROP_TRIGGER_BUF.as_ref().unwrap();
-            let tick    = rdtsc_u64();
-            let builder = rop_chain::RopChainBuilder::new(&G_ROP_GADGETS, stack, trigger, tick);
 
-            shm_write_u32(shm, OFF_ROP_DBG, 0xBBBB0003);
-            let built = match builder.build_memcpy(src_va, dst_va, len) {
-                Some(c) => c,
-                None => {
-                    shm_write_u32(shm, OFF_ROP_DBG, 0xBBBB00E2);
-                    shm_write_u32(shm, OFF_ROP_READ_STATUS, 2);
-                    shm_write_u32(shm, OFF_STATUS_FLAG, STATUS_DONE);
-                    shm_write_u32(shm, OFF_COMMAND_FLAG, 0);
-                    return;
+            // In-process copy with VirtualQuery probe first — crash_diag_veh
+            // DOES catch AVs but each raised exception re-enters its handler
+            // and that cascades (685+ AVs per previous Plan A run). An
+            // unmapped source page is the common failure mode on bot reads
+            // while a D2R structure is being freed/reallocated, so we check
+            // every src page before touching it. If any page along the span
+            // is unreadable we skip the copy and return status=5 (Go side
+            // falls back to stealth RPM, which handles faults gracefully).
+            let mut ok = true;
+            if len > 0 {
+                let mut cursor = src_va & !0xFFFusize; // page-align
+                let end = src_va + len;
+                while cursor < end {
+                    let mut mbi: MemoryBasicInformation = core::mem::zeroed();
+                    let got = VirtualQuery(
+                        cursor as *const core::ffi::c_void,
+                        &mut mbi as *mut _ as *mut core::ffi::c_void,
+                        core::mem::size_of::<MemoryBasicInformation>(),
+                    );
+                    if got == 0
+                        || mbi.state != MEM_COMMIT
+                        || mbi.protect == PAGE_NOACCESS
+                        || (mbi.protect & PAGE_GUARD) != 0
+                    {
+                        ok = false;
+                        break;
+                    }
+                    cursor = (cursor | 0xFFFusize) + 1;
                 }
-            };
-
-            if built.trigger_va == 0 {
-                shm_write_u32(shm, OFF_ROP_DBG, 0xBBBB00E3);
-                shm_write_u32(shm, OFF_ROP_READ_STATUS, 3);
+            }
+            if !ok {
+                shm_write_u32(shm, OFF_ROP_READ_STATUS, 5);
                 shm_write_u32(shm, OFF_STATUS_FLAG, STATUS_DONE);
                 shm_write_u32(shm, OFF_COMMAND_FLAG, 0);
                 return;
             }
-
-            shm_write_u32(shm, OFF_ROP_DBG, 0xBBBB0004);
-            // Execute: treat trigger_va as a zero-arg function pointer.
-            // The thunk saves callee-saved regs, flips RSP to our chain, rets
-            // into the gadget chain, and the chain rets back to the epilogue
-            // which restores RSP + returns here.
-            //
-            // Flip trigger buffer to PAGE_EXECUTE_READ right before the call,
-            // flip back to PAGE_READWRITE after. Buffers are allocated as RW
-            // to avoid Arxan's injection-pattern scan flagging our rmod; only
-            // this brief execute window is exposed to its hash check.
-            let trigger_mem = G_ROP_TRIGGER_BUF.as_ref().unwrap();
-            let _old = trigger_mem.protect_execute();
-            type TriggerFn = unsafe extern "system" fn();
-            let trigger_fn: TriggerFn = core::mem::transmute(built.trigger_va);
-            trigger_fn();
-            let _ = trigger_mem.protect_rw();
-            shm_write_u32(shm, OFF_ROP_DBG, 0xBBBB0005);
+            if len > 0 {
+                core::ptr::copy_nonoverlapping(
+                    src_va as *const u8,
+                    dst_va as *mut u8,
+                    len,
+                );
+            }
 
             shm_write_u32(shm, OFF_ROP_READ_STATUS, 0);
             shm_write_u32(shm, OFF_ROP_DBG, 0xBBBB000F);
