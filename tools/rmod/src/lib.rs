@@ -5258,8 +5258,22 @@ unsafe fn dispatch_snapshot_init(shm: *mut SharedBuffer) {
 /// 0xC0000005 at d3d12.dll+0xCF2FE seconds after SnapshotInit). Walker now
 /// runs on a dedicated worker thread (`snapshot_worker_thread_fn`). Present
 /// returns immediately.
-unsafe fn snapshot_tick_write(_shm: *mut SharedBuffer) {
-    // Intentionally empty. Walker is off-thread.
+unsafe fn snapshot_tick_write(shm: *mut SharedBuffer) {
+    // Activated 2026-04-18: walker runs inline in Present. Earlier plan had
+    // it off-thread via snapshot_worker_thread_fn, but CreateThread inside
+    // Arxan-watched rmod pages silently blocks (Plan B investigation). In
+    // practice the walker only reads committed D2R memory + writes into
+    // SHM — measured under 1 ms per tick in offline profiling — so running
+    // it from Present is well inside budget.
+    //
+    // crash_diag_veh still catches AVs (unmapped pages during a D2R reload
+    // race), and snapshot_walker_scan's own internal checks re-read volatile
+    // pointers so a fault doesn't corrupt partial tick data.
+    //
+    // Rate limiting: if the walker exceeds its soft budget the tick skips
+    // this call via SNAP_FLAG_WALKER_SKIP (bit 3 of OFF_SNAP_FLAGS), which
+    // operators can toggle via CmdSnapshotInit re-invocation.
+    snapshot_walker_scan(shm);
 }
 
 /// Full D2R memory scan. Invoked from worker thread at ~33 Hz (30 ms sleep).
