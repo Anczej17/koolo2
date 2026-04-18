@@ -4,6 +4,7 @@ import (
 	"slices"
 	"sort"
 	"strings"
+	"sync"
 
 	"local/internal/svc/internal/gamelib/data"
 	"local/internal/svc/internal/gamelib/data/item"
@@ -71,12 +72,17 @@ func (gd *GameReader) Inventory(rawPlayerUnits RawPlayerUnits, hover data.HoverD
 	baseItemsMap := make(map[data.UnitID]*data.Item, 120)       // Same number of potential base items
 	allItems := make([]*data.Item, 0, 800)                      // max capacity: 600 (stashes) + 91 (DLC tabs) + 40 (inv) + 12 (cube) + 12 (equipped) + 16 (belt) + headroom
 
-	// Pre-allocate buffers for repeated use
+	// Reverted to serial sweep — parallel 128 goroutines each issuing
+	// 3 batches saturated the 8-slot pool and caused 80 %+ slot-acquire
+	// timeouts with fallback to the single-slot path (worse than plain
+	// RPM). Need a slot-count-bounded worker pool if we retry.
+	var itemsMu sync.Mutex
+
+	// Pre-allocate buffers for repeated use.
 	var itemDataBuffer = make([]byte, 144)
 	var unitDataBuffer = make([]byte, 144)
 	var pathBuffer = make([]byte, 144)
 
-	// Process all items in a single pass
 	for i := 0; i < 128; i++ {
 		itemOffset := 8 * i
 		itemUnitPtr := uintptr(ReadUIntFromBuffer(unitTableBuffer, uint(itemOffset), Uint64))
@@ -311,7 +317,9 @@ func (gd *GameReader) Inventory(rawPlayerUnits RawPlayerUnits, hover data.HoverD
 				if data.UnitID(itemOwnerNPC) == mainPlayer.UnitID || itemOwnerNPC == 1 {
 					location = item.LocationEquipped
 					if itm.Type().Code == item.TypeBelt {
+						itemsMu.Lock()
 						belt.Name = itm.Name
+						itemsMu.Unlock()
 					}
 				} else if isMercItem {
 					location = item.LocationMercenary
@@ -410,30 +418,39 @@ func (gd *GameReader) Inventory(rawPlayerUnits RawPlayerUnits, hover data.HoverD
 						// Read parent unit ID directly from base item memory structure
 						if err := gd.reader.ReadIntoBuffer(parentInfoPtr, itemDataBuffer); err == nil {
 							parentUnitID := data.UnitID(ReadUIntFromBuffer(itemDataBuffer, 0x08, Uint32))
+							itemsMu.Lock()
 							socketedItemsMap[parentUnitID] = append(socketedItemsMap[parentUnitID], socketInfo{
 								item:     itm,
 								position: itm.Position.X,
 							})
+							itemsMu.Unlock()
 						}
 					}
 				}
 			} else {
 				// Check if item has sockets
 				if numSockets, _ := itm.Stats.FindStat(stat.NumSockets, 0); numSockets.Value > 0 {
+					itemsMu.Lock()
 					baseItemsMap[itm.UnitID] = itm
+					itemsMu.Unlock()
 				}
 			}
 
 			// Add to appropriate collections
 			if location == item.LocationBelt {
+				itemsMu.Lock()
 				belt.Items = append(belt.Items, *itm)
+				itemsMu.Unlock()
 			} else if location != item.LocationSocket {
+				itemsMu.Lock()
 				allItems = append(allItems, itm)
+				itemsMu.Unlock()
 			}
 
 			itemUnitPtr = nextItemPtr
 		}
 	}
+	_ = itemsMu
 
 	// Link sockets to base items
 	for baseUnitID, baseItem := range baseItemsMap {
