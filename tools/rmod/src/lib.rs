@@ -2837,7 +2837,10 @@ unsafe fn dispatch_post_key(shm: *mut SharedBuffer) {
 // ---------------------------------------------------------------------------
 
 /// Called from our GetTickCount64 detour, on whatever thread calls GTC64.
-/// We only dispatch CMD_SEND_DUAL_GT here (not general commands).
+/// GID-style: most batch-read dispatches happen here because the game
+/// thread is exactly what Arxan expects to be reading D2R memory. Runs
+/// several hundred times per second (D2R game-logic timer work) so
+/// throughput is much higher than the 60 fps Present callback.
 #[no_mangle]
 unsafe extern "C" fn game_tick_dispatch() {
     let shm = G_SHM;
@@ -2847,6 +2850,11 @@ unsafe extern "C" fn game_tick_dispatch() {
     // If this stays 0 while D2R is running, the IAT hook isn't firing at all.
     let gtc_count = shm_read_u32(shm as *const SharedBuffer, 0x2080);
     shm_write_u32(shm, 0x2080, gtc_count.wrapping_add(1));
+
+    // Drain any pending batch slots on the game thread — Arxan tolerates
+    // reads from this context (GID's whole dispatch model). Cheap to
+    // call even when every slot is idle: just 8 u32 reads.
+    dispatch_batch_slots(shm);
 
     // Quick check: is there a pending game-thread command?
     if shm_read_u32(shm, OFF_COMMAND_FLAG) == 0 { return; }
