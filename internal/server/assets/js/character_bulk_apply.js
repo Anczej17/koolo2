@@ -218,7 +218,6 @@ document.addEventListener('DOMContentLoaded', function () {
             useForEntranceInteraction: !!document.querySelector('input[name="packetCastingUseForEntranceInteraction"]')?.checked,
             useForTeleport: !!document.querySelector('input[name="packetCastingUseForTeleport"]')?.checked,
             useForEntitySkills: !!document.querySelector('input[name="packetCastingUseForEntitySkills"]')?.checked,
-            useForSkillSelection: !!document.querySelector('input[name="packetCastingUseForSkillSelection"]')?.checked,
             useForNPCInteraction: !!document.querySelector('input[name="packetCastingUseForNPCInteraction"]')?.checked,
             useForWeaponSwap: !!document.querySelector('input[name="packetCastingUseForWeaponSwap"]')?.checked,
             useForMovement: !!document.querySelector('input[name="packetCastingUseForMovement"]')?.checked,

@@ -12,7 +12,6 @@ import (
 	"local/internal/svc/internal/gamelib/data/item"
 	"local/internal/svc/internal/gamelib/data/npc"
 	"local/internal/svc/internal/gamelib/data/quest"
-	"local/internal/svc/internal/gamelib/data/skill"
 	"local/internal/svc/internal/gamelib/data/stat"
 	"local/internal/svc/internal/gamelib/data/state"
 	"local/internal/svc/internal/config"
@@ -127,12 +126,10 @@ func (d Data) CanTeleport() bool {
 		return false
 	}
 
-	// Check if the Teleport skill is bound to a key OR if packet skill selection is enabled
-	_, isTpBound := d.KeyBindings.KeyBindingForSkill(skill.Teleport)
-	canUsePacketSkillSelection := d.CharacterCfg.PacketCasting.UseForSkillSelection
-
-	// Ensure Teleport is bound (or packet skill selection is enabled) and the current area is not a town
-	return (isTpBound || canUsePacketSkillSelection) && !d.PlayerUnit.Area.IsTown()
+	// Full-packet bot: skill selection is always packet-driven (0x3C), so we
+	// no longer need a Teleport keybinding. CanTeleport reduces to "not in town".
+	// (User mandate 2026-04-19: no HID fallback for skill selection.)
+	return !d.PlayerUnit.Area.IsTown()
 }
 
 func (d Data) PlayerCastDuration() time.Duration {

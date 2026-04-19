@@ -673,12 +673,10 @@ func (pf *PathFinder) isMouseClickTeleportZone() bool {
 func (pf *PathFinder) MoveCharacter(x, y int, gamePos ...data.Position) {
 	if pf.data.CanTeleport() {
 		if pf.cfg.PacketCasting.UseForTeleport && pf.packetSender != nil && len(gamePos) > 0 {
-			// Ensure Teleport skill is selected on right-click if using packet skill selection
-			if pf.cfg.PacketCasting.UseForSkillSelection && pf.packetSender != nil {
-				if pf.data.PlayerUnit.RightSkill != skill.Teleport {
-					if err := pf.packetSender.SelectRightSkill(skill.Teleport); err == nil {
-						utils.Sleep(50)
-					}
+			// Full-packet bot: skill selection is always packet-driven (0x3C).
+			if pf.data.PlayerUnit.RightSkill != skill.Teleport {
+				if err := pf.packetSender.SelectRightSkill(skill.Teleport); err == nil {
+					utils.Sleep(50)
 				}
 			}
 

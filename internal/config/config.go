@@ -254,7 +254,6 @@ type CharacterCfg struct {
 		UseForTpInteraction       bool `yaml:"useForTpInteraction"`
 		UseForTeleport            bool `yaml:"useForTeleport"`
 		UseForEntitySkills        bool `yaml:"useForEntitySkills"`
-		UseForSkillSelection      bool `yaml:"useForSkillSelection"`
 		UseForNPCInteraction      bool `yaml:"useForNPCInteraction"`
 		UseForWeaponSwap          bool `yaml:"useForWeaponSwap"`
 		UseForMovement            bool `yaml:"useForMovement"`

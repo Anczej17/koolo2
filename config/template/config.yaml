@@ -22,7 +22,6 @@ packetCasting:
   useForTpInteraction: false       # Use packets for using town portals
   useForTeleport: false            # Use packets for teleport casting
   useForEntitySkills: false        # Use packets for skills targeting entities
-  useForSkillSelection: false      # Use packets for switching active skills
   useForNPCInteraction: false      # Use packets for NPC interaction
   useForWeaponSwap: false          # Use packets for weapon slot swap
   useForMovement: false            # Use packets for walk/run movement

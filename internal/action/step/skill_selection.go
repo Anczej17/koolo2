@@ -1,6 +1,8 @@
 package step
 
 import (
+	"fmt"
+
 	"local/internal/svc/internal/gamelib/data"
 	"local/internal/svc/internal/gamelib/data/skill"
 	"local/internal/svc/internal/context"
@@ -8,45 +10,44 @@ import (
 	"local/internal/svc/internal/utils"
 )
 
-// SelectRightSkill selects a skill for the right mouse button
-// Uses packets if enabled in config (no keybinding required), otherwise falls back to HID
+// SelectRightSkill selects a skill for the right mouse button via packet 0x3C.
+// Full-packet bot: no HID fallback per user mandate 2026-04-19.
 func SelectRightSkill(skillID skill.ID) error {
 	ctx := context.Get()
 
-	// Check if skill is already selected
 	if ctx.Data.PlayerUnit.RightSkill == skillID {
 		return nil
 	}
 
-	if ctx.CharacterCfg.PacketCasting.UseForSkillSelection && ctx.PacketSender != nil {
-		if err := ctx.PacketSender.SelectRightSkill(skillID); err != nil {
-			return selectSkillViaHIDIfAvailable(skillID)
-		}
-		utils.Sleep(200)
-		return nil
+	if ctx.PacketSender == nil {
+		return fmt.Errorf("PacketSender unavailable, cannot select right skill %v", skillID)
 	}
 
-	return selectSkillViaHIDIfAvailable(skillID)
+	if err := ctx.PacketSender.SelectRightSkill(skillID); err != nil {
+		return fmt.Errorf("failed to select right skill %v: %w", skillID, err)
+	}
+	utils.Sleep(200)
+	return nil
 }
 
-// SelectLeftSkill selects a skill for the left mouse button
-// Uses packets if enabled in config (no keybinding required), otherwise falls back to HID
+// SelectLeftSkill selects a skill for the left mouse button via packet 0x3C.
+// Full-packet bot: no HID fallback per user mandate 2026-04-19.
 func SelectLeftSkill(skillID skill.ID) error {
 	ctx := context.Get()
 
-	// Check if skill is already selected
 	if ctx.Data.PlayerUnit.LeftSkill == skillID {
 		return nil
 	}
 
-	if ctx.CharacterCfg.PacketCasting.UseForSkillSelection && ctx.PacketSender != nil {
-		if err := ctx.PacketSender.SelectLeftSkill(skillID); err != nil {
-			return selectSkillViaHIDIfAvailable(skillID)
-		}
-		utils.Sleep(200)
-		return nil
+	if ctx.PacketSender == nil {
+		return fmt.Errorf("PacketSender unavailable, cannot select left skill %v", skillID)
 	}
-	return selectSkillViaHIDIfAvailable(skillID)
+
+	if err := ctx.PacketSender.SelectLeftSkill(skillID); err != nil {
+		return fmt.Errorf("failed to select left skill %v: %w", skillID, err)
+	}
+	utils.Sleep(200)
+	return nil
 }
 
 // SelectSkill selects a skill and returns the mouse button it was assigned to.
@@ -96,52 +97,30 @@ func SelectSkill(skillID skill.ID) (game.MouseButton, bool) {
 	return game.LeftButton, false
 }
 
-// selectSkillViaHIDIfAvailable attempts to select skill via HID if keybinding exists
-func selectSkillViaHIDIfAvailable(skillID skill.ID) error {
-	ctx := context.Get()
-
-	kb, found := ctx.Data.KeyBindings.KeyBindingForSkill(skillID)
-	if !found {
-		return nil
-	}
-
-	ctx.HID.PressKeyBinding(kb)
-	utils.Sleep(50)
-	return nil
-}
-
-// SelectRightSkillByKeyBinding selects a skill using its keybinding directly
-// Uses packets if enabled in config, otherwise falls back to HID
+// SelectRightSkillByKeyBinding selects a skill using its keybinding directly via packet 0x3C.
+// Full-packet bot: no HID fallback per user mandate 2026-04-19.
 func SelectRightSkillByKeyBinding(kb data.KeyBinding) error {
 	ctx := context.Get()
 
-	// Try to find the skill ID from the keybinding
 	for skillID, binding := range ctx.Data.KeyBindings.Skills {
 		if binding.Key1[0] == kb.Key1[0] {
 			return SelectRightSkill(skill.ID(skillID))
 		}
 	}
 
-	// If we can't find the skill ID, just use HID
-	ctx.HID.PressKeyBinding(kb)
-	utils.Sleep(50)
-	return nil
+	return fmt.Errorf("no skill bound to keybinding %v", kb)
 }
 
-// SelectLeftSkillByKeyBinding selects a skill using its keybinding directly
-// Uses packets if enabled in config, otherwise falls back to HID
+// SelectLeftSkillByKeyBinding selects a skill using its keybinding directly via packet 0x3C.
+// Full-packet bot: no HID fallback per user mandate 2026-04-19.
 func SelectLeftSkillByKeyBinding(kb data.KeyBinding) error {
 	ctx := context.Get()
 
-	// Try to find the skill ID from the keybinding
 	for skillID, binding := range ctx.Data.KeyBindings.Skills {
 		if binding.Key1[0] == kb.Key1[0] {
 			return SelectLeftSkill(skill.ID(skillID))
 		}
 	}
 
-	// If we can't find the skill ID, just use HID
-	ctx.HID.PressKeyBinding(kb)
-	utils.Sleep(50)
-	return nil
+	return fmt.Errorf("no skill bound to keybinding %v", kb)
 }
