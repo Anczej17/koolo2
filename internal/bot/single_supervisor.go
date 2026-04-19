@@ -503,11 +503,12 @@ func (s *SinglePlayerSupervisor) Start() error {
 
 		if s.bot.ctx.Data.IsLevelingCharacter && s.bot.ctx.Data.ActiveWeaponSlot != 0 {
 			for attempt := 0; attempt < 3 && s.bot.ctx.Data.ActiveWeaponSlot != 0; attempt++ {
-				if s.bot.ctx.CharacterCfg.PacketCasting.UseForWeaponSwap && s.bot.ctx.PacketSender != nil {
+				// Full-packet bot: always emit 0x50; no HID fallback (user 2026-04-19).
+				if s.bot.ctx.PacketSender != nil {
 					fL, fR, tL, tR := action.WeaponSwapGIDs(s.bot.ctx.Data)
-					s.bot.ctx.PacketSender.SwapWeapon(fL, fR, tL, tR)
-				} else {
-					s.bot.ctx.HID.PressKeyBinding(s.bot.ctx.Data.KeyBindings.SwapWeapons)
+					if err := s.bot.ctx.PacketSender.SwapWeapon(fL, fR, tL, tR); err != nil {
+						s.bot.ctx.Logger.Warn("supervisor SwapWeapon packet failed", "err", err)
+					}
 				}
 				utils.PingSleep(utils.Light, 150)
 				s.bot.ctx.RefreshGameData()

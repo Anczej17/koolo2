@@ -37,17 +37,18 @@ func swapWeapon(toCTA bool) error {
 			return nil
 		}
 
-		swapped := false
-		if ctx.CharacterCfg.PacketCasting.UseForWeaponSwap && ctx.PacketSender != nil {
-			fL, fR, tL, tR := swapWeaponGIDs(ctx)
-			if fL != 0 || fR != 0 || tL != 0 || tR != 0 {
-				if err := ctx.PacketSender.SwapWeapon(fL, fR, tL, tR); err == nil {
-					swapped = true
-				}
-			}
+		// Full-packet bot: always emit 0x50 weapon swap; no HID fallback.
+		// User mandate "fallback na HID nie jest akceptowalny" 2026-04-19.
+		if ctx.PacketSender == nil {
+			return nil // Defensive: nothing to do without a sender.
 		}
-		if !swapped {
-			ctx.HID.PressKeyBinding(ctx.Data.KeyBindings.SwapWeapons)
+		fL, fR, tL, tR := swapWeaponGIDs(ctx)
+		if fL == 0 && fR == 0 && tL == 0 && tR == 0 {
+			ctx.Logger.Warn("SwapWeapon: no equipped weapons resolved — skipping swap")
+			return nil
+		}
+		if err := ctx.PacketSender.SwapWeapon(fL, fR, tL, tR); err != nil {
+			ctx.Logger.Warn("SwapWeapon packet failed", "err", err)
 		}
 		utils.PingSleep(utils.Light, 150)
 

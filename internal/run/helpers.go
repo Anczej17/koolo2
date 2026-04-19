@@ -32,11 +32,12 @@ func ensureActiveWeaponSlot(ctx *context.Status, slot int) error {
 	}
 
 	for attempt := 0; attempt < 3; attempt++ {
-		if ctx.CharacterCfg.PacketCasting.UseForWeaponSwap && ctx.PacketSender != nil {
+		// Full-packet bot: always emit 0x50; no HID fallback (user 2026-04-19).
+		if ctx.PacketSender != nil {
 			fL, fR, tL, tR := action.WeaponSwapGIDs(ctx.Data)
-			ctx.PacketSender.SwapWeapon(fL, fR, tL, tR)
-		} else {
-			ctx.HID.PressKeyBinding(ctx.Data.KeyBindings.SwapWeapons)
+			if err := ctx.PacketSender.SwapWeapon(fL, fR, tL, tR); err != nil {
+				ctx.Logger.Warn("run/helpers SwapWeapon packet failed", "err", err)
+			}
 		}
 		utils.PingSleep(utils.Light, 150)
 		ctx.RefreshGameData()

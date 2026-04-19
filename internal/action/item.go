@@ -337,11 +337,12 @@ func tryUnequip(ctx *context.Status, itm data.Item) (data.Item, bool, error) {
 	swapped := false
 	if targetSlot != originalSlot {
 		ctx.Logger.Debug("Swapping weapon slot to unequip item", "item", itm.Name, "fromSlot", originalSlot, "toSlot", targetSlot)
-		if ctx.CharacterCfg.PacketCasting.UseForWeaponSwap && ctx.PacketSender != nil {
+		// Full-packet bot: always emit 0x50; no HID fallback (user 2026-04-19).
+		if ctx.PacketSender != nil {
 			fL, fR, tL, tR := WeaponSwapGIDs(ctx.Data)
-			ctx.PacketSender.SwapWeapon(fL, fR, tL, tR)
-		} else {
-			ctx.HID.PressKeyBinding(ctx.Data.KeyBindings.SwapWeapons)
+			if err := ctx.PacketSender.SwapWeapon(fL, fR, tL, tR); err != nil {
+				ctx.Logger.Warn("item.go SwapWeapon (target) packet failed", "err", err)
+			}
 		}
 		utils.Sleep(200)
 		ctx.RefreshGameData()
@@ -353,11 +354,12 @@ func tryUnequip(ctx *context.Status, itm data.Item) (data.Item, bool, error) {
 	}
 	if swapped {
 		defer func() {
-			if ctx.CharacterCfg.PacketCasting.UseForWeaponSwap && ctx.PacketSender != nil {
+			// Restore original slot via packet — no HID fallback.
+			if ctx.PacketSender != nil {
 				fL, fR, tL, tR := WeaponSwapGIDs(ctx.Data)
-				ctx.PacketSender.SwapWeapon(fL, fR, tL, tR)
-			} else {
-				ctx.HID.PressKeyBinding(ctx.Data.KeyBindings.SwapWeapons)
+				if err := ctx.PacketSender.SwapWeapon(fL, fR, tL, tR); err != nil {
+					ctx.Logger.Warn("item.go SwapWeapon (restore) packet failed", "err", err)
+				}
 			}
 			utils.Sleep(200)
 			ctx.RefreshGameData()

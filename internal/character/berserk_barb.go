@@ -375,11 +375,12 @@ func (s *Berserker) FindItemOnNearbyCorpses(maxRange int) {
 					"current", ctx.Data.ActiveWeaponSlot)
 				// Force multiple swap attempts as last resort
 				for i := 0; i < 10; i++ {
-					if ctx.CharacterCfg.PacketCasting.UseForWeaponSwap && ctx.PacketSender != nil {
+					// Full-packet bot: always emit 0x50; no HID fallback (user 2026-04-19).
+					if ctx.PacketSender != nil {
 						fL, fR, tL, tR := action.WeaponSwapGIDs(ctx.Data)
-						ctx.PacketSender.SwapWeapon(fL, fR, tL, tR)
-					} else {
-						ctx.HID.PressKey('W')
+						if err := ctx.PacketSender.SwapWeapon(fL, fR, tL, tR); err != nil {
+							ctx.Logger.Warn("berserk_barb SwapWeapon packet failed", "err", err)
+						}
 					}
 					time.Sleep(200 * time.Millisecond)
 					ctx.RefreshGameData()
@@ -573,11 +574,12 @@ func (s *Berserker) SwapToSlot(slot int) bool {
 			return true
 		}
 
-		if ctx.CharacterCfg.PacketCasting.UseForWeaponSwap && ctx.PacketSender != nil {
+		// Full-packet bot: always emit 0x50; no HID fallback (user 2026-04-19).
+		if ctx.PacketSender != nil {
 			fL, fR, tL, tR := action.WeaponSwapGIDs(ctx.Data)
-			ctx.PacketSender.SwapWeapon(fL, fR, tL, tR)
-		} else {
-			ctx.HID.PressKey('W')
+			if err := ctx.PacketSender.SwapWeapon(fL, fR, tL, tR); err != nil {
+				ctx.Logger.Warn("berserk_barb SwapWeapon packet failed", "err", err)
+			}
 		}
 		time.Sleep(retryDelay)
 		ctx.RefreshGameData()

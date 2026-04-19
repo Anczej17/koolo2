@@ -628,21 +628,19 @@ func restoreRightSkill(sk skill.ID) {
 // ============================================================================
 
 // pressSwapWeapons toggles between primary/secondary weapon sets.
+// Full-packet bot: always emit 0x50; no HID fallback (user 2026-04-19).
 func pressSwapWeapons() {
 	ctx := context.Get()
-	swapped := false
-	if ctx.CharacterCfg.PacketCasting.UseForWeaponSwap && ctx.PacketSender != nil {
-		fL, fR, tL, tR := WeaponSwapGIDs(ctx.Data)
-		if fL != 0 || fR != 0 || tL != 0 || tR != 0 {
-			if err := ctx.PacketSender.SwapWeapon(fL, fR, tL, tR); err == nil {
-				swapped = true
-			} else {
-				ctx.Logger.Warn("Packet weapon swap failed, falling back to HID", slog.String("error", err.Error()))
-			}
-		}
+	if ctx.PacketSender == nil {
+		return
 	}
-	if !swapped {
-		ctx.HID.PressKeyBinding(ctx.Data.KeyBindings.SwapWeapons)
+	fL, fR, tL, tR := WeaponSwapGIDs(ctx.Data)
+	if fL == 0 && fR == 0 && tL == 0 && tR == 0 {
+		ctx.Logger.Warn("pressSwapWeapons: no equipped weapons resolved — skipping swap")
+		return
+	}
+	if err := ctx.PacketSender.SwapWeapon(fL, fR, tL, tR); err != nil {
+		ctx.Logger.Warn("pressSwapWeapons packet failed", slog.String("error", err.Error()))
 	}
 }
 
