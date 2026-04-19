@@ -65,7 +65,8 @@ func (a Leveling) act4() error {
 
 		harrogathPortal, found := a.ctx.Data.Objects.FindOne(object.LastLastPortal)
 		if !found { // portal was already opened before so we must talk to Tyrael to get to A5
-			a.ctx.HID.KeySequence(win.VK_HOME, win.VK_DOWN, win.VK_RETURN)
+			// Full-packet bot: 0x38 dialog option 1 = "Take me to Harrogath" (user 2026-04-19).
+			action.SelectNPCOption(1, npc.Tyrael2)
 			// After attempting to open it with key sequence, you should re-check if it's found
 			// If still not found, then it's an error.
 
@@ -150,7 +151,8 @@ func (a Leveling) act4() error {
 
 		harrogathPortal, found := a.ctx.Data.Objects.FindOne(object.LastLastPortal)
 		if !found { // portal was already opened before so we must talk to Tyrael to get to A5
-			a.ctx.HID.KeySequence(win.VK_HOME, win.VK_DOWN, win.VK_RETURN)
+			// Full-packet bot: 0x38 dialog option 1 = "Take me to Harrogath" (user 2026-04-19).
+			action.SelectNPCOption(1, npc.Tyrael2)
 			// After attempting to open it with key sequence, you should re-check if it's found
 			// If still not found, then it's an error.
 

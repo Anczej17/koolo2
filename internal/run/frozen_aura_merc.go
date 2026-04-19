@@ -61,10 +61,12 @@ func (fam FrozenAuraMerc) Run(parameters *RunParameters) error {
 	}
 
 	fam.ctx.Logger.Info("Interacting with mercenary NPC")
-	if err := action.InteractNPC(town.GetTownByArea(fam.ctx.Data.PlayerUnit.Area).MercContractorNPC()); err != nil {
+	mercNPC := town.GetTownByArea(fam.ctx.Data.PlayerUnit.Area).MercContractorNPC()
+	if err := action.InteractNPC(mercNPC); err != nil {
 		return err
 	}
-	fam.ctx.HID.KeySequence(win.VK_HOME, win.VK_DOWN, win.VK_RETURN)
+	// Full-packet bot: 0x38 dialog option 1 = "Hire Mercenary" (user 2026-04-19).
+	action.SelectNPCOption(1, mercNPC)
 	utils.Sleep(2000)
 
 	fam.ctx.Logger.Info("Getting merc list")

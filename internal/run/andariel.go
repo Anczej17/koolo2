@@ -449,7 +449,8 @@ func (a Andariel) buyAntidotePotions(quantity int) error {
 func (a Andariel) goToAct2() {
 	action.ReturnTown()
 	action.InteractNPC(npc.Warriv)
-	a.ctx.HID.KeySequence(win.VK_HOME, win.VK_DOWN, win.VK_RETURN)
+	// Full-packet bot: 0x38 dialog option 1 = "Take me to Lut Gholein" (user 2026-04-19).
+	action.SelectNPCOption(1, npc.Warriv)
 	utils.Sleep(1000)
 	action.HoldKey(win.VK_SPACE, 2000)
 	utils.Sleep(1000)

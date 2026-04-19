@@ -20,7 +20,6 @@ import (
 	"local/internal/svc/internal/gamelib/data/stat"
 	"local/internal/svc/internal/action"
 	"local/internal/svc/internal/config" // Make sure this import is present
-	"github.com/lxn/win"
 )
 
 func (a Leveling) act5() error {
@@ -193,7 +192,8 @@ func (a Leveling) act5() error {
 
 			action.InteractNPC(npc.Malah)
 			utils.Sleep(1000)
-			a.ctx.HID.KeySequence(win.VK_HOME, win.VK_DOWN, win.VK_DOWN, win.VK_RETURN)
+			// Full-packet bot: 0x38 dialog option 2 = Anya reward dialog (user 2026-04-19).
+			action.SelectNPCOption(2, npc.Malah)
 			// Adding a longer delay to ensure the game state has time to update
 			utils.Sleep(2500)
 

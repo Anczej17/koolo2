@@ -217,7 +217,8 @@ func (a Leveling) goToAct2() error {
 	}
 
 	action.InteractNPC(npc.Warriv)
-	a.ctx.HID.KeySequence(win.VK_HOME, win.VK_DOWN, win.VK_RETURN)
+	// Full-packet bot: 0x38 option 1 = "Take me to Lut Gholein" (user 2026-04-19).
+	action.SelectNPCOption(1, npc.Warriv)
 	utils.Sleep(1000)
 	a.HoldKey(win.VK_SPACE, 2000)
 	utils.Sleep(1000)
@@ -324,7 +325,8 @@ func gambleAct1Belt(ctx *context.Status) error {
 	}
 	defer step.CloseAllMenus()
 
-	ctx.HID.KeySequence(win.VK_HOME, win.VK_DOWN, win.VK_DOWN, win.VK_RETURN)
+	// Full-packet bot: 0x38 option 2 = "Gamble" for Gheed (user 2026-04-19).
+	action.SelectNPCOption(2, npc.Gheed)
 	utils.Sleep(1000)
 
 	// Check if the shop menu is open

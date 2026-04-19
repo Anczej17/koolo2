@@ -464,11 +464,13 @@ func HireMerc() error {
 
 			ctx.Logger.Info("Attempting to hire 'Prayer' mercenary...")
 
-			if err := InteractNPC(town.GetTownByArea(ctx.Data.PlayerUnit.Area).MercContractorNPC()); err != nil {
+			mercNPC := town.GetTownByArea(ctx.Data.PlayerUnit.Area).MercContractorNPC()
+			if err := InteractNPC(mercNPC); err != nil {
 				return err
 			}
 
-			ctx.HID.KeySequence(win.VK_HOME, win.VK_DOWN, win.VK_RETURN)
+			// Full-packet bot: 0x38 dialog option 1 = "Hire Mercenary" (user 2026-04-19).
+			SelectNPCOption(1, mercNPC)
 			utils.Sleep(2000)
 
 			mercList := ctx.GameReader.GetMercList()
@@ -578,10 +580,11 @@ func ResetStats() error {
 		utils.Sleep(500)
 
 		// 3. Interact with Akara for the reset
+		// Full-packet bot: 0x38 dialog option 2 ("Reset stats") → 0 ("Yes please") (user 2026-04-19).
 		InteractNPC(npc.Akara)
-		ctx.HID.KeySequence(win.VK_HOME, win.VK_DOWN, win.VK_DOWN, win.VK_RETURN)
+		SelectNPCOption(2, npc.Akara)
 		utils.Sleep(1000)
-		ctx.HID.KeySequence(win.VK_HOME, win.VK_RETURN)
+		SelectNPCOption(0, npc.Akara)
 		utils.Sleep(1000)
 		ctx.GameReader.GetData() // Refresh data to update skill values
 

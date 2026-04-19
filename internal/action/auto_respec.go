@@ -15,7 +15,6 @@ import (
 	"local/internal/svc/internal/game"
 	"local/internal/svc/internal/ui"
 	"local/internal/svc/internal/utils"
-	"github.com/lxn/win"
 )
 
 func AutoRespecIfNeeded() error {
@@ -177,9 +176,11 @@ func respecAtAkara() error {
 		return err
 	}
 
-	ctx.HID.KeySequence(win.VK_HOME, win.VK_DOWN, win.VK_DOWN, win.VK_RETURN)
+	// Full-packet bot: dialog selections via 0x38 — no HID KeySequence (user 2026-04-19).
+	// Akara respec dialog: option 2 = "Reset stats" → option 0 = "Yes please".
+	SelectNPCOption(2, npc.Akara)
 	utils.Sleep(800)
-	ctx.HID.KeySequence(win.VK_HOME, win.VK_RETURN)
+	SelectNPCOption(0, npc.Akara)
 	utils.Sleep(800)
 	step.CloseAllMenus()
 

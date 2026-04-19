@@ -56,7 +56,8 @@ func (a Leveling) act2() error {
 			Y: 5060,
 		})
 		action.InteractNPC(npc.Meshif)
-		a.ctx.HID.KeySequence(win.VK_HOME, win.VK_DOWN, win.VK_RETURN)
+		// Full-packet bot: 0x38 dialog option 1 = "Take me to Kurast Docks" (user 2026-04-19).
+		action.SelectNPCOption(1, npc.Meshif)
 		utils.Sleep(1000)
 		a.HoldKey(win.VK_SPACE, 2000) // Hold the Escape key (VK_ESCAPE or 0x1B) for 2000 milliseconds (2 seconds)
 		utils.Sleep(1000)
@@ -85,7 +86,8 @@ func (a Leveling) act2() error {
 			Y: 5060,
 		})
 		action.InteractNPC(npc.Meshif)
-		a.ctx.HID.KeySequence(win.VK_HOME, win.VK_DOWN, win.VK_RETURN)
+		// Full-packet bot: 0x38 dialog option 1 = "Take me to Kurast Docks" (user 2026-04-19).
+		action.SelectNPCOption(1, npc.Meshif)
 		utils.Sleep(1000)
 		a.HoldKey(win.VK_SPACE, 2000) // Hold the Escape key (VK_ESCAPE or 0x1B) for 2000 milliseconds (2 seconds)
 		utils.Sleep(1000)
@@ -104,10 +106,12 @@ func (a Leveling) act2() error {
 		}
 
 		a.ctx.Logger.Info("Interacting with mercenary NPC")
-		if err := action.InteractNPC(town.GetTownByArea(a.ctx.Data.PlayerUnit.Area).MercContractorNPC()); err != nil {
+		mercNPC := town.GetTownByArea(a.ctx.Data.PlayerUnit.Area).MercContractorNPC()
+		if err := action.InteractNPC(mercNPC); err != nil {
 			return err
 		}
-		a.ctx.HID.KeySequence(win.VK_HOME, win.VK_DOWN, win.VK_RETURN)
+		// Full-packet bot: 0x38 dialog option 1 = "Hire Mercenary" (user 2026-04-19).
+		action.SelectNPCOption(1, mercNPC)
 		utils.Sleep(2000)
 
 		a.ctx.Logger.Info("Getting merc list")
@@ -159,7 +163,8 @@ func (a Leveling) act2() error {
 			Y: 5060,
 		})
 		action.InteractNPC(npc.Meshif)
-		a.ctx.HID.KeySequence(win.VK_HOME, win.VK_DOWN, win.VK_RETURN)
+		// Full-packet bot: 0x38 dialog option 1 = "Take me to Kurast Docks" (user 2026-04-19).
+		action.SelectNPCOption(1, npc.Meshif)
 		utils.Sleep(1000)
 		a.HoldKey(win.VK_SPACE, 2000) // Hold the Escape key (VK_ESCAPE or 0x1B) for 2000 milliseconds (2 seconds)
 		utils.Sleep(1000)
@@ -619,7 +624,8 @@ func buyAct2Belt(ctx *context.Status) error {
 	}
 	defer step.CloseAllMenus()
 
-	ctx.HID.KeySequence(win.VK_HOME, win.VK_DOWN, win.VK_RETURN) // Interact with Fara
+	// Full-packet bot: 0x38 dialog option 1 = "Trade" (user 2026-04-19).
+	action.SelectNPCOption(1, npc.Fara)
 	utils.Sleep(1000)
 
 	// Switch to armor tab and refresh game data to see the new items
