@@ -1006,6 +1006,7 @@ func (s *HttpServer) Listen(port int) error {
 	http.HandleFunc("/debug/dispatch-ping", s.debugDispatchPing)
 	http.HandleFunc("/debug/handle-audit", s.debugHandleAudit)
 	http.HandleFunc("/debug/d2rhash", s.debugD2RHash)
+	http.HandleFunc("/debug/d2rscan", s.debugD2RScan)
 	http.HandleFunc("/debug/writemem", s.debugWriteMem)
 	http.HandleFunc("/debug/memdiff", s.debugMemDiff)
 	http.HandleFunc("/debug/dumprange", s.debugDumpRange)
@@ -8200,6 +8201,108 @@ func (s *HttpServer) debugHandleAudit(w http.ResponseWriter, r *http.Request) {
 		proc.HandleOpen(),
 		ctx.GameReader.ReaderSource(),
 	)
+}
+
+// debugD2RScan runs the offset_resolver tool against the running D2R, captures
+// the resolved RVAs, and returns a ready-to-paste bakedOffsets entry. Closes
+// the loop for new D2R releases:
+//  1. /debug/d2rhash → returns hash X.
+//  2. /debug/d2rscan → returns Go entry to add to internal/gamelib/memory/baked_offsets.go.
+//  3. user pastes, rebuilds, ships.
+//
+// Requires build/tools/offset_resolver.exe present (built by `go build ./tools/offset_resolver/`).
+func (s *HttpServer) debugD2RScan(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+
+	character := r.URL.Query().Get("character")
+	if character == "" {
+		w.WriteHeader(http.StatusBadRequest)
+		fmt.Fprintf(w, "missing character parameter\n")
+		return
+	}
+
+	ctx := s.manager.GetContext(character)
+	if ctx == nil || ctx.GameReader == nil {
+		w.WriteHeader(http.StatusServiceUnavailable)
+		fmt.Fprintf(w, "no running supervisor for character %s\n", character)
+		return
+	}
+
+	pid := ctx.GameReader.Process.PID()
+	hash, herr := memory.D2RBuildHash(pid)
+	if herr != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		fmt.Fprintf(w, "D2RBuildHash failed: %v\n", herr)
+		return
+	}
+
+	exe, eerr := os.Executable()
+	if eerr != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		fmt.Fprintf(w, "os.Executable failed: %v\n", eerr)
+		return
+	}
+	resolverPath := filepath.Join(filepath.Dir(exe), "tools", "offset_resolver.exe")
+	if _, statErr := os.Stat(resolverPath); statErr != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		fmt.Fprintf(w, "offset_resolver.exe missing at %s\n  build with: go build -o build/tools/offset_resolver.exe ./tools/offset_resolver/\n", resolverPath)
+		return
+	}
+	tmpGo := filepath.Join(os.TempDir(), fmt.Sprintf("d2rscan_%d.go", pid))
+	cmd := exec.Command(resolverPath, "-go", tmpGo)
+	combined, runErr := cmd.CombinedOutput()
+	// offset_resolver exits non-zero when any d2go-required offset misses
+	// (stale patterns vs new D2R build), but it STILL writes the partial
+	// snippet for the offsets that DID resolve. Read it regardless and let
+	// the caller decide what to do with the partial result.
+	scanned, readErr := os.ReadFile(tmpGo)
+	if readErr != nil {
+		fmt.Fprintf(w, "// offset_resolver failed (exit=%v) AND no go file produced (%v)\n// scan log:\n%s\n", runErr, readErr, string(combined))
+		return
+	}
+	defer os.Remove(tmpGo)
+	if runErr != nil {
+		fmt.Fprintf(w, "// WARN: offset_resolver exited non-zero (%v) — some d2go-critical offsets missed.\n", runErr)
+		fmt.Fprintf(w, "// Stale patterns in tools/offset_resolver/patterns.go for current D2R build.\n")
+		fmt.Fprintf(w, "// Snippet below contains the offsets that DID resolve; copy them and\n")
+		fmt.Fprintf(w, "// leave the missed-fields' values from a prior known-good build.\n//\n")
+	}
+
+	// Extract just the field-assignment lines from offset_resolver's output:
+	// it emits `package memory; func calculateOffsetsScanned() Offset { return Offset{ ...fields... } }`
+	// We want the fields only, indented to fit a map literal.
+	scanLines := strings.Split(string(scanned), "\n")
+	var fieldLines []string
+	inBody := false
+	for _, line := range scanLines {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "return Offset{") {
+			inBody = true
+			continue
+		}
+		if inBody {
+			if trimmed == "}" {
+				break
+			}
+			if trimmed == "" {
+				continue
+			}
+			fieldLines = append(fieldLines, "    "+trimmed)
+		}
+	}
+
+	fmt.Fprintf(w, "// === bakedOffsets entry for D2R build %s ===\n", hash[:16])
+	fmt.Fprintf(w, "// Paste this into internal/gamelib/memory/baked_offsets.go's bakedOffsets map,\n")
+	fmt.Fprintf(w, "// then `go build -o build/app.exe ./cmd/app/` (and `bash tools/build_production.sh`\n")
+	fmt.Fprintf(w, "// for the dist binary). Lines marked NOT RESOLVED need values copied from\n")
+	fmt.Fprintf(w, "// a known-good prior baked entry — those are stale patterns in offset_resolver,\n")
+	fmt.Fprintf(w, "// not actually missing offsets in D2R.\n//\n")
+	fmt.Fprintf(w, "%q: {\n", hash)
+	for _, fl := range fieldLines {
+		fmt.Fprintln(w, fl)
+	}
+	fmt.Fprintf(w, "},\n")
+	fmt.Fprintf(w, "\n// === scan log (for debugging missed patterns) ===\n%s\n", string(combined))
 }
 
 // debugD2RHash returns the SHA256 first-1MB hash of D2R.exe + whether that
