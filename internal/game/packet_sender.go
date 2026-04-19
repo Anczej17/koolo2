@@ -329,3 +329,58 @@ func (ps *PacketSender) CubeTransmute(cubeGID data.UnitID) error {
 	}
 	return nil
 }
+
+// MoveToEntity sends a 0x04 packet — walk/run toward a specific entity.
+// `action` = packet.MoveToEntityActionWalk (1) or MoveToEntityActionRun (2).
+// `unitType` = 0 player, 1 NPC/monster, 2 object, 4 item.
+func (ps *PacketSender) MoveToEntity(action, targetGID uint32, unitType byte) error {
+	if err := ps.SendPacket(packet.NewMoveToEntity(action, targetGID, unitType).GetPayload()); err != nil {
+		return fmt.Errorf("failed to send move-to-entity packet 0x04: %w", err)
+	}
+	return nil
+}
+
+// GoldTransfer sends a 0x27 gold deposit/withdraw packet. `action` =
+// packet.GoldTransferDeposit (1, inv→stash) or GoldTransferWithdraw (2,
+// stash→inv). `balance` is the player's resulting inventory gold AFTER the
+// transfer; caller must compute it from PlayerUnit. `amount` is positive.
+// Stash UI must already be open. Server validates `balance` so a wrong
+// value disconnects.
+func (ps *PacketSender) GoldTransfer(action, balance, amount uint32) error {
+	if err := ps.SendDualPacket(packet.NewGoldTransfer(action, balance, amount).GetPayload()); err != nil {
+		return fmt.Errorf("failed to send gold transfer packet 0x27: %w", err)
+	}
+	return nil
+}
+
+// TpDestinationSelect sends a 0x4B packet — selects the destination area
+// when a TP / WP travel menu is open. Must be paired with TpConfirmTravel
+// (0x43). Sending out-of-sequence (no open menu) crashes D2R per
+// memory feedback_packet_out_of_sequence_crash_2026_04_19.
+func (ps *PacketSender) TpDestinationSelect(dest byte) error {
+	if err := ps.SendPacket(packet.NewTpDestinationSelect(dest).GetPayload()); err != nil {
+		return fmt.Errorf("failed to send TP destination select packet 0x4B: %w", err)
+	}
+	return nil
+}
+
+// TpConfirmTravel sends a 0x43 packet — confirms travel after a 0x4B
+// destination select. Server expects the pair within ~100ms of the 0x4B.
+func (ps *PacketSender) TpConfirmTravel() error {
+	if err := ps.SendPacket(packet.NewTpConfirmTravel().GetPayload()); err != nil {
+		return fmt.Errorf("failed to send TP confirm travel packet 0x43: %w", err)
+	}
+	return nil
+}
+
+// ItemMoveStash sends the 0x54 inv↔stash item-move packet.
+// Context bytes: packet.InvCtxInventory (0), InvCtxCursor (1),
+// InvCtxBelt (2), InvCtxStashMain (4), InvCtxStashShared (5).
+// Caller must already have the relevant container open (stash/cube).
+func (ps *PacketSender) ItemMoveStash(itemGID data.UnitID, srcCtx, srcCol, srcRow, dstCtx, dstCol, dstRow byte) error {
+	pkt := packet.NewItemMoveStash(itemGID, srcCtx, srcCol, srcRow, dstCtx, dstCol, dstRow)
+	if err := ps.SendDualPacket(pkt.GetPayload()); err != nil {
+		return fmt.Errorf("failed to send item-move-stash packet 0x54: %w", err)
+	}
+	return nil
+}
