@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"os"
 	"strings"
 	"time"
 
@@ -103,17 +102,17 @@ func (s *baseSupervisor) Stop() {
 }
 
 func (s *baseSupervisor) KillClient() error {
-
-	process, err := os.FindProcess(int(s.bot.ctx.GameReader.Process.GetPID()))
-	if err != nil {
-		s.bot.ctx.Logger.Info("Failed to find process", slog.String("configuration", s.name))
-		return err
+	pid := uint32(s.bot.ctx.GameReader.Process.GetPID())
+	if pid == 0 {
+		s.bot.ctx.Logger.Info("KillClient: pid is 0, nothing to kill", slog.String("configuration", s.name))
+		return nil
 	}
-	err = process.Kill()
-	if err != nil {
-		s.bot.ctx.Logger.Info("Failed to kill process", slog.String("configuration", s.name))
-		return err
-	}
+	// Hard-kill + wait for kernel reap + sweep orphan handles. Replaces
+	// the previous os.FindProcess + process.Kill (= async TerminateProcess
+	// with no wait) which left D2R EPROCESSes zombified for seconds, pinned
+	// vGPU resources, and starved the next D2R launch — driving the
+	// "5 reboots in minutes" cascade. See game.KillProcessAndReap.
+	game.KillProcessAndReap(pid)
 	return nil
 }
 

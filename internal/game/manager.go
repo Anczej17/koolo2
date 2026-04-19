@@ -274,35 +274,89 @@ func isGPUErrorWindow(hwnd windows.HWND) bool {
 	return foundError
 }
 
-// closeWindowAndTerminateProcess closes the error dialog and terminates the D2R process
-func closeWindowAndTerminateProcess(hwnd windows.HWND, pid uint32) {
-	// Send WM_CLOSE to close the dialog
-	const WM_CLOSE = 0x0010
-	win.SendMessage(win.HWND(hwnd), WM_CLOSE, 0, 0)
+// KillProcessAndReap forcibly terminates `pid` AND blocks until the kernel
+// reaps the EPROCESS. Used by every D2R termination path (GPU retry loop,
+// supervisor.KillClient, etc.) to make sure every kill fully releases its
+// vGPU slot before the next D2R can be started. Without it, Hyper-V vGPU
+// can't reclaim VRAM in time, the next D2R fails GPU init, the loop
+// generates a fresh zombie per attempt, and after 5+ iterations the VM is
+// starved and must be rebooted.
+//
+// Sequence:
+//  1. OpenProcess(TERMINATE|SYNCHRONIZE) — SYNCHRONIZE makes WaitForSingleObject legal.
+//  2. TerminateProcess(handle, 1) — forced exit.
+//  3. WaitForSingleObject(handle, 5s) — kernel signals when EPROCESS dies.
+//  4. GetExitCodeProcess polling fallback — extra 5s in case wait races.
+//  5. ForceKillZombieD2R(nil) — duplicate-close any orphan handles other
+//     non-protected processes hold against this dead PID, so the kernel
+//     actually reaps the EPROCESS. NOT LSASS / SVCHOST per PPL limitation
+//     (see feedback_zombie_lsass_svchost_reboot.md).
+func KillProcessAndReap(pid uint32) {
+	const STILL_ACTIVE = 259
 
-	// Give it a moment to close
-	time.Sleep(500 * time.Millisecond)
+	handle, err := windows.OpenProcess(windows.PROCESS_TERMINATE|windows.SYNCHRONIZE, false, pid)
+	if err != nil {
+		fmt.Printf("zombie-guard pid=%d: OpenProcess failed (%v) — process may already be dead, sweeping orphan handles\n", pid, err)
+		ForceKillZombieD2R(nil)
+		return
+	}
+	defer windows.CloseHandle(handle)
 
-	// Terminate the process
-	handle, err := windows.OpenProcess(windows.PROCESS_TERMINATE, false, pid)
-	if err == nil {
-		windows.TerminateProcess(handle, 1)
-		windows.CloseHandle(handle)
+	if terr := windows.TerminateProcess(handle, 1); terr != nil {
+		fmt.Printf("zombie-guard pid=%d: TerminateProcess err=%v (continuing to wait)\n", pid, terr)
+	}
+
+	waitRes, _ := windows.WaitForSingleObject(handle, 5000)
+	if waitRes != windows.WAIT_OBJECT_0 {
+		fmt.Printf("zombie-guard pid=%d: WaitForSingleObject result=0x%x (timeout=0x102) — falling back to exit-code polling\n", pid, waitRes)
+		deadline := time.Now().Add(5 * time.Second)
+		for time.Now().Before(deadline) {
+			var exit uint32
+			if gerr := windows.GetExitCodeProcess(handle, &exit); gerr == nil && exit != STILL_ACTIVE {
+				break
+			}
+			time.Sleep(100 * time.Millisecond)
+		}
+	}
+
+	if closed, zombies := ForceKillZombieD2R(nil); closed > 0 || zombies > 0 {
+		fmt.Printf("zombie-guard pid=%d: post-terminate sweep closed=%d zombies=%d\n", pid, closed, zombies)
 	}
 }
 
+// closeWindowAndTerminateProcess closes the GPU error dialog (best-effort) and
+// then hard-kills + reaps the D2R process via KillProcessAndReap.
+func closeWindowAndTerminateProcess(hwnd windows.HWND, pid uint32) {
+	const WM_CLOSE = 0x0010
+	if hwnd != 0 {
+		win.SendMessage(win.HWND(hwnd), WM_CLOSE, 0, 0)
+		time.Sleep(500 * time.Millisecond)
+	}
+	KillProcessAndReap(pid)
+}
+
 func StartGame(username string, password string, authmethod string, authToken string, realm string, arguments string, useCustomSettings bool) (uint32, win.HWND, error) {
-	// Retry effectively forever. GPU-P / Hyper-V VMs sometimes sit in
-	// a starved state for minutes — the user's mandate is "just keep
-	// trying until it launches" because giving up strands all sibling
-	// supervisors in multi-instance runs. Cap at 1000 so a genuinely
-	// broken env eventually surfaces an error instead of hanging.
-	const maxGPURetries = 1000
+	// GPU-P / Hyper-V VMs sometimes sit in a starved state for minutes —
+	// keep trying so giving up doesn't strand sibling supervisors. But cap
+	// retries (and total time) so a genuinely broken env doesn't generate
+	// a fresh D2R zombie per attempt forever — past the cap the operator
+	// gets a clear error and can reboot the VM. With closeWindowAndTerminate
+	// now blocking on actual reap + zombie sweep, 30 attempts × ~30 s cap
+	// = ~15 min worst case before surrender.
+	const maxGPURetries = 30
 
 	// First check for other instances of the game and kill the handles, otherwise we will not be able to start the game
 	err := KillAllClientHandles()
 	if err != nil {
 		return 0, 0, err
+	}
+
+	// Pre-flight: sweep any dead D2R EPROCESS still pinned by orphan handles
+	// from a previous failed launch / app.exe crash. Without this, a stale
+	// zombie keeps its vGPU slot and makes the upcoming cmd.Start fail GPU
+	// init for the same reason that produced the zombie.
+	if closed, zombies := ForceKillZombieD2R(nil); closed > 0 || zombies > 0 {
+		fmt.Printf("StartGame pre-flight zombie sweep: closed=%d zombies=%d\n", closed, zombies)
 	}
 
 	// Depending on the authentication method set base arguments
@@ -432,9 +486,12 @@ func StartGame(username string, password string, authmethod string, authToken st
 				break
 			}
 			if time.Now().After(windowDeadline) {
-				// D2R started but never created a window — kill and retry
+				// D2R started but never created a window — terminate AND wait
+				// for actual reap before retry. cmd.Process.Kill alone returns
+				// before the kernel reaps EPROCESS; the next cmd.Start would
+				// then race the dying D2R for vGPU and add another zombie.
 				if cmd.Process != nil {
-					cmd.Process.Kill()
+					KillProcessAndReap(uint32(cmd.Process.Pid))
 					cmd.Process.Release()
 				}
 				fmt.Printf("D2R window not found after 60s (attempt %d/%d), retrying...\n", attempt+1, maxGPURetries)
