@@ -637,6 +637,13 @@ const OFF_SNAP_UNIT_TABLE: usize       = 0x4030; // u64 — D2R.base + offset.Un
 const OFF_SNAP_EXPANSION: usize        = 0x4038; // u64 — D2R.base + offset.Expansion
 const OFF_SNAP_WAYPOINT_TABLE: usize   = 0x4040; // u64 — D2R.base + offset.WaypointTableOffset
 
+// Per-session XOR mask written by the bot before CmdSnapshotInit. We XOR
+// SNAP_MAGIC with this when publishing the header so an in-D2R-process
+// scanner can't anchor on a constant 'SNAP' word at fixed offset in the
+// mapped SHM view. Key 0 = magic plain (backward compat).
+// Mirrors GID `_frameDropWaitTimeXorKey` (MISC64_MEMORY_AUDIT.md sec 7).
+const OFF_SNAP_XOR_KEY: usize          = 0x4044; // u32
+
 // Bot-controlled walker throttle. When 0, rmod uses its default period.
 // When non-zero, snapshot_walker_scan runs every Nth Present frame. Lets the
 // bot dial down reads the moment crash telemetry looks unhappy, without a
@@ -5578,8 +5585,13 @@ unsafe fn dispatch_snapshot_init(shm: *mut SharedBuffer) {
     G_D2R_BASE = base;
 
     // Write header magic + version + module base so bot can sanity-check.
+    // SNAP_MAGIC is XORed with the per-session key the bot pre-wrote at
+    // OFF_SNAP_XOR_KEY (0 disables, keeping backward compat). Anti-fingerprint
+    // for any in-D2R-process scanner that could anchor on the constant 'SNAP'
+    // word in the mapped SHM view.
     let shm_u8 = shm as *mut u8;
-    core::ptr::write_unaligned(shm_u8.add(OFF_SNAP_MAGIC) as *mut u32, SNAP_MAGIC);
+    let xor_key = core::ptr::read_unaligned(shm_u8.add(OFF_SNAP_XOR_KEY) as *const u32);
+    core::ptr::write_unaligned(shm_u8.add(OFF_SNAP_MAGIC) as *mut u32, SNAP_MAGIC ^ xor_key);
     core::ptr::write_unaligned(shm_u8.add(OFF_SNAP_VERSION) as *mut u32, SNAP_VERSION_A);
     core::ptr::write_unaligned(shm_u8.add(OFF_SNAP_D2R_BASE) as *mut u64, base as u64);
     // Walker starts MINIMAL by default — the only stable shape under Arxan

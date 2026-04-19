@@ -305,6 +305,16 @@ const (
 	OffSnapExpansion     = 0x4038 // u64 — bot writes D2R.base+offset.Expansion BEFORE CmdSnapshotInit
 	OffSnapWaypointTable = 0x4040 // u64 — bot writes D2R.base+offset.WaypointTableOffset BEFORE CmdSnapshotInit
 
+	// OffSnapXorKey — per-session XOR mask (u32) the bot writes BEFORE
+	// CmdSnapshotInit. Rmod XORs SNAP_MAGIC with this key when publishing
+	// the header, breaking the "constant 'SNAP' word at fixed offset"
+	// signature any in-D2R-process scanner could match against the mapped
+	// SHM view. When the key is 0, rmod writes magic plain (backward compat
+	// with old presenter — old test harness in snapshot_reader_test.go does
+	// not set it). Mirrors GID's `_frameDropWaitTimeXorKey` defense
+	// (MISC64_MEMORY_AUDIT.md sec 7).
+	OffSnapXorKey = 0x4044 // u32
+
 	// Generic static-region table (Phase B2). Bot populates before CmdSnapshotInit,
 	// rmod mirrors each entry's [va, len] bytes every Present frame. Lets us add
 	// new field coverage (Hover, UI, WidgetStates, FPS, etc.) without changing rmod.

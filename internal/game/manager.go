@@ -291,19 +291,27 @@ func isGPUErrorWindow(hwnd windows.HWND) bool {
 //     non-protected processes hold against this dead PID, so the kernel
 //     actually reaps the EPROCESS. NOT LSASS / SVCHOST per PPL limitation
 //     (see feedback_zombie_lsass_svchost_reboot.md).
-func KillProcessAndReap(pid uint32) {
+// KillProcessAndReap forcibly terminates `pid` AND blocks until the kernel
+// reaps the EPROCESS. Returns true when the process is verifiably dead at
+// return time, false when termination was blocked (Arxan PROCESS_TERMINATE
+// access-deny is the canonical failure case — process stays alive and a
+// retry loop calling cmd.Start will accumulate zombies; callers should
+// abort their retry on false rather than spinning forever).
+func KillProcessAndReap(pid uint32) bool {
 	const STILL_ACTIVE = 259
 
-	handle, err := windows.OpenProcess(windows.PROCESS_TERMINATE|windows.SYNCHRONIZE, false, pid)
+	handle, err := windows.OpenProcess(windows.PROCESS_TERMINATE|windows.SYNCHRONIZE|windows.PROCESS_QUERY_LIMITED_INFORMATION, false, pid)
 	if err != nil {
 		fmt.Printf("zombie-guard pid=%d: OpenProcess failed (%v) — process may already be dead, sweeping orphan handles\n", pid, err)
 		ForceKillZombieD2R(nil)
-		return
+		return true // can't open => can't be alive => treat as reaped
 	}
 	defer windows.CloseHandle(handle)
 
+	terminateOK := true
 	if terr := windows.TerminateProcess(handle, 1); terr != nil {
 		fmt.Printf("zombie-guard pid=%d: TerminateProcess err=%v (continuing to wait)\n", pid, terr)
+		terminateOK = false
 	}
 
 	waitRes, _ := windows.WaitForSingleObject(handle, 5000)
@@ -322,17 +330,37 @@ func KillProcessAndReap(pid uint32) {
 	if closed, zombies := ForceKillZombieD2R(nil); closed > 0 || zombies > 0 {
 		fmt.Printf("zombie-guard pid=%d: post-terminate sweep closed=%d zombies=%d\n", pid, closed, zombies)
 	}
+
+	// Return value reflects whether the process is verifiably dead at return:
+	//   - TerminateProcess succeeded   => true (assumed reaped)
+	//   - TerminateProcess refused but final GetExitCodeProcess shows the
+	//     process exited (any code != STILL_ACTIVE) => true (D2R died on its
+	//     own — GPU init self-exit etc., NOT a zombie)
+	//   - TerminateProcess refused AND process still STILL_ACTIVE => false
+	//     (zombie cascade incoming — caller should abort retry)
+	if !terminateOK {
+		var finalExit uint32 = STILL_ACTIVE
+		_ = windows.GetExitCodeProcess(handle, &finalExit)
+		if finalExit == STILL_ACTIVE {
+			fmt.Printf("zombie-guard pid=%d: PROCESS STILL ALIVE after terminate refused + wait + sweep (Arxan block?) — caller should abort retry to avoid VM saturation\n", pid)
+			return false
+		}
+		fmt.Printf("zombie-guard pid=%d: TerminateProcess refused but process self-exited code=0x%x — not a zombie, retry OK\n", pid, finalExit)
+	}
+	return true
 }
 
 // closeWindowAndTerminateProcess closes the GPU error dialog (best-effort) and
-// then hard-kills + reaps the D2R process via KillProcessAndReap.
-func closeWindowAndTerminateProcess(hwnd windows.HWND, pid uint32) {
+// then hard-kills + reaps the D2R process via KillProcessAndReap. Returns true
+// if the process is verifiably dead at return; false (Arxan blocked terminate)
+// signals the GPU retry caller to abort instead of spawning another D2R.
+func closeWindowAndTerminateProcess(hwnd windows.HWND, pid uint32) bool {
 	const WM_CLOSE = 0x0010
 	if hwnd != 0 {
 		win.SendMessage(win.HWND(hwnd), WM_CLOSE, 0, 0)
 		time.Sleep(500 * time.Millisecond)
 	}
-	KillProcessAndReap(pid)
+	return KillProcessAndReap(pid)
 }
 
 func StartGame(username string, password string, authmethod string, authToken string, realm string, arguments string, useCustomSettings bool) (uint32, win.HWND, error) {
@@ -457,6 +485,14 @@ func StartGame(username string, password string, authmethod string, authToken st
 	startGameMu.Lock()
 	defer startGameMu.Unlock()
 
+	// Consecutive zombie-guard failures (process refused to terminate even
+	// after TerminateProcess + WaitForSingleObject + sweep). Arxan is the
+	// canonical cause. If we see this N times in a row we MUST abort the
+	// retry — each failed attempt leaves an undying D2R pinning vGPU, and
+	// the next cmd.Start drives the cascade that exhausts the VM.
+	consecutiveReapFail := 0
+	const maxConsecutiveReapFail = 3
+
 	// Start the game with retry logic for GPU initialization errors
 	for attempt := 0; attempt < maxGPURetries; attempt++ {
 		cmd := exec.Command(config.App.AppPath+"\\"+utils.GameExeName(), fullArgs...)
@@ -491,7 +527,15 @@ func StartGame(username string, password string, authmethod string, authToken st
 				// before the kernel reaps EPROCESS; the next cmd.Start would
 				// then race the dying D2R for vGPU and add another zombie.
 				if cmd.Process != nil {
-					KillProcessAndReap(uint32(cmd.Process.Pid))
+					if !KillProcessAndReap(uint32(cmd.Process.Pid)) {
+						consecutiveReapFail++
+						if consecutiveReapFail >= maxConsecutiveReapFail {
+							cmd.Process.Release()
+							return 0, 0, fmt.Errorf("zombie-guard: %d consecutive D2R instances refused to terminate (Arxan PROCESS_TERMINATE block?) — aborting retry to prevent VM starvation; REBOOT VM", consecutiveReapFail)
+						}
+					} else {
+						consecutiveReapFail = 0
+					}
 					cmd.Process.Release()
 				}
 				fmt.Printf("D2R window not found after 60s (attempt %d/%d), retrying...\n", attempt+1, maxGPURetries)
@@ -516,7 +560,14 @@ func StartGame(username string, password string, authmethod string, authToken st
 			if attempt >= 16 { gpuRetryDelay = 20 * time.Second }
 			if attempt >= 30 { gpuRetryDelay = 30 * time.Second }
 			fmt.Printf("GPU initialization error detected (attempt %d/%d), retrying in %v...\n", attempt+1, maxGPURetries, gpuRetryDelay)
-			closeWindowAndTerminateProcess(foundHwnd, uint32(cmd.Process.Pid))
+			if !closeWindowAndTerminateProcess(foundHwnd, uint32(cmd.Process.Pid)) {
+				consecutiveReapFail++
+				if consecutiveReapFail >= maxConsecutiveReapFail {
+					return 0, 0, fmt.Errorf("zombie-guard: %d consecutive D2R instances refused to terminate after GPU init failure (Arxan PROCESS_TERMINATE block?) — aborting retry to prevent VM starvation; REBOOT VM", consecutiveReapFail)
+				}
+			} else {
+				consecutiveReapFail = 0
+			}
 			time.Sleep(gpuRetryDelay)
 			continue // Retry
 		}

@@ -1,5 +1,9 @@
 package memory
 
+import (
+	"log"
+)
+
 type Offset struct {
 	GameData                    uintptr
 	UnitTable                   uintptr
@@ -25,7 +29,27 @@ type Offset struct {
 	LastGamePassword            uintptr
 }
 
-func calculateOffsets(_ *Process) Offset {
+func calculateOffsets(p *Process) Offset {
+	// Per-build baked offsets path (mirrors GID's precomputed Rdata-blob
+	// strategy). On a known D2R build we skip the legacy hardcoded values
+	// and use the table in baked_offsets.go — eliminates any "constant at
+	// known offset" signature from our binary for that build.
+	//
+	// Logs the hash on every startup so a new D2R release can be added to
+	// bakedOffsets after one offset_resolver run.
+	if p != nil && p.pid != 0 {
+		if baked, hash, ok := LookupBakedOffsets(p.pid); ok {
+			log.Printf("offsets: using baked table for D2R build hash=%s", hash[:16])
+			return baked
+		} else if hash != "" {
+			log.Printf("offsets: D2R build hash=%s NOT in baked table — using fallback hardcoded values; add this hash to bakedOffsets after offset_resolver verify", hash[:16])
+		} else {
+			log.Printf("offsets: D2RBuildHash failed (pid=%d) — using fallback hardcoded values", p.pid)
+		}
+	} else {
+		log.Printf("offsets: process nil or pid 0 — using fallback hardcoded values")
+	}
+
 	// D2R patch 2026-04-02 — offsets from scanutil + computed delta (-0x2F78)
 	unitTableOffset := uintptr(0x1EA73D0)
 	uiOffsetPtr := uintptr(0x1EB70CA)                 // computed: old - 0x2F78

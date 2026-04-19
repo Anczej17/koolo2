@@ -54,8 +54,14 @@ func (sr *SnapshotReader) Tick() uint64 {
 
 // Magic returns the header magic — should match presenter.SnapMagic once
 // CmdSnapshotInit has been dispatched. Useful for sanity checks.
+//
+// Rmod publishes magic XORed with the per-session key the bot wrote at
+// OffSnapXorKey before init (0 = plain, backward compat). We XOR back here
+// so callers see the canonical SnapMagic regardless.
 func (sr *SnapshotReader) Magic() uint32 {
-	return atomicLoadU32(sr.base, presenter.OffSnapMagic)
+	raw := atomicLoadU32(sr.base, presenter.OffSnapMagic)
+	key := atomicLoadU32(sr.base, presenter.OffSnapXorKey)
+	return raw ^ key
 }
 
 // Version returns the snapshot layout version (Phase A = 1).
@@ -243,7 +249,20 @@ func (sr *SnapshotReader) ReadStringFromMemory(va uintptr, n uint) string {
 //
 // `baseShm` is the bot-side mapped SHM (unsafe.Pointer). `d2rBase` is the
 // resolved D2R.exe module base. `off` is the same Offset struct Process uses.
+//
+// Also writes a per-boot non-zero u32 XOR key at OffSnapXorKey so rmod can
+// anti-fingerprint the SNAP magic header (see protocol.go OffSnapXorKey).
 func WriteInitOffsets(baseShm unsafe.Pointer, d2rBase uint64, off Offset) {
+	// Per-session XOR key — derive from time + d2rBase so it's non-zero,
+	// session-unique, and changes across process launches. Low bit forced to 1
+	// so the key is always non-zero (zero would disable masking, which we
+	// don't want for live runs).
+	key := uint32(time.Now().UnixNano()) ^ uint32(d2rBase>>16) ^ 0xA5A5A5A5
+	if key == 0 {
+		key = 1
+	}
+	atomicStoreU32(baseShm, presenter.OffSnapXorKey, key)
+
 	atomicStoreU64(baseShm, presenter.OffSnapUnitTable, d2rBase+uint64(off.UnitTable))
 	atomicStoreU64(baseShm, presenter.OffSnapExpansion, d2rBase+uint64(off.Expansion))
 	atomicStoreU64(baseShm, presenter.OffSnapWaypointTable, d2rBase+uint64(off.WaypointTableOffset))
@@ -261,4 +280,7 @@ func atomicLoadU64(base unsafe.Pointer, offset uintptr) uint64 {
 }
 func atomicStoreU64(base unsafe.Pointer, offset uintptr, val uint64) {
 	atomic.StoreUint64((*uint64)(unsafe.Pointer(uintptr(base) + offset)), val)
+}
+func atomicStoreU32(base unsafe.Pointer, offset uintptr, val uint32) {
+	atomic.StoreUint32((*uint32)(unsafe.Pointer(uintptr(base) + offset)), val)
 }
