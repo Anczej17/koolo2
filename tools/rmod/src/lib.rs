@@ -5589,11 +5589,18 @@ unsafe fn dispatch_snapshot_init(shm: *mut SharedBuffer) {
     // OFF_SNAP_XOR_KEY (0 disables, keeping backward compat). Anti-fingerprint
     // for any in-D2R-process scanner that could anchor on the constant 'SNAP'
     // word in the mapped SHM view.
+    // All static header fields (magic / version / D2R base / flags) are
+    // XORed with the per-session key the bot pre-wrote at OFF_SNAP_XOR_KEY
+    // (0 disables, backward compat). Anti-fingerprint against any scanner
+    // that could anchor on constant values at fixed SHM offsets in the
+    // mapped view inside D2R. The 64-bit base uses the key both halves
+    // (key:key concat) so the mask covers the full word.
     let shm_u8 = shm as *mut u8;
     let xor_key = core::ptr::read_unaligned(shm_u8.add(OFF_SNAP_XOR_KEY) as *const u32);
+    let xor_key64: u64 = ((xor_key as u64) << 32) | (xor_key as u64);
     core::ptr::write_unaligned(shm_u8.add(OFF_SNAP_MAGIC) as *mut u32, SNAP_MAGIC ^ xor_key);
-    core::ptr::write_unaligned(shm_u8.add(OFF_SNAP_VERSION) as *mut u32, SNAP_VERSION_A);
-    core::ptr::write_unaligned(shm_u8.add(OFF_SNAP_D2R_BASE) as *mut u64, base as u64);
+    core::ptr::write_unaligned(shm_u8.add(OFF_SNAP_VERSION) as *mut u32, SNAP_VERSION_A ^ xor_key);
+    core::ptr::write_unaligned(shm_u8.add(OFF_SNAP_D2R_BASE) as *mut u64, (base as u64) ^ xor_key64);
     // Walker starts MINIMAL by default — the only stable shape under Arxan
     // as of 14:35 live (full scan with hardcoded R1..R4 reads or entity/
     // main-player sweeps trips count=55..338 AVs in seconds). Bot clears
@@ -5601,7 +5608,7 @@ unsafe fn dispatch_snapshot_init(shm: *mut SharedBuffer) {
     // lands (TimerQueue worker / GetTickCount hook / batched CMD_ROP_READ).
     core::ptr::write_unaligned(
         shm_u8.add(OFF_SNAP_FLAGS) as *mut u32,
-        SNAP_FLAG_ENABLED | SNAP_FLAG_WALKER_MINIMAL,
+        (SNAP_FLAG_ENABLED | SNAP_FLAG_WALKER_MINIMAL) ^ xor_key,
     );
 
     G_SNAPSHOT_ENABLED = true;
@@ -5938,9 +5945,14 @@ unsafe fn snapshot_walker_scan(shm: *mut SharedBuffer) {
     } // end `if !minimal` gate for B3 walkers + main player scan
 
     // Write header fields (magic/version/base already set by init).
+    // Per-tick FLAGS is XORed too so it follows the init-time mask
+    // (otherwise an in-D2R scanner would see the constant flag bits in
+    // plain on every tick refresh). REGION_COUNT/DATA_BYTES/LAST_RDTSC
+    // are inherently variable — masking them buys nothing.
+    let xor_key = core::ptr::read_unaligned(shm_u8.add(OFF_SNAP_XOR_KEY) as *const u32);
     core::ptr::write_unaligned(shm_u8.add(OFF_SNAP_REGION_COUNT) as *mut u32, regions as u32);
     core::ptr::write_unaligned(shm_u8.add(OFF_SNAP_DATA_BYTES) as *mut u32, cursor as u32);
-    core::ptr::write_unaligned(shm_u8.add(OFF_SNAP_FLAGS) as *mut u32, flags);
+    core::ptr::write_unaligned(shm_u8.add(OFF_SNAP_FLAGS) as *mut u32, flags ^ xor_key);
     core::ptr::write_unaligned(shm_u8.add(OFF_SNAP_LAST_RDTSC) as *mut u64, rdtsc_u64());
 
     // Bump tick counter last so bot sees a complete snapshot.

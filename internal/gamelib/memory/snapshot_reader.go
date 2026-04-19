@@ -65,13 +65,21 @@ func (sr *SnapshotReader) Magic() uint32 {
 }
 
 // Version returns the snapshot layout version (Phase A = 1).
+//
+// XORed with the per-session key like Magic — see comment on Magic().
 func (sr *SnapshotReader) Version() uint32 {
-	return atomicLoadU32(sr.base, presenter.OffSnapVersion)
+	raw := atomicLoadU32(sr.base, presenter.OffSnapVersion)
+	key := atomicLoadU32(sr.base, presenter.OffSnapXorKey)
+	return raw ^ key
 }
 
 // Flags returns the header flag bits (SnapFlagEnabled, SnapFlagMainPlayerFound, SnapFlagError).
+//
+// XORed with the per-session key like Magic — see comment on Magic().
 func (sr *SnapshotReader) Flags() uint32 {
-	return atomicLoadU32(sr.base, presenter.OffSnapFlags)
+	raw := atomicLoadU32(sr.base, presenter.OffSnapFlags)
+	key := atomicLoadU32(sr.base, presenter.OffSnapXorKey)
+	return raw ^ key
 }
 
 // RegionCount returns how many RegionEntry slots are populated in the current snapshot.
@@ -85,8 +93,12 @@ func (sr *SnapshotReader) DataBytes() uint32 {
 }
 
 // D2RBase returns the D2R.exe module base rmod resolved on init.
+//
+// XORed with key:key concat (high-half = low-half = key) per init-time mask.
 func (sr *SnapshotReader) D2RBase() uint64 {
-	return atomicLoadU64(sr.base, presenter.OffSnapD2RBase)
+	raw := atomicLoadU64(sr.base, presenter.OffSnapD2RBase)
+	key := uint64(atomicLoadU32(sr.base, presenter.OffSnapXorKey))
+	return raw ^ ((key << 32) | key)
 }
 
 // WaitForFirstTick blocks until `Tick() > 0` or `timeout` elapses. Per the
