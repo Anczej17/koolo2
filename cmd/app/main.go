@@ -159,6 +159,27 @@ func main() {
 		fmt.Fprintf(os.Stderr, "zombie_killer: closed=%d zombies=%d at startup\n", closed, zombies)
 	}
 
+	// Periodic background zombie sweep — catches D2R corpses that neither
+	// CrashDetector's 5 s watchdog nor the GPU-retry zombie-guard noticed
+	// (e.g. D2R child exiting without EnumWindows callback firing,
+	// handles leaked by a crashed sibling supervisor, etc.). 60 s cadence
+	// is slow enough that the cost is negligible (<1 ms per sweep of
+	// system-wide handle table when there are zero zombies to reap).
+	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				fmt.Fprintf(os.Stderr, "periodic zombie sweep goroutine panic: %v\n", r)
+			}
+		}()
+		ticker := time.NewTicker(60 * time.Second)
+		defer ticker.Stop()
+		for range ticker.C {
+			if closed, zombies := game.ForceKillZombieD2R(nil); zombies > 0 {
+				fmt.Fprintf(os.Stderr, "periodic zombie sweep: closed=%d zombies=%d\n", closed, zombies)
+			}
+		}
+	}()
+
 	err := config.Load()
 	if err != nil {
 		utils.ShowDialog("Error loading configuration", err.Error())

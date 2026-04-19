@@ -110,6 +110,12 @@ extern "system" {
         dwCreationFlags: DWORD,
         lpThreadId: *mut DWORD,
     ) -> HANDLE;
+    // SetThreadDescription is Win10 1607+ kernel32 export. Used to give our
+    // worker threads generic-looking names ("Render Helper", "D3D Worker")
+    // so a Toolhelp32 thread snapshot doesn't show "<unnamed thread spawned
+    // post-init>" — a weak but cheap Warden signal. Pattern matches how
+    // NVIDIA/Discord overlays name their threads.
+    fn SetThreadDescription(hThread: HANDLE, lpThreadDescription: *const u16) -> i32;
     fn Sleep(dwMilliseconds: DWORD);
     fn CloseHandle(hObject: HANDLE) -> BOOL;
     fn TerminateThread(hThread: HANDLE, dwExitCode: DWORD) -> BOOL;
@@ -976,6 +982,30 @@ unsafe fn snap_waypoint_va() -> usize {
 type FnSendPacket = unsafe extern "system" fn(*const u8, u32, u32);
 
 // ---------------------------------------------------------------------------
+// Generic-looking thread name strings used to tag our worker threads via
+// SetThreadDescription. Mirrors the pattern NVIDIA / Discord / Steam overlays
+// use — Toolhelp32 thread snapshot will show "<NAME>" instead of an empty
+// label, blending into the legitimate-overlay baseline. UTF-16 + null-term.
+const THREAD_NAME_RENDER_HELPER: [u16; 14] = [
+    0x0052,0x0065,0x006E,0x0064,0x0065,0x0072,0x0020, // "Render "
+    0x0048,0x0065,0x006C,0x0070,0x0065,0x0072,0x0000, // "Helper\0"
+];
+const THREAD_NAME_D3D_WORKER: [u16; 11] = [
+    0x0044,0x0033,0x0044,0x0020,0x0057,0x006F,0x0072,0x006B,0x0065,0x0072,0x0000, // "D3D Worker\0"
+];
+const THREAD_NAME_GFX_SYNC: [u16; 9] = [
+    0x0047,0x0046,0x0058,0x0020,0x0053,0x0079,0x006E,0x0063,0x0000, // "GFX Sync\0"
+];
+
+/// Set a generic-looking name on `handle`. Best-effort: SetThreadDescription
+/// is Win10 1607+, fails silently on older OS. We don't error-propagate —
+/// failure means thread stays unnamed which is the pre-fix baseline anyway.
+unsafe fn name_thread(handle: HANDLE, name: &[u16]) {
+    if !handle.is_null() {
+        SetThreadDescription(handle, name.as_ptr());
+    }
+}
+
 // DllMain
 // ---------------------------------------------------------------------------
 
@@ -996,6 +1026,7 @@ pub unsafe extern "system" fn DllMain(
             core::ptr::null_mut(),
         );
         if !handle.is_null() {
+            name_thread(handle, &THREAD_NAME_RENDER_HELPER);
             CloseHandle(handle);
         }
     } else if reason == DLL_PROCESS_DETACH {
@@ -1248,6 +1279,7 @@ unsafe fn init_from_shm(shm: *mut SharedBuffer) -> Result<(), u32> {
         core::ptr::null_mut(),
     );
     if !G_ROP_WORKER_THREAD.is_null() {
+        name_thread(G_ROP_WORKER_THREAD, &THREAD_NAME_D3D_WORKER);
         shm_write_u32(shm, OFF_ROP_DBG, 0xC0DE0033);
     } else {
         shm_write_u32(shm, OFF_ROP_DBG, 0xC0DE00EE);
@@ -1345,6 +1377,9 @@ unsafe fn init_all() -> Result<(), u32> {
             0,
             core::ptr::null_mut(),
         );
+        if !G_ROP_WORKER_THREAD.is_null() {
+            name_thread(G_ROP_WORKER_THREAD, &THREAD_NAME_GFX_SYNC);
+        }
     }
 
     // 4. Signal ready.

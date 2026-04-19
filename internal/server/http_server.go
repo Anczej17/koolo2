@@ -1005,6 +1005,7 @@ func (s *HttpServer) Listen(port int) error {
 	http.HandleFunc("/debug/read-trace-enable", s.debugReadTraceEnable)
 	http.HandleFunc("/debug/dispatch-ping", s.debugDispatchPing)
 	http.HandleFunc("/debug/handle-audit", s.debugHandleAudit)
+	http.HandleFunc("/debug/d2rhash", s.debugD2RHash)
 	http.HandleFunc("/debug/writemem", s.debugWriteMem)
 	http.HandleFunc("/debug/memdiff", s.debugMemDiff)
 	http.HandleFunc("/debug/dumprange", s.debugDumpRange)
@@ -8199,4 +8200,38 @@ func (s *HttpServer) debugHandleAudit(w http.ResponseWriter, r *http.Request) {
 		proc.HandleOpen(),
 		ctx.GameReader.ReaderSource(),
 	)
+}
+
+// debugD2RHash returns the SHA256 first-1MB hash of D2R.exe + whether that
+// hash is in the bakedOffsets table. Used to (a) capture the hash for new
+// D2R releases without scraping log lines, (b) sanity-check that the bot
+// is using baked offsets vs the legacy hardcoded fallback path.
+func (s *HttpServer) debugD2RHash(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+
+	character := r.URL.Query().Get("character")
+	if character == "" {
+		w.WriteHeader(http.StatusBadRequest)
+		fmt.Fprintf(w, `{"error":"missing character parameter"}`)
+		return
+	}
+
+	ctx := s.manager.GetContext(character)
+	if ctx == nil || ctx.GameReader == nil {
+		w.WriteHeader(http.StatusServiceUnavailable)
+		fmt.Fprintf(w, `{"error":"no running supervisor for character %s"}`, character)
+		return
+	}
+
+	pid := ctx.GameReader.Process.PID()
+	hash, err := memory.D2RBuildHash(pid)
+	if err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		fmt.Fprintf(w, `{"error":%q,"pid":%d}`, err.Error(), pid)
+		return
+	}
+	_, _, baked := memory.LookupBakedOffsets(pid)
+	fmt.Fprintf(w, `{"pid":%d,"d2r_build_hash":%q,"baked":%v,"hint":%q}`,
+		pid, hash, baked,
+		"if baked=false, copy d2r_build_hash into bakedOffsets map in internal/gamelib/memory/baked_offsets.go and re-run offset_resolver to fill in the Offset values")
 }
