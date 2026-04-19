@@ -23,6 +23,9 @@ var Patterns = map[string][]PatternDef{
 	"UnitTable": {
 		{"48 63 C1 48 8D 0D ?? ?? ?? ?? 48 C1 E0 0A", 6,
 			"MOVSXD RAX,ECX; LEA RCX,[rip+disp]; SHL RAX,0xA"},
+		// D2R 3.0.92198 alt: paired LEA RDI/RSI loading UnitTable + ServerUnitTable.
+		{"48 8D 3D ?? ?? ?? ?? 48 8D 35 ?? ?? ?? ?? 0F 1F 00 48 8B 0F 48 85 C9", 3,
+			"LEA RDI,[rip+disp]; LEA RSI,[rip+disp2]; NOP; MOV RCX,[RDI]; TEST RCX (paired unit/serverUnit load)"},
 	},
 	"Hover": {
 		{"8B C1 48 8D 0D ?? ?? ?? ?? 48 03 C0 80 3C C1", 5,
@@ -31,6 +34,10 @@ var Patterns = map[string][]PatternDef{
 			"LEA RDX,[rip+disp]; MOV EAX,ECX; MOV [rip+...],EBX"},
 		{"40 57 48 83 EC 20 8B C1 48 8D 0D ?? ?? ?? ?? 48 03 C0 80 3C C1 00", 11,
 			"PUSH RDI; SUB RSP; MOV EAX,ECX; LEA RCX,[rip+disp]; ADD; CMP (HoverAccessor2)"},
+		// D2R 3.0.92198 alt: Hover array destructor with stride=0x10 (distinguishes from sibling destructors
+		// at stride 0x04/0x08/0x3F). Function prologue + LEA RDI,[rip+Hover] + ADD RDI,0x10 loop.
+		{"48 89 5C 24 08 57 48 83 EC 20 48 8D 3D ?? ?? ?? ?? BB 08 00 00 00 48 8B CF E8 ?? ?? ?? ?? 48 83 C7 10", 13,
+			"MOV [RSP+8],RBX; PUSH RDI; SUB RSP; LEA RDI,[rip+disp]; MOV EBX,8; MOV RCX,RDI; CALL; ADD RDI,0x10 (Hover dtor stride 0x10)"},
 	},
 	"Expansion": {
 		{"75 3B 48 8B 05 ?? ?? ?? ?? 8B 48 14", 5,
@@ -55,6 +62,10 @@ var Patterns = map[string][]PatternDef{
 	"WidgetStates": {
 		{"74 3D 48 8B 0D ?? ?? ?? ?? 48 89 5C 24", 5,
 			"JZ +0x3D; MOV RCX,[rip+disp]; MOV [RSP+...]"},
+		// D2R 3.0.92198 alt: MOV RCX,[rip+WidgetStates] followed by MOV RDX,<immediate QWORD cookie>
+		// and CALL + TEST AL/R11B. The 0x12 82 C0 9C 8E CF D7 F2 cookie is build-stable anchor.
+		{"48 8B 0D ?? ?? ?? ?? 48 BA 12 82 C0 9C 8E CF D7 F2 E8 ?? ?? ?? ?? 84 C0 74 0F 45", 3,
+			"MOV RCX,[rip+disp]; MOV RDX,<QWORD const>; CALL; TEST AL; JZ; TEST R11B (widget lookup w/ cookie)"},
 	},
 	"FPS": {
 		{"89 05 ?? ?? ?? ?? 8B C7 89 05", 2,
@@ -69,14 +80,24 @@ var Patterns = map[string][]PatternDef{
 			"CMP byte [rip+disp],0x00; JNZ; MOV RAX,[RBX]; LEA RDX,[RSP+xx]"},
 		{"0F 94 05 ?? ?? ?? ?? B9 0A 00 00 00", 3,
 			"SETZ [rip+disp]; MOV ECX,0xA"},
+		// D2R 3.0.92198 alt: CMP byte [rip+UI],0; JNZ long; MOV ECX,[rip+disp2]; CALL; MOV RCX,RAX.
+		{"80 3D ?? ?? ?? ?? 00 0F 85 ?? ?? ?? ?? 8B 0D ?? ?? ?? ?? E8 ?? ?? ?? ?? 48 8B C8", 2,
+			"CMP byte [rip+disp],0x00; JNZ long; MOV ECX,[rip+disp2]; CALL; MOV RCX,RAX (UI enable check)"},
 	},
 	"WaypointTable": {
 		{"48 8B 1D ?? ?? ?? ?? 48 85 DB 74 ?? 0F B7 03", 3,
 			"MOV RBX,[rip+disp]; TEST RBX,RBX; JZ; MOVZX EAX,word[RBX]"},
+		// D2R 3.0.92198 alt: MOV RDI,[rip+WaypointTable] followed by MOV R11,R13; MOV EBX,[rip+...].
+		{"48 8B 3D ?? ?? ?? ?? 4D 8B DD 8B 1D", 3,
+			"MOV RDI,[rip+disp]; MOV R11,R13; MOV EBX,[rip+disp2] (wp table load)"},
 	},
 	"KeyBindings": {
 		{"48 8D 05 ?? ?? ?? ?? 8B D7 4C 8D 05", 3,
 			"LEA RAX,[rip+disp]; MOV EDX,EDI; LEA R8,..."},
+		// D2R 3.0.92198 alt: LEA RAX,[rip+KeyBindings]; MOV EDX,EDI; LEA R8,[rip+skills]; NOP word;
+		// CMP [RAX],BP; JZ. Primary-shape extended with JZ-16 trailing that only KeyBindings has.
+		{"48 8D 05 ?? ?? ?? ?? 8B D7 4C 8D 05 ?? ?? ?? ?? 66 90 66 39 28", 3,
+			"LEA RAX,[rip+disp]; MOV EDX,EDI; LEA R8,[rip+disp2]; NOP word; CMP [RAX],BP (KeyBindings binary search)"},
 	},
 	"QuestInfo": {
 		{"80 FF 06 75 ?? 48 8B 05 ?? ?? ?? ?? 41 0F 10 00 48 8B 08 0F 11 01", 8,
@@ -97,6 +118,10 @@ var Patterns = map[string][]PatternDef{
 	"SendPacket": {
 		{"E8 ?? ?? ?? ?? 0F B6 85 ?? ?? ?? ?? 48 03 F0", 1,
 			"CALL rel32; MOVZX EAX,byte [RBP+xx]; ADD RSI,RAX"},
+		// D2R 3.0.92198 alt: LEA RAX,[RBP-0x20]; MOV [RBP-0x40],RAX; CALL SendPacket; IMUL RCX,[RBP-0x78],0x2E8.
+		// Unique preceding sequence disambiguates from 3 other CALL sites that resolve to the same target.
+		{"48 8D 45 E0 48 89 45 C0 E8 ?? ?? ?? ?? 48 69 4D 88 E8 02 00 00 44 8B 44 24 60", 9,
+			"LEA RAX,[RBP-0x20]; MOV [RBP-0x40],RAX; CALL SendPacket; IMUL RCX,[RBP-0x78],0x2E8; MOV R8D,[RSP+0x60]"},
 	},
 	"MouseXY": {
 		{"8B 1D ?? ?? ?? ?? FF C8 33 FF 85 DB 79 ?? 8B DF", 2,
@@ -113,11 +138,19 @@ var Patterns = map[string][]PatternDef{
 			"JZ; MOV RAX,[rip+disp]; XORPS; TEST; JZ; MOVZX [+0xB9] (s_panelManager)"},
 		{"0F 84 ?? ?? ?? ?? 48 8B 05 ?? ?? ?? ?? 0F 57 C9", 9,
 			"JZ; MOV RAX,[rip+disp]; XORPS XMM1,XMM1 (s_panelManager relaxed)"},
+		// D2R 3.0.92198 alt: MOV RAX,[rip+GameManager]; XORPS XMM1,XMM1; CMOVG R9,RCX; MOV [RSP+0x33],CL;
+		// TEST RAX; JZ; MOVZX [RAX+0xB9]. The CMOVG+MOV [RSP+0x33] idiom is unique to s_panelManager.
+		{"48 8B 05 ?? ?? ?? ?? 0F 57 C9 41 0F 4F C9 88 4C 24 33 48 85 C0 74 0A 44 0F B6 88 B9 00 00 00", 3,
+			"MOV RAX,[rip+disp]; XORPS; CMOVG R9,RCX; MOV [RSP+0x33],CL; TEST; JZ; MOVZX [+0xB9] (s_panelManager)"},
 	},
 	"HpUpdateFn": {
 		// operandOffset = -1 means the match start IS the RVA (no RIP deref).
 		{"8B 81 E8 06 00 00 3B 81 EC 06 00 00 44 8B 81 C0 09 00 00", -1,
 			"MOV EAX,[RCX+0x6E8]; CMP [RCX+0x6EC]; MOV R8D,[RCX+0x9C0]"},
+		// D2R 3.0.92198 alt: prologue + new first-body instruction sequence.
+		// PUSH RDI; SUB RSP,0x30; MOV EAX,[RCX+0x6E8]; MOV RDI,RCX; MOV EDX,[RCX+0xA88].
+		{"40 57 48 83 EC 30 8B 81 E8 06 00 00 48 8B F9 8B 91 88 0A 00 00", -1,
+			"PUSH RDI; SUB RSP,0x30; MOV EAX,[RCX+0x6E8]; MOV RDI,RCX; MOV EDX,[RCX+0xA88] (HP update fn entry)"},
 	},
 	"PlayerPos": {
 		{"8B 05 ?? ?? ?? ?? 8D 34 80", 2,
@@ -146,10 +179,18 @@ var Patterns = map[string][]PatternDef{
 	"NetworkMgr": {
 		{"48 8B 05 ?? ?? ?? ?? 48 8D 0D ?? ?? ?? ?? FF 50 08 41 B9 ?? ?? ?? ?? 41 8D 56 01 45 33 C0", 3,
 			"MOV RAX,[rip+vtable]; LEA RCX,[rip+this]; CALL [RAX+8]; (sgptNetworkMgr)"},
+		// D2R 3.0.92198 alt: same vtable+this call shape, different caller frame:
+		// MOV RAX,[rip+vtable]; LEA RCX,[rip+this]; CALL [RAX+8]; CMP [RSP+0x58],0.
+		{"48 8B 05 ?? ?? ?? ?? 48 8D 0D ?? ?? ?? ?? FF 50 08 48 83 7C 24 58 00", 3,
+			"MOV RAX,[rip+vtable]; LEA RCX,[rip+this]; CALL [RAX+8]; CMP [RSP+0x58],0 (sgptNetworkMgr caller2)"},
 	},
 	"AutomapGrid": {
 		{"0F B6 0D ?? ?? ?? ?? 8B D3 E8 ?? ?? ?? ?? 48 85 C0 0F 84 ?? ?? ?? ?? F6 40 27 02", 3,
 			"MOVZX ECX,byte [rip+disp]; MOV EDX,EBX; CALL; TEST RAX; JZ; TEST [RAX+0x27],0x02"},
+		// D2R 3.0.92198 alt: idiomatic "check returned byte==SOMETHING" without the RAX test +0x27.
+		// MOVZX ECX,byte [rip+disp]; MOV EDX,EBX; CALL; CMP AL,imm8.
+		{"0F B6 0D ?? ?? ?? ?? 8B D3 E8 ?? ?? ?? ?? 3C", 3,
+			"MOVZX ECX,byte [rip+disp]; MOV EDX,EBX; CALL; CMP AL,imm8 (new nGridSize check shape)"},
 	},
 	"ActiveSessionMgr": {
 		{"0A 55 01 48 8B 05 ?? ?? ?? ?? 48 85 C0 74 ?? 48 83 78 08 00 74", 6,
@@ -158,6 +199,10 @@ var Patterns = map[string][]PatternDef{
 	"ConnectionState": {
 		{"0F 57 C9 0F 2F C1 0F 97 C1 84 C9 74 ?? 48 8B 0D ?? ?? ?? ??", 16,
 			"XORPS; COMISS; SETNBE; TEST; JZ; MOV RCX,[rip+disp] (g_ConnectionState)"},
+		// D2R 3.0.92198 alt: primary is ambiguous (3 identical call sites, all resolving to the same RVA).
+		// Extend with the specific JZ-0x2C trailing followed by CALL [rip+vtable]; MOV EAX,[RSP+0x28].
+		{"0F 57 C9 0F 2F C1 0F 97 C1 84 C9 74 2C 48 8B 0D ?? ?? ?? ?? 48 8D 54 24 20 FF 15 ?? ?? ?? ?? 8B 44 24 28", 16,
+			"XORPS; COMISS; SETNBE; TEST; JZ +0x2C; MOV RCX,[rip+disp]; LEA RDX,[RSP+0x20]; CALL [rip]; MOV EAX,[RSP+0x28]"},
 	},
 }
 

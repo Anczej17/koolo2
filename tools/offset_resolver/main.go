@@ -62,11 +62,15 @@ func main() {
 		onlyFlag    string
 		jsonPath    string
 		goPath      string
+		filePath    string
+		dumpTextPath string
 		verboseFlag bool
 	)
 	flag.StringVar(&onlyFlag, "only", "", "comma-separated pattern names to scan (default: all)")
 	flag.StringVar(&jsonPath, "json", "", "write JSON results to this path")
 	flag.StringVar(&goPath, "go", "", "write a Go snippet with the resolved Offset struct to this path")
+	flag.StringVar(&filePath, "file", "", "scan D2R.exe from disk instead of attaching to running process (offline mode for CI/buildbox)")
+	flag.StringVar(&dumpTextPath, "dump-text", "", "after attaching, write raw .text section bytes to this file (skip pattern scan if no other output requested) — for offline pattern analysis")
 	flag.BoolVar(&verboseFlag, "verbose", false, "log each scan step to stderr")
 	flag.Parse()
 
@@ -78,15 +82,48 @@ func main() {
 		}
 	}
 
-	r, err := newResolver(verboseFlag)
+	var r *resolver
+	var err error
+	if filePath != "" {
+		r, err = newResolverFromFile(filePath, verboseFlag)
+	} else {
+		r, err = newResolver(verboseFlag)
+	}
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "FATAL: %v\n", err)
 		os.Exit(2)
 	}
-	defer windows.CloseHandle(r.proc)
+	if r.proc != 0 {
+		defer windows.CloseHandle(r.proc)
+	}
 
-	fmt.Printf("D2R attached: pid=%d base=0x%X size=0x%X textBytesRead=%d\n",
-		r.pid, r.base, r.size, len(r.textBytes))
+	if filePath != "" {
+		fmt.Printf("D2R offline: file=%s base=0x%X size=0x%X textBytesRead=%d\n",
+			filePath, r.base, r.size, len(r.textBytes))
+	} else {
+		fmt.Printf("D2R attached: pid=%d base=0x%X size=0x%X textBytesRead=%d\n",
+			r.pid, r.base, r.size, len(r.textBytes))
+	}
+
+	// Dump raw .text bytes early so a failed scan still leaves the dump.
+	// textVA is the RVA of the dumped bytes inside D2R.exe (offset 0 in the
+	// dump file = D2R.base + textVA). Useful for offline pattern analysis.
+	if dumpTextPath != "" {
+		header := fmt.Sprintf("# .text dump for D2R build base=0x%X size=0x%X textVA=0x%X textLen=%d\n",
+			r.base, r.size, r.textVA, len(r.textBytes))
+		if err := os.WriteFile(dumpTextPath+".meta", []byte(header), 0644); err != nil {
+			fmt.Fprintf(os.Stderr, "WARN: write dump meta failed: %v\n", err)
+		}
+		if err := os.WriteFile(dumpTextPath, r.textBytes, 0644); err != nil {
+			fmt.Fprintf(os.Stderr, "FATAL: write dump failed: %v\n", err)
+			os.Exit(2)
+		}
+		fmt.Printf("Wrote %s (%d bytes) + %s.meta\n", dumpTextPath, len(r.textBytes), dumpTextPath)
+		// If only -dump-text was requested, skip the scan to avoid noise.
+		if jsonPath == "" && goPath == "" && onlyFlag == "" {
+			return
+		}
+	}
 
 	names := make([]string, 0, len(Patterns))
 	for name := range Patterns {
@@ -170,6 +207,80 @@ func newResolver(verbose bool) (*resolver, error) {
 		return nil, fmt.Errorf("read .text: %w", err)
 	}
 	return r, nil
+}
+
+// newResolverFromFile builds a resolver that reads D2R.exe's .text section
+// directly from disk (no running process needed).
+//
+// IMPORTANT LIMITATION: Arxan packs/encrypts D2R's runtime .text — the bytes
+// on disk are the Arxan unpacker + encrypted code blob, NOT the game's
+// real instructions. AOB patterns in patterns.go target the unpacked
+// runtime bytes; they will NOT match against the on-disk PE.
+//
+// This file-mode entry point is therefore only useful when scanning a
+// previously-captured RUNTIME memory dump of D2R (e.g. a Process Hacker
+// minidump, dumped after the game finished initialising). For a truly raw
+// D2R.exe from disk all patterns will MISS — use the attached-process mode
+// instead (the default, no -file flag).
+func newResolverFromFile(path string, verbose bool) (*resolver, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("open D2R.exe at %s: %w", path, err)
+	}
+	if len(data) < 0x400 || data[0] != 'M' || data[1] != 'Z' {
+		return nil, fmt.Errorf("not a valid PE image at %s", path)
+	}
+	peOff := binary.LittleEndian.Uint32(data[0x3C:0x40])
+	if int(peOff)+24 > len(data) {
+		return nil, fmt.Errorf("PE offset out of file")
+	}
+	numSections := binary.LittleEndian.Uint16(data[peOff+6 : peOff+8])
+	optHeaderSize := binary.LittleEndian.Uint16(data[peOff+20 : peOff+22])
+	// OptionalHeader for PE32+ has ImageBase at +24 (u64) and SizeOfImage at +56.
+	optHeaderOff := peOff + 24
+	if int(optHeaderOff)+int(optHeaderSize) > len(data) {
+		return nil, fmt.Errorf("optional header out of file")
+	}
+	imageBase := binary.LittleEndian.Uint64(data[optHeaderOff+24 : optHeaderOff+32])
+	sizeOfImage := binary.LittleEndian.Uint32(data[optHeaderOff+56 : optHeaderOff+60])
+
+	sectionTableOff := peOff + 24 + uint32(optHeaderSize)
+	if int(sectionTableOff)+40*int(numSections) > len(data) {
+		return nil, fmt.Errorf("section table out of file")
+	}
+
+	var textVA, textRawPtr, textRawSize uint32
+	for i := 0; i < int(numSections); i++ {
+		off := int(sectionTableOff) + 40*i
+		name := string(data[off : off+8])
+		name = strings.TrimRight(name, "\x00")
+		if name == ".text" {
+			textVA = binary.LittleEndian.Uint32(data[off+12 : off+16])
+			textRawSize = binary.LittleEndian.Uint32(data[off+16 : off+20])
+			textRawPtr = binary.LittleEndian.Uint32(data[off+20 : off+24])
+			break
+		}
+	}
+	if textRawSize == 0 {
+		return nil, fmt.Errorf(".text section not found in %s", path)
+	}
+	if int(textRawPtr)+int(textRawSize) > len(data) {
+		return nil, fmt.Errorf(".text raw bytes out of file: ptr=0x%X size=0x%X file=%d", textRawPtr, textRawSize, len(data))
+	}
+
+	textBytes := make([]byte, textRawSize)
+	copy(textBytes, data[textRawPtr:textRawPtr+textRawSize])
+
+	return &resolver{
+		proc:      0, // file mode — no handle
+		pid:       0, // unused
+		base:      uintptr(imageBase),
+		size:      sizeOfImage,
+		textBytes: textBytes,
+		textVA:    textVA,
+		results:   map[string]*ScanResult{},
+		verbose:   verbose,
+	}, nil
 }
 
 // findD2R enumerates processes until it finds one named "D2R.exe" and returns
