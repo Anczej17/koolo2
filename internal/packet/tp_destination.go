@@ -13,8 +13,13 @@ import "encoding/binary"
 //   action observed = 0x00000002 across all TP selects (waypoint + party TP).
 //
 // 0x43 wire format (13 B):
-//   [0x43][act:u32=0x00000001][arg:u32=0x00000001][trailer:u32=0xFFFFFFFF]
+//   [0x43][act:u32=0x00000001][arg:u32=0x00000001][trailer:u32=0x00000000]
 //   All fields constant in observed captures — fixed "travel confirm" marker.
+//
+// Trailer corrected 2026-04-19 from 0xFFFFFFFF → 0x00000000 per
+// CAPTURE_AUDIT_2026_04_19 sec 4.9 — live buf=1 mirror in
+// 05_waypoint_travel.json#9 shows zeros, not FFs. Functional impact likely
+// nil (server probably tolerates either) but matches wire byte-for-byte.
 
 type TpDestinationSelect struct {
 	Destination uint32
@@ -48,6 +53,6 @@ func (p *TpConfirmTravel) GetPayload() []byte {
 	buf[0] = 0x43
 	binary.LittleEndian.PutUint32(buf[1:5], 0x00000001)
 	binary.LittleEndian.PutUint32(buf[5:9], 0x00000001)
-	binary.LittleEndian.PutUint32(buf[9:13], 0xFFFFFFFF)
+	binary.LittleEndian.PutUint32(buf[9:13], 0x00000000)
 	return buf
 }

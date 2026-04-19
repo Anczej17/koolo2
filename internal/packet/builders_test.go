@@ -122,8 +122,8 @@ func TestNewTpConfirmTravel_0x43(t *testing.T) {
 	if binary.LittleEndian.Uint32(got[5:9]) != 1 {
 		t.Fatalf("0x43 arg: got %d want 1", binary.LittleEndian.Uint32(got[5:9]))
 	}
-	if binary.LittleEndian.Uint32(got[9:13]) != 0xFFFFFFFF {
-		t.Fatalf("0x43 trailer: got 0x%X want 0xFFFFFFFF", binary.LittleEndian.Uint32(got[9:13]))
+	if binary.LittleEndian.Uint32(got[9:13]) != 0x00000000 {
+		t.Fatalf("0x43 trailer: got 0x%X want 0x00000000 (live capture 04-19 audit)", binary.LittleEndian.Uint32(got[9:13]))
 	}
 }
 
