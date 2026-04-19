@@ -241,7 +241,16 @@ func NewProcessForPID(pid uint32) (*Process, error) {
 
 func (p *Process) Close() error {
 	StopChaffReader() // Layer 5: stop decoy goroutine before closing handle
-	return windows.CloseHandle(p.handler)
+	if p.handler == 0 {
+		return nil // already closed; idempotent
+	}
+	h := p.handler
+	p.handler = 0 // zero BEFORE CloseHandle so concurrent ReadBytesFromMemory
+	// in another goroutine sees 0 and short-circuits — prevents SIGSEGV in
+	// ntapi.ReadProcessMemory when stale handle gets used after close. The
+	// kernel will still reap the handle below; the zero just makes the Go-side
+	// state consistent with "this handle is gone".
+	return windows.CloseHandle(h)
 }
 
 // SetExternalSender installs an external packet-sending function (e.g. the
@@ -963,6 +972,19 @@ func (p *Process) ReadBytesFromMemory(address uintptr, size uint) []byte {
 		}
 	}
 	var data = make([]byte, size)
+	// Defensive: bail BEFORE syscall when handle was closed (zeroed by
+	// Process.Close) or never opened. Without this guard a stale-handle
+	// race between Close and a still-running RefreshGameData crashes the
+	// process via SIGSEGV inside the cgo syscall — Go's defer recover
+	// can't catch faults that happen below the syscall barrier. Returning
+	// zeros lets the caller see "no data" and decide what to do (typically
+	// the whole tick is reissued or supervisor restart kicks in).
+	if p.handler == 0 {
+		if traceOn {
+			p.readTrace.Record(address, uint32(size), ReadSourceRPM, ReadResultError, time.Since(traceStart))
+		}
+		return data // zero-filled
+	}
 	p.rpmReadBytesCalls.Add(1)
 	p.rpmBytesTotal.Add(uint64(size))
 	ntapi.ReadProcessMemory(p.handler, address, &data[0], uintptr(size))
