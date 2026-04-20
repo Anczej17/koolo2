@@ -984,6 +984,7 @@ func (s *HttpServer) Listen(port int) error {
 	http.HandleFunc("/debug/click", s.debugClick)
 	http.HandleFunc("/debug/hidclick", s.debugHIDClick)
 	http.HandleFunc("/debug/keypress-inproc", s.debugPressKeyInProcess)
+	http.HandleFunc("/debug/swap-test", s.debugSwapTest)
 	http.HandleFunc("/debug/walkpacket", s.debugWalkPacket)
 	http.HandleFunc("/debug/senduipacket-apc", s.debugSendUIPacketAPC)
 	http.HandleFunc("/debug/set-game-tid", s.debugSetGameTID)
@@ -5733,6 +5734,101 @@ func (s *HttpServer) debugPressKeyInProcess(w http.ResponseWriter, r *http.Reque
 		return
 	}
 	fmt.Fprintf(w, `{"ok":true,"vk":"0x%02X","hwnd":"0x%X"}`, vk, hwnd)
+}
+
+// debugSwapTest executes D2R's internal widget_toggle function (RVA 0x102220)
+// via CmdCallFnGT on the game thread, with scratch memory containing the
+// WeaponSwap action ID byte (0x97). This replicates what the game does when
+// the user presses W, MINUS the upstream dispatch table lookup.
+//
+// Per memory swap_handler_analysis.md: "Widget toggle via WriteMem = WORKS
+// — Hash map value byte flips". 04-12 verified 3 consecutive swaps via the
+// pattern: write 0x97 to scratch, call 0x102220(scratch). This endpoint
+// combines read-before, toggle, read-after so we can empirically see if
+// the HashMap value actually flips AND whether D2R's game logic reacts
+// (item pointer swap + stat recalc + auto 0x50 emit).
+//
+// Success criteria: ActiveWeaponSlot changes from 0 to 1 (or vice versa)
+// AND D2R stays alive 5s+. If items also swap visually — full chain.
+// If not — widget flip alone didn't trigger game logic (next step: call
+// state propagator 0x1022A0 too).
+//
+// Usage: GET /debug/swap-test?character=Blizzard
+func (s *HttpServer) debugSwapTest(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	character := r.URL.Query().Get("character")
+	c := s.manager.GetContext(character)
+	if c == nil {
+		c = s.firstActiveContext()
+	}
+	if c == nil || c.MemoryInjector == nil {
+		fmt.Fprintf(w, `{"error":"no context/memoryinjector"}`)
+		return
+	}
+	pres := c.MemoryInjector.GetPresenter()
+	if pres == nil {
+		fmt.Fprintf(w, `{"error":"no presenter — set ENABLE_DUAL_PRESENTER=1"}`)
+		return
+	}
+	base := c.GameReader.Process.ModuleBaseAddress()
+	if base == 0 {
+		fmt.Fprintf(w, `{"error":"no module base"}`)
+		return
+	}
+
+	// Mirror buffer is a safe writable scratch region (we already WPM 30B 0x50
+	// packets to mirror+0). Use mirror+0x80 for the action-ID byte so it does
+	// not overlap any in-flight packet.
+	const (
+		mirrorBufRVA uintptr = 0x1F51330
+		scratchOff   uintptr = 0x80
+		widgetToggleRVA uintptr = 0x102220
+	)
+	scratchAddr := base + mirrorBufRVA + scratchOff
+	toggleFn := base + widgetToggleRVA
+
+	// Pre-state.
+	preSlot := c.GameReader.GetActiveWeaponSlot()
+
+	// Write 0x97 action-ID byte to scratch.
+	if err := pres.WriteMem(scratchAddr, []byte{0x97}); err != nil {
+		fmt.Fprintf(w, `{"error":"WriteMem scratch failed: %s"}`, err.Error())
+		return
+	}
+
+	// Invoke widget_toggle on RENDER thread. Per memory
+	// project_weapon_swap_callfn_working 2026-04-12 this WORKS for 0x102220
+	// (HashMap byte flips). Game-thread APC (CallFnGameThread) is broken on
+	// current D2R 3.0.92198 (Arxan retaddr rotation corrupts GTC64 thunk —
+	// memory project_dual_buffer_breakthrough_2026_04_19_evening).
+	ret, err := pres.CallFn(toggleFn, scratchAddr)
+	if err != nil {
+		fmt.Fprintf(w, `{"error":"CallFn 0x102220 failed: %s","preSlot":%d}`, err.Error(), preSlot)
+		return
+	}
+
+	// Let game tick react for a few frames.
+	time.Sleep(500 * time.Millisecond)
+	c.RefreshGameData()
+
+	postSlot := c.GameReader.GetActiveWeaponSlot()
+	flipped := preSlot != postSlot
+	fmt.Fprintf(w,
+		`{"ok":true,"preSlot":%d,"postSlot":%d,"flipped":%t,"callRet":"0x%X","scratchAddr":"0x%X","toggleFn":"0x%X"}`,
+		preSlot, postSlot, flipped, ret,
+		scratchAddr, toggleFn)
+}
+
+// firstActiveContext returns the first supervisor context with a loaded
+// memory injector. Used by /debug endpoints when character= is omitted.
+func (s *HttpServer) firstActiveContext() *ctx.Context {
+	for _, name := range s.manager.AvailableSupervisors() {
+		c := s.manager.GetContext(name)
+		if c != nil {
+			return c
+		}
+	}
+	return nil
 }
 
 func (s *HttpServer) debugSendUIPacketAPC(w http.ResponseWriter, r *http.Request) {
