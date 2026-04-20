@@ -268,6 +268,10 @@ type CharacterCfg struct {
 		UseForTeleport            bool `yaml:"useForTeleport"`
 		UseForEntitySkills        bool `yaml:"useForEntitySkills"`
 		UseForNPCInteraction      bool `yaml:"useForNPCInteraction"`
+		// DEPRECATED 2026-04-20: UseForWeaponSwap is a no-op.
+		// FPB-A (commit 2cecffc) removed the HID fallback for weapon swap
+		// entirely — 0x50 is always dispatched as a packet now. Flag kept in
+		// struct for YAML backward compatibility; removal planned for Phase 7.
 		UseForWeaponSwap          bool `yaml:"useForWeaponSwap"`
 		UseForMovement            bool `yaml:"useForMovement"`
 		UseForBuySell             bool `yaml:"useForBuySell"`
@@ -275,8 +279,16 @@ type CharacterCfg struct {
 		UseForGamble              bool `yaml:"useForGamble"`
 		UseForRepair              bool `yaml:"useForRepair"`
 		UseForIdentify            bool `yaml:"useForIdentify"`
+		// UseForPotionUse gates NewUsePotion 0x32 sub-form (belt-slot drink).
+		// Wiring pending Phase 4b — struct field reserved; flag currently
+		// not consulted anywhere. Enable only after live test verifies
+		// 0x32 potion-drink doesn't crash D2R (HID right-click fallback
+		// is the current production path).
 		UseForPotionUse           bool `yaml:"useForPotionUse"`
 		UseForStashManagement     bool `yaml:"useForStashManagement"`
+		// UseForInventoryManagement gates 0x18/0x19/0x54 grid-coord inventory
+		// moves (vs HID shift/ctrl click). Wiring pending Phase 4b — see
+		// HID_TO_PACKET_AUDIT_2026_04_19.md for the target sites.
 		UseForInventoryManagement bool `yaml:"useForInventoryManagement"`
 		// Phase 9 EXPERIMENTAL — in-process click via rmod.dll PostMessageW.
 		// DEFAULT FALSE. The canonical movement path is HID (game/mouse.go),

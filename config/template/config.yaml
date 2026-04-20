@@ -13,18 +13,30 @@ hidePortraits: true  # Set to true to hide mercenary and other players portraits
 enableCubeRecipes: true # Enable cubing of flawlesses and tokens
 stopLevelingAt: 0
 
-# Packet casting options (ADVANCED - disabled by default for safety)
-# Packet casting sends network packets directly instead of simulating mouse clicks
-# Mouse clicking is generally safer and less detectable
+# Packet casting options
+# When enabled, sends network packets directly instead of simulating mouse
+# clicks. Each flag is wired to a specific packet builder; see
+# internal/packet/SPEC.md for opcode-level detail. ALL default false — turn
+# on per-flag after verifying the packet format holds for your D2R build
+# (Phase 5 live test matrix).
 packetCasting:
-  useForEntranceInteraction: false # Use packets for entering dungeons/levels
-  useForItemPickup: false          # Use packets for picking up items
-  useForTpInteraction: false       # Use packets for using town portals
-  useForTeleport: false            # Use packets for teleport casting
-  useForEntitySkills: false        # Use packets for skills targeting entities
-  useForNPCInteraction: false      # Use packets for NPC interaction
-  useForWeaponSwap: false          # Use packets for weapon slot swap
-  useForMovement: false            # Use packets for walk/run movement
+  useForEntranceInteraction: false # 0x40 — cave/dungeon entrance click
+  useForItemPickup: false          # 0x16 — ground item pickup
+  useForTpInteraction: false       # 0x41 — town portal open/click
+  useForTeleport: false            # 0x0C — sorc teleport cast
+  useForEntitySkills: false        # 0x0D — right-click skill on entity
+  useForNPCInteraction: false      # 0x4D + 0x2F — pre-interact + chat open
+  useForWeaponSwap: false          # DEPRECATED — 0x50 is always packet-only after FPB-A; flag kept for YAML compatibility, behaves as no-op
+  useForMovement: false            # 0x04 — walk/run toward entity
+  useForBuySell: false             # 0x32 buy / 0x33 sell — needs vendor dialog open
+  useForCubeTransmute: false       # 0x54 — Horadric Cube transmute
+  useForGamble: false              # 0x32 gamble sub-form
+  useForRepair: false              # 0x35 — repair all items
+  useForIdentify: false            # 0x26 (scroll/tome) or 0x5C (Cain)
+  useForPotionUse: false           # 0x32 potion sub-form (belt slot)
+  useForStashManagement: false     # 0x18 / 0x19 — item move inv<->stash
+  useForInventoryManagement: false # 0x54 / 0x18 / 0x19 — item move within inventory
+  useInProcClickForMovement: false # EXPERIMENTAL Phase 9 — do NOT enable in production; breaks non-foreground D2R
 
 scheduler:
   enabled: false
