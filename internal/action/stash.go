@@ -12,11 +12,13 @@ import (
 	"local/internal/svc/internal/gamelib/data/area"
 	"local/internal/svc/internal/gamelib/data/item"
 	"local/internal/svc/internal/gamelib/data/object"
+	"local/internal/svc/internal/gamelib/data/stat"
 	"local/internal/svc/internal/gamelib/nip"
 	"local/internal/svc/internal/action/step"
 	"local/internal/svc/internal/context"
 	"local/internal/svc/internal/event"
 	"local/internal/svc/internal/game"
+	"local/internal/svc/internal/packet"
 	"local/internal/svc/internal/ui"
 	"local/internal/svc/internal/utils"
 	"github.com/lxn/win"
@@ -434,6 +436,76 @@ func shouldKeepRecipeItem(i data.Item) bool {
 	return false
 }
 
+// findFreeStashSlot walks the currently visible stash tab and returns the
+// top-left (col, row) of the first rectangle large enough to fit `it`.
+// Grid is 10 wide × 10 tall (personal stash + DLC shared stash pages share
+// the same dimensions). Returns ok=false if nothing fits.
+func findFreeStashSlot(ctx *context.Status, it data.Item) (col, row uint8, ok bool) {
+	const gridW, gridH = 10, 10
+	var occupied [gridH][gridW]bool
+
+	// Mark existing stashed items as occupied on the active tab/page.
+	currentTab := ctx.CurrentGame.CurrentStashTab
+	for _, si := range ctx.Data.Inventory.ByLocation(item.LocationStash, item.LocationSharedStash, item.LocationGemsTab, item.LocationMaterialsTab, item.LocationRunesTab) {
+		// Only consider items on the current visible page/tab.
+		switch si.Location.LocationType {
+		case item.LocationStash:
+			if currentTab != 1 {
+				continue
+			}
+		case item.LocationSharedStash:
+			if si.Location.Page+1 != currentTab {
+				continue
+			}
+		case item.LocationGemsTab:
+			if currentTab != StashTabGems {
+				continue
+			}
+		case item.LocationMaterialsTab:
+			if currentTab != StashTabMaterials {
+				continue
+			}
+		case item.LocationRunesTab:
+			if currentTab != StashTabRunes {
+				continue
+			}
+		default:
+			continue
+		}
+		d := si.Desc()
+		for dy := 0; dy < d.InventoryHeight; dy++ {
+			for dx := 0; dx < d.InventoryWidth; dx++ {
+				y, x := si.Position.Y+dy, si.Position.X+dx
+				if y >= 0 && y < gridH && x >= 0 && x < gridW {
+					occupied[y][x] = true
+				}
+			}
+		}
+	}
+
+	w := it.Desc().InventoryWidth
+	h := it.Desc().InventoryHeight
+	if w <= 0 || h <= 0 {
+		return 0, 0, false
+	}
+	for y := 0; y+h <= gridH; y++ {
+		for x := 0; x+w <= gridW; x++ {
+			fits := true
+			for dy := 0; dy < h && fits; dy++ {
+				for dx := 0; dx < w && fits; dx++ {
+					if occupied[y+dy][x+dx] {
+						fits = false
+					}
+				}
+			}
+			if fits {
+				return uint8(x), uint8(y), true
+			}
+		}
+	}
+	return 0, 0, false
+}
+
 func stashItemAction(i data.Item, rule string, ruleFile string, skipLogging bool) bool {
 	ctx := context.Get()
 	ctx.SetLastAction("stashItemAction")
@@ -444,8 +516,14 @@ func stashItemAction(i data.Item, rule string, ruleFile string, skipLogging bool
 	utils.PingSleep(utils.Medium, 170)        // Medium operation: Move pointer to item
 	screenshot := ctx.GameReader.Screenshot() // Take screenshot *before* attempting stash
 	utils.PingSleep(utils.Medium, 150)        // Medium operation: Wait for screenshot
+	// Ctrl+click via HID.ClickWithModifier — but HID.Click itself now
+	// dispatches via IN-PROCESS SendMessageW (APC into D2R's own thread).
+	// So "HID" here means Windows message routing, not SendInput — WndProc
+	// fires from D2R's legitimate stack and routes Ctrl+click to the
+	// stash-move dispatcher with correct session state. No cross-process
+	// OS message queue, no bot-detectable HID footprint.
 	ctx.HID.ClickWithModifier(game.LeftButton, screenPos.X, screenPos.Y, game.CtrlKey)
-	utils.PingSleep(utils.Medium, 500) // Medium operation: Give game time to process the stash
+	utils.PingSleep(utils.Medium, 500)
 
 	// Verify if the item is no longer in inventory
 	ctx.RefreshGameData() // Crucial: Refresh data to see if item moved
@@ -548,6 +626,7 @@ func DropItem(i data.Item) {
 	screenPos := ui.GetScreenCoordsForItem(i)
 	ctx.HID.MovePointer(screenPos.X, screenPos.Y)
 	utils.PingSleep(utils.Medium, 170) // Medium operation: Position pointer on item
+	// HID.ClickWithModifier — HID.Click routes via in-process SendMessageW.
 	ctx.HID.ClickWithModifier(game.LeftButton, screenPos.X, screenPos.Y, game.CtrlKey)
 	utils.PingSleep(utils.Medium, 500) // Medium operation: Wait for item to drop
 	step.CloseAllMenus()
@@ -598,13 +677,28 @@ func clickStashGoldBtn() {
 	ctx.SetLastStep("clickStashGoldBtn")
 
 	utils.PingSleep(utils.Medium, 170) // Medium operation: Prepare for gold button click
+
+	if ctx.CharacterCfg.PacketCasting.UseForStashManagement && ctx.PacketSender != nil {
+		goldStat, _ := ctx.Data.PlayerUnit.FindStat(stat.Gold, 0)
+		invGold := uint32(goldStat.Value)
+		if invGold > 0 {
+			if err := ctx.PacketSender.GoldTransfer(packet.GoldTransferDeposit, 0, invGold); err == nil {
+				utils.PingSleep(utils.Critical, 500)
+				return
+			} else {
+				ctx.Logger.Warn("stash gold deposit packet failed, falling back to HID", slog.Any("error", err))
+			}
+		}
+	}
+
+	// HID.Click — in-process SendMessageW for gold deposit dialog.
 	if ctx.GameReader.LegacyGraphics() {
 		ctx.HID.Click(game.LeftButton, ui.StashGoldBtnXClassic, ui.StashGoldBtnYClassic)
-		utils.PingSleep(utils.Critical, 1000) // Critical operation: Wait for confirm dialog
+		utils.PingSleep(utils.Critical, 1000)
 		ctx.HID.Click(game.LeftButton, ui.StashGoldBtnConfirmXClassic, ui.StashGoldBtnConfirmYClassic)
 	} else {
 		ctx.HID.Click(game.LeftButton, ui.StashGoldBtnX, ui.StashGoldBtnY)
-		utils.PingSleep(utils.Critical, 1000) // Critical operation: Wait for confirm dialog
+		utils.PingSleep(utils.Critical, 1000)
 		ctx.HID.Click(game.LeftButton, ui.StashGoldBtnConfirmX, ui.StashGoldBtnConfirmY)
 	}
 }
@@ -852,11 +946,11 @@ func TakeItemsFromStash(stashedItems []data.Item) error {
 
 		SwitchStashTab(targetTab)
 
-		// Move the item to the inventory
+		// HID.ClickWithModifier — HID.Click now routes via in-process
+		// SendMessageW (APC into D2R thread), no OS message queue.
 		screenPos := ui.GetScreenCoordsForItem(i)
-		ctx.HID.MovePointer(screenPos.X, screenPos.Y)
 		ctx.HID.ClickWithModifier(game.LeftButton, screenPos.X, screenPos.Y, game.CtrlKey)
-		utils.PingSleep(utils.Medium, 500) // Medium operation: Wait for item to move to inventory
+		utils.PingSleep(utils.Medium, 500)
 	}
 
 	return nil

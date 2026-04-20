@@ -12,40 +12,33 @@ const (
 	NPCSellTermConsumable byte = 0xFF // potions, scrolls, keys, tomes
 )
 
-// NewNPCSellItem builds the 24-byte 0x33 "sell to merchant" packet.
+// NewNPCSellItem builds the 22-byte 0x33 "sell to merchant" packet.
 //
-// CORRECTED 2026-04-15 — Discord plaintext capture shows CONSISTENT 24B
-// length across multiple captures:
+// AUTHORITATIVE live capture capture_buysell.log bufpoll v2 sample [53/54]:
 //
-//	33 [price:u32] [itemGID:u32] [npcGID:u32] [pad: 11 bytes zeros]
+//	33 [price:u32] [itemGID:u32] [npcGID:u32] [09 00 08 00] [slot:u16] [seq:u16] [term:u8]
 //
-// Examples (both 24B, first 20 bytes visible in log):
+// last_diff=21 proves packet length = 22B. Bytes 22-33 visible in hex window are
+// RESIDUE from previous 0x26 identify (34B) — not part of 0x33. Writing those
+// residue bytes (test30 34B form) CRASHES D2R 0xC0000005 because D2R reads past
+// opcode-expected length.
 //
-//	33 8A060000 17000000 08000000 00000000 0000... (price=0x68A, itemGID=0x17)
-//	33 07510000 16000000 08000000 00000000 0000... (price=0x5107, itemGID=0x16)
+// Example (Charsi price=0x1D4C, itemGID=0x38, npcGID=0x0E, slot=5, seq=2, term=0x03):
 //
-// The 22-byte variant previously used (with [09000000][slot:u16][seq:u16][term:u8][00])
-// matched a different D2R code path — likely "direct inventory sell" where the
-// grid col/row is encoded. The 24-byte format used by the colleague's
-// production packet bot is "cursor sell" — bot must first 0x19 PickupBufferItem
-// the item onto the cursor, then 0x33 sells whatever is on the cursor. The
-// slot/seq/term fields are not needed because item is cursor-tracked.
-//
-// Since the cursor-sell pattern is more robust (server looks up item by GID
-// rather than trusting caller-provided grid coords), switched to 24B default.
-// Slot/seq/term params retained for API compat — IGNORED.
-//
-// Dispatch: after 0x19 pickup, send 0x33 via SendDualPacket.
+//	33 4c1d0000 38000000 0e000000 09000800 0500 0200 03
 func NewNPCSellItem(sellPrice uint32, itemGID, npcGID data.UnitID, slot, seq uint16, term byte) []byte {
-	_ = slot
-	_ = seq
-	_ = term
-	buf := make([]byte, 24)
+	buf := make([]byte, 22)
 	buf[0] = OpNPCSellItem
 	binary.LittleEndian.PutUint32(buf[1:5], sellPrice)
 	binary.LittleEndian.PutUint32(buf[5:9], uint32(itemGID))
 	binary.LittleEndian.PutUint32(buf[9:13], uint32(npcGID))
-	// bytes 13..23 = 11 zero bytes (matches Discord capture)
+	buf[13] = 0x09
+	buf[14] = 0x00
+	buf[15] = 0x08
+	buf[16] = 0x00
+	binary.LittleEndian.PutUint16(buf[17:19], slot)
+	binary.LittleEndian.PutUint16(buf[19:21], seq)
+	buf[21] = term
 	return buf
 }
 

@@ -28,8 +28,14 @@ func NewCainIdentifyItem(itemGID data.UnitID, page uint8, idx uint16) []byte {
 	return buf
 }
 
-// NewCainIdentifyAll creates a simple identify-all packet (0x5C, 17 bytes).
-// Convenience wrapper — sends with page=0, idx=0.
+// NewCainIdentifyAll — 0x34 14B form per sec_id_cain.log CRASHES D2R on
+// SendDualPacket (test31 2026-04-19 23:12:47 = 0xC0000005 AV). D2R client
+// validates packet length pre-send; any non-expected length triggers AV.
+//
+// For now returns 0x5C 17B per-item path — unused caller (Cain flow goes
+// via HID fallback). Real 0x34 bulk-identify path requires calling D2R's
+// internal cain-identify wrapper (RVA not yet found) OR HID click on the
+// "Identify All" button after 0x38 option=1 opens the identify submenu.
 func NewCainIdentifyAll(cainGID data.UnitID) []byte {
 	return NewCainIdentifyItem(cainGID, 0, 0)
 }

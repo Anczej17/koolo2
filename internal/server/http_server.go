@@ -998,6 +998,7 @@ func (s *HttpServer) Listen(port int) error {
 	http.HandleFunc("/debug/rop-scan", s.debugRopScan)
 	http.HandleFunc("/debug/rop-read", s.debugRopRead)
 	http.HandleFunc("/debug/rop-read-batch", s.debugRopReadBatch)
+	http.HandleFunc("/debug/rop-call3", s.debugRopCall3)
 	http.HandleFunc("/debug/rop-worker-hb", s.debugRopWorkerHb)
 	http.HandleFunc("/debug/rop-dbg", s.debugRopDbg)
 	http.HandleFunc("/debug/read-trace", s.debugReadTrace)
@@ -7918,6 +7919,55 @@ func (s *HttpServer) debugRopRead(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	fmt.Fprintf(w, `{"ok":true,"status":%d,"note":"2 = ROP handler gated; unit-test trigger first"}`, status)
+}
+
+// debugRopCall3 issues CMD_ROP_CALL3 — 3-arg ROP chain call into a D2R fn.
+// Defaults to DRY RUN (chain assembly + gadget availability check only).
+// Pass arm=1 to actually fire the trigger thunk — this is zombie-risk if the
+// chain encoding is wrong, so reserve for post-live-verified fn_addrs.
+//
+// Usage: GET /debug/rop-call3?character=Blizzard&fn=0x7ff691f49400&a1=0x38&a2=0&a3=0&arm=0
+func (s *HttpServer) debugRopCall3(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	character := r.URL.Query().Get("character")
+	if character == "" {
+		w.WriteHeader(http.StatusBadRequest)
+		fmt.Fprintf(w, `{"error":"missing character parameter"}`)
+		return
+	}
+	ctx := s.manager.GetContext(character)
+	if ctx == nil || ctx.MemoryInjector == nil {
+		w.WriteHeader(http.StatusServiceUnavailable)
+		fmt.Fprintf(w, `{"error":"no supervisor"}`)
+		return
+	}
+	pres := ctx.MemoryInjector.GetPresenter()
+	if pres == nil {
+		w.WriteHeader(http.StatusServiceUnavailable)
+		fmt.Fprintf(w, `{"error":"presenter not initialized"}`)
+		return
+	}
+	var fn, a1, a2, a3 uint64
+	fmt.Sscanf(r.URL.Query().Get("fn"), "0x%x", &fn)
+	fmt.Sscanf(r.URL.Query().Get("a1"), "0x%x", &a1)
+	fmt.Sscanf(r.URL.Query().Get("a2"), "0x%x", &a2)
+	fmt.Sscanf(r.URL.Query().Get("a3"), "0x%x", &a3)
+	arm := r.URL.Query().Get("arm") == "1"
+	if fn == 0 {
+		w.WriteHeader(http.StatusBadRequest)
+		fmt.Fprintf(w, `{"error":"fn required (hex, non-zero)"}`)
+		return
+	}
+	status, err := pres.RopCall3(fn, a1, a2, a3, arm)
+	if err != nil {
+		fmt.Fprintf(w, `{"ok":false,"error":%q}`, err.Error())
+		return
+	}
+	note := "dry-run: chain assembled + gadgets present"
+	if arm {
+		note = "ARMED: trigger fired — check D2R stability"
+	}
+	fmt.Fprintf(w, `{"ok":true,"status":%d,"arm":%t,"note":%q}`, status, arm, note)
 }
 
 // debugRopReadBatch dispatches CMD_ROP_READ_BATCH with N entries parsed from

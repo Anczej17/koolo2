@@ -118,7 +118,23 @@ func (b *Bot) Run(ctx context.Context, firstRun bool, runs []run.Run) error {
 	// Cleanup the current game helper structure
 	b.ctx.Cleanup()
 
-	// Switch to legacy mode if configured and character is not a DLC-Character
+	// Switch to legacy mode if configured and character is not a DLC-Character.
+	//
+	// Tiny-mod gotcha (2026-04-19): LegacyGraphics memory flag can read stale
+	// in early game-load frames, causing enableLegacyMode() to no-op even when
+	// the screen is still in D2R 3.0 graphics. The result is HID coords that
+	// target legacy UI hitboxes never landing on actual on-screen widgets, so
+	// every WP click / NPC click silently misses and the bot reports "failed
+	// to reach destination" or "player is stuck" while sitting at char select
+	// or in-town with the wrong renderer. Mirror Claude mode's unconditional
+	// VK_G press (single_supervisor.go:257) for ClassicMode supervisors so
+	// tiny-mod actually switches even when the memory flag lies.
+	if b.ctx.CharacterCfg.ClassicMode && !b.ctx.Data.IsDLC() {
+		b.ctx.Logger.Info("ClassicMode: forcing VK_G to toggle tiny-mod legacy graphics")
+		b.ctx.HID.PressKey(0x47) // VK_G
+		utils.Sleep(500)
+		b.ctx.RefreshGameData()
+	}
 	if !b.ctx.Data.IsDLC() {
 		action.SwitchToLegacyMode()
 	}

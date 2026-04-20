@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/binary"
 	"errors"
+	"fmt"
 	"os"
 	"strings"
 	"sync"
@@ -36,6 +37,10 @@ type Process struct {
 	// externalDualSend, when non-nil, sends via mirror buffer + send_fn
 	// (the D2R vendor/trade dual-send wrapper path).
 	externalDualSend func([]byte) error
+	// mirrorBufAddrCache stores the dual-buffer mirror global address resolved
+	// dynamically from dual_send_wrap on first SendDualPacket use, so we don't
+	// reread the function bytes every send. Zero = not yet resolved.
+	mirrorBufAddrCache uintptr
 	// externalClick, when non-nil, fires an in-process click via the
 	// Presenter's CMD_CLICK path (Phase 9). Phase-9 ClickButton enum is
 	// defined in the presenter package; we accept the raw byte here to keep
@@ -804,33 +809,102 @@ func (p *Process) SendUIPacket(packet []byte) error {
 	return p.SendUIPacketViaMainThread(packet, uiAddr)
 }
 
-// SendDualPacket replicates D2R's dual_send_wrap behavior:
-// 1. WriteProcessMemory to mirror buffer (dedup/observation copy)
-// 2. SendPacket via send_fn APC on main thread (network dispatch)
+// SendDualPacket dispatches a packet that needs the dual-buffer (UI mirror +
+// network) path used by vendor/trade/swap opcodes (0x32/0x33/0x38/0x50/etc.).
 //
-// This is safe from main thread — no Arxan crash, no deadlock.
-// Proven: 5 consecutive weapon swaps, zero crashes.
+// Path 1 (preferred): rmod presenter — installed when MODE2=1 / Claude mode.
+// Path 2 (fallback): WriteProcessMemory to mirror buffer + SendPacket via APC.
+// Mirror buffer RVA is resolved DYNAMICALLY at first use by reading the
+// dual_send_wrap function bytes and extracting the `LEA RCX, [rip+disp32]`
+// (opcode 48 8D 0D ?? ?? ?? ??) operand. This bypasses the hardcoded
+// 0x1F51330 RVA which goes stale across D2R patches (D2R 3.0.92198 shifted
+// it past the previous +0x30000 jump). The dual_send_wrap function entry is
+// itself resolved by sigscan at runtime via SendPacketViaDualWrap's
+// dualSendWrapRVA — if that RVA is also stale (live-verified 04-19: APC call
+// to 0x147110 = STATUS_STACK_BUFFER_OVERRUN), we surface a clear error so
+// callers can decide whether to fall back or skip.
 func (p *Process) SendDualPacket(packet []byte) error {
 	if p == nil {
 		return errors.New("process is nil")
 	}
-	// Try external dual sender first (Presenter/rmod).
+	// Path 1: rmod presenter (in-process Present hook).
 	p.sendPacketMu.Lock()
 	fn := p.externalDualSend
 	p.sendPacketMu.Unlock()
 	if fn != nil {
 		return fn(packet)
 	}
-	// Fallback: manual mirror write + send_fn APC.
+	// Path 2: dynamic mirror-buf RVA + WPM + SendPacket APC.
 	if p.moduleBaseAddressPtr == 0 || p.handler == 0 {
 		return errors.New("dual send: process not initialized")
 	}
-	const mirrorBufRVA uintptr = 0x1F51330
-	mirrorAddr := p.moduleBaseAddressPtr + mirrorBufRVA
-	if err := windows.WriteProcessMemory(p.handler, mirrorAddr, &packet[0], uintptr(len(packet)), nil); err != nil {
-		return errors.New("dual send: mirror write failed")
+	mirrorAddr, err := p.resolveMirrorBufAddr()
+	if err != nil {
+		return fmt.Errorf("dual send: mirror buf resolve failed: %w", err)
+	}
+	// Long-lived p.handler is read-only; for write + protect we open a transient
+	// handle with PROCESS_VM_OPERATION + PROCESS_VM_WRITE (mirrors
+	// WriteBytesToMemory on line 1189). Mirror buffer page is typically
+	// write-protected by Arxan, so we flip to PAGE_READWRITE for the write and
+	// restore original protection (live-verified 04-19 21:00: WPM/VirtualProtectEx
+	// against the long-lived handle returned ERROR_ACCESS_DENIED).
+	const writeAccess = 0x0020 | 0x0008 // PROCESS_VM_WRITE | PROCESS_VM_OPERATION
+	hWrite, err := windows.OpenProcess(writeAccess, false, p.pid)
+	if err != nil {
+		return fmt.Errorf("dual send: open transient write handle failed: %w", err)
+	}
+	defer windows.CloseHandle(hWrite)
+	const PAGE_READWRITE uint32 = 0x04
+	var oldProt uint32
+	if err := windows.VirtualProtectEx(hWrite, mirrorAddr, uintptr(len(packet)), PAGE_READWRITE, &oldProt); err != nil {
+		return fmt.Errorf("dual send: VirtualProtectEx(0x%X, RW) failed: %w", mirrorAddr, err)
+	}
+	wpmErr := windows.WriteProcessMemory(hWrite, mirrorAddr, &packet[0], uintptr(len(packet)), nil)
+	var dummy uint32
+	_ = windows.VirtualProtectEx(hWrite, mirrorAddr, uintptr(len(packet)), oldProt, &dummy)
+	if wpmErr != nil {
+		return fmt.Errorf("dual send: mirror write to 0x%X failed (after RW flip): %w", mirrorAddr, wpmErr)
 	}
 	return p.SendPacket(packet)
+}
+
+// resolveMirrorBufAddr finds the dual-buffer mirror global by reading the
+// first ~512 bytes of dual_send_wrap and locating the `LEA RCX, [rip+disp32]`
+// instruction — D2R uses `lea rcx, [mirror_buf]` early in the wrapper before
+// the memcpy. Result is cached in mirrorBufAddrCache for subsequent calls.
+//
+// Returns an error if the LEA pattern is not found in the scan window, which
+// usually means dualSendWrapRVA itself is stale and the function entry no
+// longer points at dual_send_wrap.
+func (p *Process) resolveMirrorBufAddr() (uintptr, error) {
+	p.sendPacketMu.Lock()
+	cached := p.mirrorBufAddrCache
+	p.sendPacketMu.Unlock()
+	if cached != 0 {
+		return cached, nil
+	}
+
+	const scanWindow uint = 0x600
+	startAddr := p.moduleBaseAddressPtr + dualSendWrapRVA
+	buf := p.ReadBytesFromMemory(startAddr, scanWindow)
+	if len(buf) == 0 {
+		return 0, fmt.Errorf("read dual_send_wrap bytes at 0x%X returned empty (RVA 0x%X likely stale or page protected)", startAddr, dualSendWrapRVA)
+	}
+
+	// LEA RCX, [rip+disp32]  =  48 8D 0D ?? ?? ?? ??
+	for i := 0; i+7 <= len(buf); i++ {
+		if buf[i] == 0x48 && buf[i+1] == 0x8D && buf[i+2] == 0x0D {
+			disp := int32(binary.LittleEndian.Uint32(buf[i+3 : i+7]))
+			ripAfter := startAddr + uintptr(i) + 7
+			target := uintptr(int64(ripAfter) + int64(disp))
+
+			p.sendPacketMu.Lock()
+			p.mirrorBufAddrCache = target
+			p.sendPacketMu.Unlock()
+			return target, nil
+		}
+	}
+	return 0, fmt.Errorf("no LEA RCX, [rip+disp32] in first 0x%X bytes of dual_send_wrap at 0x%X (RVA likely stale or function encrypted)", scanWindow, startAddr)
 }
 
 // ModuleBaseAddress returns the base address of the D2R module.

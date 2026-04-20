@@ -14,27 +14,37 @@ import (
 //
 // fromL/fromR = weapon GIDs of the currently active slot (being swapped FROM).
 // toL/toR = weapon GIDs of the inactive slot (being swapped TO).
-// Pass 0 for empty hand slots.
+// Pass 0 for empty hand slots. fromSlot = 0 or 1 (the currently-active slot).
 //
-// Live captures show trailing bytes vary per direction:
-//   slot0→1: ...FF 00 00 36 00 00   (anim=0x00, tick=0x36, dir=0x00)
-//   slot1→0: ...FF 37 00 95 00 01   (anim=0x37, tick=0x95, dir=0x01)
+// Live captures (project_0x50_live_test_results 04-13):
+//   slot0→1 (fromSlot=0): ...FF 00 00 36 00 00   (anim=0x00, tick=0x36, dir=0x00)
+//   slot1→0 (fromSlot=1): ...FF 37 00 95 00 01   (anim=0x37, tick=0x95, dir=0x01)
 //
-// 28 bytes CRASHES send_fn APC (buffer underread). 30 bytes = no crash.
-// Server appears to accept zeros for trailing fields.
-//
-// D2 LOD used opcode 0x60 (1 byte, no args) — that CRASHES D2R.
-func NewWeaponSwap(fromLeftGID, fromRightGID, toLeftGID, toRightGID data.UnitID) []byte {
+// Live test23 04-19 confirmed: server rejects a swap with all-zero trailer
+// OR with wrong-direction trailer (e.g. 37/0/0/0/0 for a 0→1 swap). The
+// anim + dir bytes must match the direction; tick is a low byte of game
+// state (~0x36/0x95 observed) but server tolerance is unknown — use the
+// observed typical value as a best-match default.
+func NewWeaponSwap(fromLeftGID, fromRightGID, toLeftGID, toRightGID data.UnitID, fromSlot uint8) []byte {
 	buf := make([]byte, 30)
 	buf[0] = 0x50
 	binary.LittleEndian.PutUint32(buf[1:5], uint32(fromLeftGID))
 	binary.LittleEndian.PutUint32(buf[5:9], uint32(fromRightGID))
 	binary.LittleEndian.PutUint32(buf[9:13], uint32(toLeftGID))
 	binary.LittleEndian.PutUint32(buf[13:17], uint32(toRightGID))
-	// 8-byte sentinel
 	binary.LittleEndian.PutUint64(buf[17:25], 0xFFFFFFFFFFFFFFFF)
-	// Trailing 5 bytes: anim state, padding, tick counter, padding, direction.
-	// Zeros are accepted by server (verified: 30B no-crash via send_fn APC).
-	// buf[25:30] left as zero
+	if fromSlot == 0 {
+		buf[25] = 0x00
+		buf[26] = 0x00
+		buf[27] = 0x36
+		buf[28] = 0x00
+		buf[29] = 0x00
+	} else {
+		buf[25] = 0x37
+		buf[26] = 0x00
+		buf[27] = 0x95
+		buf[28] = 0x00
+		buf[29] = 0x01
+	}
 	return buf
 }

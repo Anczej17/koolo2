@@ -19,12 +19,23 @@ const (
 
 // Presenter manages the in-process Present hook in D2R via shared memory.
 type Presenter struct {
-	mu          sync.Mutex
-	pid         uint32
-	hSection    windows.Handle  // named file mapping handle
-	localView   unsafe.Pointer  // our mapped view of the shared buffer
-	initialized bool
-	modulePath  string
+	mu              sync.Mutex
+	pid             uint32
+	hSection        windows.Handle  // named file mapping handle
+	localView       unsafe.Pointer  // our mapped view of the shared buffer
+	initialized     bool
+	modulePath      string
+	skipPresentHook bool // if true, rmod init skips Present detour (GTC64-only dispatch)
+}
+
+// SetSkipPresentHook must be called BEFORE Init(). When true, rmod DllMain
+// installs only the GetTickCount64 IAT hook + TimerQueue worker, skipping the
+// D3D11 Present detour. Use this in normal mode where Present hook slowdowns
+// would drop HID clicks → movement breaks.
+func (p *Presenter) SetSkipPresentHook(skip bool) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.skipPresentHook = skip
 }
 
 func New(pid uint32, modulePath string) *Presenter {
@@ -146,6 +157,9 @@ func (p *Presenter) Init(fnDispatch, uiNetManAddr, fnRealClick, hwnd, mirrorBufA
 	writeU64(localView, uintptr(offMirrorBufAddr), uint64(mirrorBufAddr))
 	writeU64(localView, uintptr(offDualSendWrap), uint64(dualSendWrapAddr))
 	writeU32(localView, uintptr(offGameThreadID), gameThreadID)
+	if p.skipPresentHook {
+		writeU32(localView, uintptr(offSkipPresentHook), 1)
+	}
 	if traceEnabled {
 		trace("Init 2: header written to local view (magic=%#x version=%d)",
 			readU32(localView, uintptr(offMagic)), readU32(localView, uintptr(offVersion)))
@@ -662,6 +676,50 @@ func (p *Presenter) RopRead(srcVA, dstVA, length uint64) (status uint32, err err
 		time.Sleep(500 * time.Microsecond)
 	}
 	return 0, fmt.Errorf("rop read timeout (rmod didn't ack CmdRopRead within 2 s)")
+}
+
+// RopCall3 invokes a 3-arg x64 Windows-ABI D2R function through a ROP chain
+// built in rmod (pop rcx/rdx/r8 gadgets + ret-into-fn + epilogue). Pass
+// `arm=true` to actually fire the trigger thunk; `arm=false` is a dry run
+// (chain assembled + gadgets verified, trigger NOT invoked). Dry-run is
+// the default because a miswoven chain zombies D2R via Arxan's page-hash
+// sentinel and requires a VM reboot to recover.
+//
+// Status: 0=ok, 1=gadget-pool-empty, 2=required-gadget-missing,
+// 3=exec-failed, 4=rop-state-not-ready.
+func (p *Presenter) RopCall3(fnVA, a1, a2, a3 uint64, arm bool) (status uint32, err error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if !p.initialized || p.localView == nil {
+		return 0, fmt.Errorf("presenter not initialized")
+	}
+
+	a3Final := a3
+	if arm {
+		a3Final |= 1 << 63
+	}
+
+	writeU64(p.localView, uintptr(OffRopCall3Fn), fnVA)
+	writeU64(p.localView, uintptr(OffRopCall3A1), a1)
+	writeU64(p.localView, uintptr(OffRopCall3A2), a2)
+	writeU64(p.localView, uintptr(OffRopCall3A3), a3Final)
+	writeU32(p.localView, uintptr(offCommandType), CmdRopCall3)
+	writeU32(p.localView, uintptr(offStatusFlag), StatusBusy)
+	writeU32(p.localView, uintptr(offCommandFlag), 1)
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		sflag := readU32(p.localView, uintptr(offStatusFlag))
+		if sflag == StatusDone {
+			return readU32(p.localView, uintptr(OffRopCall3Status)), nil
+		}
+		if sflag == StatusError {
+			ec := readU32(p.localView, uintptr(offErrorCode))
+			return 0, fmt.Errorf("rop call3 error 0x%X", ec)
+		}
+		time.Sleep(500 * time.Microsecond)
+	}
+	return 0, fmt.Errorf("rop call3 timeout (rmod didn't ack CmdRopCall3 within 2 s)")
 }
 
 // BatchReadEntry is one request in a CMD_ROP_READ_BATCH payload. Len must be
@@ -1321,34 +1379,48 @@ func (p *Presenter) SetForceMoveAddr(forceMoveAddr uintptr) {
 // this as "move to position" regardless of what's under the cursor (no NPC
 // interact, no mini-panel click). Resolution-independent: coords are D2R
 // client-area pixels, the DLL reads ForceMove VK from keystate table.
+// ForceClick dispatches a left-click at (x, y) by calling D2R's internal
+// real_click_worker via APC on the game thread. Caller is expected to have
+// armed the ForceMove key override via MemoryInjector.OverrideGetKeyState
+// before calling this — D2R's downstream state machine queries GetKeyState
+// while processing the click and uses that to decide walk-vs-cast.
+//
+// This replaces the earlier CmdForceClick path (no rmod handler existed —
+// it always timed out, triggering pathfinding's HID fallback). APC delivery
+// onto the game thread matches how Phase 9 ClickAt already works and does
+// not rely on Windows message queue (no SendMessage / WM_LBUTTONDOWN).
 func (p *Presenter) ForceClick(x, y int32) error {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-
-	if !p.initialized || p.localView == nil {
-		return fmt.Errorf("presenter not initialized")
+	realClickVA := readU64(p.localView, uintptr(offFnRealClick))
+	hwnd := readU64(p.localView, uintptr(offHwndD2R))
+	if realClickVA == 0 || hwnd == 0 {
+		return fmt.Errorf("real_click_worker VA or HWND not initialized (realClick=%#x hwnd=%#x)", realClickVA, hwnd)
 	}
 
-	clearBytes(p.localView, uintptr(offPacketData), 16)
-	writeU32(p.localView, uintptr(offPacketData+0), uint32(x))
-	writeU32(p.localView, uintptr(offPacketData+4), uint32(y))
-
-	writeU32(p.localView, uintptr(offCommandType), CmdForceClick)
-	writeU32(p.localView, uintptr(offStatusFlag), StatusBusy)
-	writeU32(p.localView, uintptr(offCommandFlag), 1)
-
-	deadline := time.Now().Add(2 * time.Second)
-	for time.Now().Before(deadline) {
-		status := readU32(p.localView, uintptr(offStatusFlag))
-		if status == StatusDone {
-			return nil
-		}
-		if status == StatusError {
-			return fmt.Errorf("force click error 0x%X", readU32(p.localView, uintptr(offErrorCode)))
-		}
-		time.Sleep(100 * time.Microsecond)
+	// real_click_worker(hwnd, action, btn, y, x)
+	//   action: 10=DOWN, 11=UP, 12=DBLCLK
+	//   btn:    1=L, 2=M, 4=R
+	if _, err := p.CallFnGameThread(
+		uintptr(realClickVA),
+		uintptr(hwnd),
+		uintptr(clickActionDown),
+		uintptr(BtnLeft),
+		uintptr(y),
+		uintptr(x),
+	); err != nil {
+		return fmt.Errorf("force click down: %w", err)
 	}
-	return fmt.Errorf("force click timeout")
+	time.Sleep(20 * time.Millisecond) // brief hold so D2R samples ForceMove state
+	if _, err := p.CallFnGameThread(
+		uintptr(realClickVA),
+		uintptr(hwnd),
+		uintptr(clickActionUp),
+		uintptr(BtnLeft),
+		uintptr(y),
+		uintptr(x),
+	); err != nil {
+		return fmt.Errorf("force click up: %w", err)
+	}
+	return nil
 }
 
 // ClickHold issues a button-down event without the matching up. Used by
@@ -1362,46 +1434,29 @@ func (p *Presenter) ClickRelease(x, y int32, btn ClickButton) error {
 	return p.clickRaw(x, y, btn, clickActionUp)
 }
 
+// clickRaw issues a single click phase (DOWN or UP) by calling D2R's internal
+// real_click_worker via APC on the game thread. CmdClick had no rmod-side
+// handler (grep CMD_CLICK: 0 matches in rmod) — callers were always hitting
+// the 2s timeout and falling through to an error-returning state. Routing
+// via CallFnGameThread matches Phase 9 (memory project_session_2026_04_12:
+// "0x3C works APC main thread") and bypasses the dead-command path.
 func (p *Presenter) clickRaw(x, y int32, btn ClickButton, action uint8) error {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-
-	if !p.initialized || p.localView == nil {
-		return fmt.Errorf("presenter not initialized")
+	realClickVA := readU64(p.localView, uintptr(offFnRealClick))
+	hwnd := readU64(p.localView, uintptr(offHwndD2R))
+	if realClickVA == 0 || hwnd == 0 {
+		return fmt.Errorf("real_click_worker VA or HWND not initialized (realClick=%#x hwnd=%#x)", realClickVA, hwnd)
 	}
-
-	// Pack click params at the start of the packet data region. The DLL reads:
-	//   +0x00 i32 x
-	//   +0x04 i32 y
-	//   +0x08 u8  btn
-	//   +0x09 u8  action
-	clearBytes(p.localView, uintptr(offPacketData), 16)
-	writeU32(p.localView, uintptr(offPacketData+0), uint32(x))
-	writeU32(p.localView, uintptr(offPacketData+4), uint32(y))
-	writeU8(p.localView, uintptr(offPacketData+8), uint8(btn))
-	writeU8(p.localView, uintptr(offPacketData+9), action)
-
-	writeU32(p.localView, uintptr(offPacketSize), 16)
-	writeU32(p.localView, uintptr(offCommandType), CmdClick)
-	writeU32(p.localView, uintptr(offStatusFlag), StatusBusy)
-	writeU32(p.localView, uintptr(offCommandFlag), 1)
-
-	deadline := time.Now().Add(2 * time.Second)
-	for time.Now().Before(deadline) {
-		status := readU32(p.localView, uintptr(offStatusFlag))
-		if status == StatusDone {
-			return nil
-		}
-		if status == StatusError {
-			ec := readU32(p.localView, uintptr(offErrorCode))
-			if ec&0xFF000000 == 0xEC000000 {
-				return fmt.Errorf("click CRASHED: VEH caught exception 0x%04X (D2R alive)", ec&0xFFFF)
-			}
-			return fmt.Errorf("click error 0x%X", ec)
-		}
-		time.Sleep(100 * time.Microsecond)
+	if _, err := p.CallFnGameThread(
+		uintptr(realClickVA),
+		uintptr(hwnd),
+		uintptr(action),
+		uintptr(btn),
+		uintptr(y),
+		uintptr(x),
+	); err != nil {
+		return fmt.Errorf("click action=%d: %w", action, err)
 	}
-	return fmt.Errorf("click timeout")
+	return nil
 }
 
 // SniffInstall asks the DLL to patch send_fn entry with INT3 (sniff hook ON).

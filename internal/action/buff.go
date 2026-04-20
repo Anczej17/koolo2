@@ -559,25 +559,45 @@ func castBuffWithRetry(buffSkill skill.ID, expectedState state.State) {
 			slog.Int("attempt", attempt))
 	}
 
-	ctx.Logger.Warn("Buff failed after max retries", slog.String("skill", skillName))
+	// Packet 0x0C right-cast path exhausted. Try an in-process right-click
+	// via real_click_worker (APC → D2R's own click dispatcher, same path as
+	// Phase 9 ClickAt). This is NOT HID — no SendInput, no WM_RBUTTONDOWN,
+	// no OS input queue. D2R's own WndProc handles the RMB from the
+	// internal dispatcher and correctly applies self-buffs.
+	if ctx.PacketSender != nil {
+		ctx.Logger.Warn("Buff 0x0C exhausted — real_click_worker RMB fallback", slog.String("skill", skillName))
+		centerX := ctx.GameReader.GameAreaSizeX / 2
+		centerY := ctx.GameReader.GameAreaSizeY / 2
+		if err := ctx.PacketSender.ClickAt(int32(centerX), int32(centerY), game.MouseRight); err == nil {
+			utils.Sleep(postCastBaseDelay)
+			if waitForState(expectedState) {
+				ctx.Logger.Debug("Buff applied via real_click_worker fallback", slog.String("skill", skillName))
+				return
+			}
+		}
+	}
+	ctx.Logger.Warn("Buff failed after max retries (0x0C + real_click_worker)", slog.String("skill", skillName))
 }
 
-// doCast casts whatever skill is on right button at player position via packet.
-// Falls back to mouse click if packet sender unavailable.
+// doCast casts whatever skill is on the right mouse button via packet.
+// For self-buffs (BattleCommand/BattleOrders/FrozenArmor/etc.) D2R treats
+// right-click ON the exact player tile as a no-op — the original koolo HID
+// path right-clicked at screen center (640, 340) which lands a couple cells
+// away from the player sprite, which is what triggers the area-self pulse.
+// Mirror that with a small +5 world-cell offset so the cast lands "near" the
+// player rather than ON them. Live-verified 04-19 21:00 that the no-offset
+// version fired the packet but never lit the buff state.
 func doCast() {
 	ctx := context.Get()
 	utils.Sleep(100)
-
-	if ctx.PacketSender != nil {
-		pos := ctx.Data.PlayerUnit.Position
-		if err := ctx.PacketSender.CastSkillAtLocation(pos, ctx.Data.PlayerUnit.Position); err == nil {
-			utils.Sleep(postCastBaseDelay)
-			return
-		}
+	if ctx.PacketSender == nil {
+		return
 	}
-
-	// Fallback to mouse click
-	ctx.HID.Click(game.RightButton, 640, 340)
+	playerPos := ctx.Data.PlayerUnit.Position
+	target := data.Position{X: playerPos.X + 5, Y: playerPos.Y + 5}
+	if err := ctx.PacketSender.CastSkillAtLocation(target, playerPos); err != nil {
+		ctx.Logger.Warn("doCast packet failed", slog.String("error", err.Error()))
+	}
 	utils.Sleep(postCastBaseDelay)
 }
 
@@ -639,7 +659,7 @@ func pressSwapWeapons() {
 		ctx.Logger.Warn("pressSwapWeapons: no equipped weapons resolved — skipping swap")
 		return
 	}
-	if err := ctx.PacketSender.SwapWeapon(fL, fR, tL, tR); err != nil {
+	if err := ctx.PacketSender.SwapWeapon(fL, fR, tL, tR, uint8(ctx.Data.ActiveWeaponSlot)); err != nil {
 		ctx.Logger.Warn("pressSwapWeapons packet failed", slog.String("error", err.Error()))
 	}
 }

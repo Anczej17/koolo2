@@ -135,10 +135,18 @@ func GambleSingleItem(items []string, desiredQuality item.Quality) error {
 				slog.Any("items", items),
 				slog.Int("attempt", refreshAttempts))
 
+			gX, gY := ui.GambleRefreshButtonX, ui.GambleRefreshButtonY
 			if ctx.Data.LegacyGraphics {
-				ctx.HID.Click(game.LeftButton, ui.GambleRefreshButtonXClassic, ui.GambleRefreshButtonYClassic)
-			} else {
-				ctx.HID.Click(game.LeftButton, ui.GambleRefreshButtonX, ui.GambleRefreshButtonY)
+				gX, gY = ui.GambleRefreshButtonXClassic, ui.GambleRefreshButtonYClassic
+			}
+			clicked := false
+			if ctx.CharacterCfg.PacketCasting.UseForGamble && ctx.PacketSender != nil {
+				if err := ctx.PacketSender.ClickAt(int32(gX), int32(gY), game.MouseLeft); err == nil {
+					clicked = true
+				}
+			}
+			if !clicked {
+				ctx.HID.Click(game.LeftButton, gX, gY)
 			}
 
 			utils.Sleep(500)
@@ -282,9 +290,14 @@ func gambleItems() error {
 	}
 }
 func RefreshGamblingWindow(ctx *context.Status) {
+	gX, gY := ui.GambleRefreshButtonX, ui.GambleRefreshButtonY
 	if ctx.Data.LegacyGraphics {
-		ctx.HID.Click(game.LeftButton, ui.GambleRefreshButtonXClassic, ui.GambleRefreshButtonYClassic)
-	} else {
-		ctx.HID.Click(game.LeftButton, ui.GambleRefreshButtonX, ui.GambleRefreshButtonY)
+		gX, gY = ui.GambleRefreshButtonXClassic, ui.GambleRefreshButtonYClassic
 	}
+	if ctx.CharacterCfg.PacketCasting.UseForGamble && ctx.PacketSender != nil {
+		if err := ctx.PacketSender.ClickAt(int32(gX), int32(gY), game.MouseLeft); err == nil {
+			return
+		}
+	}
+	ctx.HID.Click(game.LeftButton, gX, gY)
 }

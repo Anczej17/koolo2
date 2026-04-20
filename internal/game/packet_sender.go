@@ -2,13 +2,30 @@ package game
 
 import (
 	"fmt"
+	"time"
 
 	"local/internal/svc/internal/gamelib/data"
 	"local/internal/svc/internal/gamelib/data/area"
 	"local/internal/svc/internal/gamelib/data/skill"
 	"local/internal/svc/internal/gamelib/data/stat"
+	"local/internal/svc/internal/livetrace"
 	packet "local/internal/svc/internal/packet"
 )
+
+// tracePacketSend instruments the bottom three send primitives. Called from
+// SendPacket/SendUIPacket/SendDualPacket with path label.
+func tracePacketSend(path string, payload []byte, fn func() error) error {
+	start := time.Now()
+	err := fn()
+	if livetrace.Get().IsEnabled() && len(payload) > 0 {
+		errStr := ""
+		if err != nil {
+			errStr = err.Error()
+		}
+		livetrace.Get().Packet(path, payload[0], payload, errStr, time.Since(start).Microseconds())
+	}
+	return err
+}
 
 type ProcessSender interface {
 	SendPacket([]byte) error
@@ -16,6 +33,7 @@ type ProcessSender interface {
 	SendDualPacket([]byte) error
 	ClickAt(x, y int32, btn byte) error
 	ForceClick(x, y int32) error
+	Send9BWrapper(opcode uint8, arg1, arg2 uint32) error
 }
 
 // Mouse button bits as consumed by D2R real_click_worker (see Phase 9 spec).
@@ -36,20 +54,20 @@ func NewPacketSender(process ProcessSender) *PacketSender {
 }
 
 func (ps *PacketSender) SendPacket(packet []byte) error {
-	return ps.process.SendPacket(packet)
+	return tracePacketSend("game", packet, func() error { return ps.process.SendPacket(packet) })
 }
 
 // SendUIPacket sends a packet via the D2R UI NetMan path (vtable[5]).
 // Required for identify/buy/sell/cube/gamble opcodes that crash when sent
 // through the regular Game NetMan path.
 func (ps *PacketSender) SendUIPacket(packet []byte) error {
-	return ps.process.SendUIPacket(packet)
+	return tracePacketSend("ui", packet, func() error { return ps.process.SendUIPacket(packet) })
 }
 
 // SendDualPacket sends via the mirror buffer + send_fn dual path.
 // This is how D2R's internal vendor wrapper dispatches packets.
 func (ps *PacketSender) SendDualPacket(packet []byte) error {
-	return ps.process.SendDualPacket(packet)
+	return tracePacketSend("dual", packet, func() error { return ps.process.SendDualPacket(packet) })
 }
 
 // ForceClick fires an in-process click with ForceMove key held.
@@ -168,11 +186,13 @@ func (ps *PacketSender) AllocateStatPoint(statID stat.ID) error {
 // SendPacket (send_fn only) resulted in no server-side effect despite no crash
 // with 30B format. The dual path writes mirror buffer + dispatches to Game
 // NetMan, matching D2R's internal flow.
-func (ps *PacketSender) SwapWeapon(fromLeftGID, fromRightGID, toLeftGID, toRightGID data.UnitID) error {
+func (ps *PacketSender) SwapWeapon(fromLeftGID, fromRightGID, toLeftGID, toRightGID data.UnitID, fromSlot uint8) error {
 	if fromLeftGID == 0 && fromRightGID == 0 && toLeftGID == 0 && toRightGID == 0 {
 		return fmt.Errorf("weapon swap: all GIDs are zero, cannot build packet")
 	}
-	if err := ps.SendDualPacket(packet.NewWeaponSwap(fromLeftGID, fromRightGID, toLeftGID, toRightGID)); err != nil {
+	pkt := packet.NewWeaponSwap(fromLeftGID, fromRightGID, toLeftGID, toRightGID, fromSlot)
+	// UI NetMan vtable[5] — safe (no crash). Server still ignores content (transaction_id issue).
+	if err := ps.SendUIPacket(pkt); err != nil {
 		return fmt.Errorf("failed to send weapon swap packet: %w", err)
 	}
 	return nil
@@ -237,6 +257,17 @@ func (ps *PacketSender) IdentifyItem(tomeGID data.UnitID) error {
 	return nil
 }
 
+// CainIdentifyAll sends 0x34 bulk-identify (14 bytes, dual buffer) to Cain.
+// Must be preceded by 0x4D+0x2F (InteractNPC) opening the Cain dialog.
+// Server identifies all unidentified items in player inventory in response.
+func (ps *PacketSender) CainIdentifyAll(cainGID data.UnitID) error {
+	pkt := packet.NewCainIdentifyAll(cainGID)
+	if err := ps.SendDualPacket(pkt); err != nil {
+		return fmt.Errorf("failed to send cain identify-all packet: %w", err)
+	}
+	return nil
+}
+
 
 // TerminateNPCChat closes the NPC dialog (0x30, 5 bytes, dual buffer).
 // Authoritative format per bufpoll 2026-04-14.
@@ -248,10 +279,18 @@ func (ps *PacketSender) TerminateNPCChat(npcGID data.UnitID) error {
 }
 
 // NPCDialogOption sends a dialog menu selection (0x38, 9 bytes, dual buffer).
-// option=1 for Trade, 2 for Gamble on most NPCs. Authoritative format per
-// bufpoll 2026-04-14.
+// option=1 for Trade, 2 for Gamble on most NPCs.
+//
+// Routed via SendDualPacket — the mirror-buffer + dual_send_wrap path. Per
+// the 04-19 breakthrough (memory project_dual_buffer_breakthrough_2026_04_19)
+// dual_send_wrap populates transaction_id from D2R's own session state, so
+// the server correctly flips NPCInteract → Shop after the dialog selection.
+// SendUIPacket (vtable[5]) bypasses that state machine and the server drops
+// the selection silently, which is why "trade u Akary nie działa" in the
+// earlier test — the packet went but its session context was zero.
 func (ps *PacketSender) NPCDialogOption(option uint32, npcGID data.UnitID) error {
-	if err := ps.SendDualPacket(packet.NewNPCDialogOption(option, npcGID)); err != nil {
+	pkt := packet.NewNPCDialogOption(option, npcGID)
+	if err := ps.SendDualPacket(pkt); err != nil {
 		return fmt.Errorf("failed to send NPC dialog option 0x38: %w", err)
 	}
 	return nil
@@ -262,7 +301,12 @@ func (ps *PacketSender) NPCDialogOption(option uint32, npcGID data.UnitID) error
 // 2026-04-07. Server looks up the item's current location by GID; only the
 // destination position is in the packet. Stash menu must be open.
 func (ps *PacketSender) ItemToStash(itemGID data.UnitID, destCol, destRow uint8) error {
-	if err := ps.SendDualPacket(packet.NewItemToStash(itemGID, destCol, destRow)); err != nil {
+	// Test 2026-04-20 09:47: SendDualPacket path for 0x19 crashes D2R
+	// 0xC0000005 on send_fn (similar to 0x33 34B — context-dependent
+	// packets die when fed through send_fn externally). SendUIPacket
+	// routes through UI NetMan vtable[5] which matches how D2R itself
+	// dispatches stash moves from inside the trade/stash window.
+	if err := ps.SendUIPacket(packet.NewItemToStash(itemGID, destCol, destRow)); err != nil {
 		return fmt.Errorf("failed to send item-to-stash packet: %w", err)
 	}
 	return nil
@@ -290,8 +334,9 @@ func (ps *PacketSender) ItemFromStash(itemGID data.UnitID, destCol, destRow uint
 // unique equipment, packet.NPCSellTermConsumable (0xFF) for potions, scrolls,
 // tomes and keys.
 func (ps *PacketSender) NPCSell(sellPrice uint32, itemGID, npcGID data.UnitID, slot, seq uint16, term byte) error {
-	if err := ps.SendDualPacket(packet.NewNPCSellItem(sellPrice, itemGID, npcGID, slot, seq, term)); err != nil {
-		return fmt.Errorf("failed to send sell via dual path: %w", err)
+	// UI NetMan vtable[5] — safe.
+	if err := ps.SendUIPacket(packet.NewNPCSellItem(sellPrice, itemGID, npcGID, slot, seq, term)); err != nil {
+		return fmt.Errorf("failed to send sell packet: %w", err)
 	}
 	return nil
 }
@@ -303,7 +348,8 @@ func (ps *PacketSender) NPCSell(sellPrice uint32, itemGID, npcGID data.UnitID, s
 // are the vendor grid column/row of the item being bought. term follows the
 // same class convention as NPCSell.
 func (ps *PacketSender) NPCBuy(price uint32, itemGID, npcGID data.UnitID, slot, seq uint16, term byte) error {
-	if err := ps.SendDualPacket(packet.NewNPCBuy(price, itemGID, npcGID, slot, seq, term)); err != nil {
+	// UI NetMan vtable[5] — safe.
+	if err := ps.SendUIPacket(packet.NewNPCBuy(price, itemGID, npcGID, slot, seq, term)); err != nil {
 		return fmt.Errorf("failed to send npc buy packet: %w", err)
 	}
 	return nil
@@ -319,13 +365,33 @@ func (ps *PacketSender) GambleBuy(playerGID, gambleItemGID data.UnitID, gambleSl
 	return nil
 }
 
-// CubeTransmute sends a Horadric Cube transmute packet (0x20) via the UI
+// CubeTransmute sends a Horadric Cube transmute packet (0x54) via the UI
 // NetMan path. Caller must already have the cube open with all ingredients
 // placed inside the cube grid (drag-drop done via HID or item move packets
 // first).
+//
+// The 0x54 transmute alone does NOT pick up the result — D2R normally sends
+// a follow-up 0x19 commit packet ~590 ms later to place the transmuted item
+// in the inventory. Use CubeCommit() after a short delay for that step, or
+// Ctrl+click the cube's result slot (which emits 0x19 with the same layout).
 func (ps *PacketSender) CubeTransmute(cubeGID data.UnitID) error {
+	// Test 2026-04-20 02:49: SendDualPacket(0x54, 34B) CRASHES D2R with
+	// 0xC0000005 immediately after dispatch. The 34B cube-transmute layout
+	// (with the 17B footer) is likely incompatible with dual_send_wrap's
+	// buffer expectations; SendUIPacket is the only survivable path today.
+	// Cube still "doesn't work" visibly until transaction_id threading lands,
+	// but at least D2R stays alive so the bot can finish the run.
 	if err := ps.SendUIPacket(packet.NewCubeTransmute(cubeGID)); err != nil {
 		return fmt.Errorf("failed to send cube transmute packet: %w", err)
+	}
+	return nil
+}
+
+// CubeCommit sends the 0x19 follow-up "pick up transmute result" packet.
+// Pair with CubeTransmute after ~590 ms to get the result into inventory.
+func (ps *PacketSender) CubeCommit(cubeGID data.UnitID) error {
+	if err := ps.SendUIPacket(packet.NewCubeCommit(cubeGID)); err != nil {
+		return fmt.Errorf("failed to send cube commit packet: %w", err)
 	}
 	return nil
 }

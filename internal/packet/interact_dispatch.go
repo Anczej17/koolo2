@@ -47,28 +47,31 @@ func NewUsePotion(playerGID, itemGID data.UnitID, beltSlot byte) []byte {
 
 // NewNPCBuy builds the 22-byte 0x32 "buy from merchant" packet.
 //
-// AUTHORITATIVE live capture 2026-04-14 (bufpoll, both buf0 and buf1):
+// AUTHORITATIVE live capture sec_npc_buy.log (8 identical samples, D2R base=0x7ff79d3d0000):
 //
-//	32 [price:u32 LE] [itemGID:u32 LE] [npcGID:u32 LE] [09 00 00 00] \
-//	   [slot:u16 LE] [seq:u16 LE] [term:u8] [00]
+//	32 [price:u32] [itemGID:u32] [npcGID:u32] [09 00 06 00] [slot:u16] [seq:u16] [term:u8]
 //
-// Example (Jewel bought back from Charsi GID=8 for 1466 gold, slot=5, seq=2):
+// Example (price=0x1C2, itemGID=0x1D2, npcGID=0x0E Charsi, slot=5, seq=1, term=0x03):
 //
-//	32 ba050000 3e000000 08000000 09000000 0500 0200 03 00
+//	32 c2010000 d2010000 0e000000 09000600 0500 0100 03
 //
-// Layout identical to 0x33 sell — only opcode differs. Updated 2026-04-15
-// to 24 bytes matching Discord plaintext capture (cursor-buy mode).
-// Slot/seq/term retained for API compat; IGNORED.
+// Note: constant is `09 00 06 00` for BUY (differs from 0x33 sell's `09 00 08 00`
+// and 0x32 gamble's `09 00 01 00`). Using wrong constant triggers D2R send_fn AV.
+// Previous 24B zero-pad form was silently dropped; 22B with correct constant is
+// what D2R itself writes when user HID-clicks buy item in vendor.
 func NewNPCBuy(price uint32, itemGID, npcGID data.UnitID, slot, seq uint16, term byte) []byte {
-	_ = slot
-	_ = seq
-	_ = term
-	buf := make([]byte, 24)
+	buf := make([]byte, 22)
 	buf[0] = OpInteractDispatch
 	binary.LittleEndian.PutUint32(buf[1:5], price)
 	binary.LittleEndian.PutUint32(buf[5:9], uint32(itemGID))
 	binary.LittleEndian.PutUint32(buf[9:13], uint32(npcGID))
-	// bytes 13..23 = 11 zero bytes (Discord-captured layout)
+	buf[13] = 0x09
+	buf[14] = 0x00
+	buf[15] = 0x06
+	buf[16] = 0x00
+	binary.LittleEndian.PutUint16(buf[17:19], slot)
+	binary.LittleEndian.PutUint16(buf[19:21], seq)
+	buf[21] = term
 	return buf
 }
 

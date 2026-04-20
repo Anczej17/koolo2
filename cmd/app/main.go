@@ -22,6 +22,7 @@ import (
 	"local/internal/svc/internal/event"
 	"local/internal/svc/internal/game"
 	"local/internal/svc/internal/gamelib/memory"
+	"local/internal/svc/internal/livetrace"
 	"local/internal/svc/internal/ntapi"
 	"local/internal/svc/internal/remote/discord"
 	"local/internal/svc/internal/remote/droplog"
@@ -203,6 +204,21 @@ func main() {
 		log.Fatalf("Error starting logger: %s", err.Error())
 	}
 	defer sloggger.FlushAndClose()
+
+	// LiveTrace initialisation — tail -F the file to watch packets / clicks /
+	// actions / state diffs in real time. All sub-flags come from config.
+	if config.App.Debug.LiveTrace.Enabled {
+		lt := config.App.Debug.LiveTrace
+		tracePath := lt.File
+		if tracePath == "" {
+			tracePath = "logs/livetrace.log"
+		}
+		if err := livetrace.Init(tracePath, lt.TracePackets, lt.TraceClicks, lt.TraceActions, lt.TraceStateDiffs); err != nil {
+			logger.Warn("livetrace: init failed", "error", err)
+		} else {
+			logger.Info("livetrace: enabled", "file", tracePath, "packets", lt.TracePackets, "clicks", lt.TraceClicks, "actions", lt.TraceActions, "stateDiffs", lt.TraceStateDiffs)
+		}
+	}
 
 	defer func() {
 		if r := recover(); r != nil {

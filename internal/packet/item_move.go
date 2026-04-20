@@ -37,13 +37,26 @@ func NewItemFromStash(itemGID data.UnitID, destCol, destRow uint8) []byte {
 }
 
 func newItemMove19(itemGID, marker, col, row uint32) []byte {
-	buf := make([]byte, 21)
+	// Live capture 08_npc_with_trade.json (2026-04-15) — 22B stash-move:
+	//   19 [gid:u32] [marker:u32=0x07 sell or 0x04 trade] [01000000]
+	//      [00000000] [destCol:u8] 00 [destRow:u8] 00 [term=0x03]
+	// The previous 21B builder with marker=0x06 + pad:u32 never matched
+	// and D2R crashed on send. Marker 0x07 is the "sell/move" context; we
+	// keep that as the default — caller should set 0x04 only for in-trade
+	// moves (currently not wired because our trade flow uses 0x33/0x32
+	// directly).
+	buf := make([]byte, 22)
 	buf[0] = 0x19
 	binary.LittleEndian.PutUint32(buf[1:5], itemGID)
-	binary.LittleEndian.PutUint32(buf[5:9], marker)
-	binary.LittleEndian.PutUint32(buf[9:13], col)
-	binary.LittleEndian.PutUint32(buf[13:17], row)
-	// buf[17:21] = 0 (padding)
+	_ = marker                                      // unused — see comment above
+	binary.LittleEndian.PutUint32(buf[5:9], 0x07)   // marker (sell/move)
+	binary.LittleEndian.PutUint32(buf[9:13], 0x01)  // flag=1
+	binary.LittleEndian.PutUint32(buf[13:17], 0x0)  // reserved
+	buf[17] = uint8(col)
+	buf[18] = 0x00
+	buf[19] = uint8(row)
+	buf[20] = 0x00
+	buf[21] = 0x03 // term
 	return buf
 }
 

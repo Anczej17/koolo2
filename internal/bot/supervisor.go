@@ -147,13 +147,19 @@ func (s *baseSupervisor) waitUntilCharacterSelectionScreen() error {
 	// via InGame, not a specific "char select panel visible" signal.
 	clickIdx := 0
 	for !s.bot.ctx.GameReader.IsInCharacterSelectionScreen() && !s.bot.ctx.GameReader.InGame() {
-		switch clickIdx % 3 {
+		switch clickIdx % 6 {
 		case 0:
-			s.bot.ctx.HID.Click(game.LeftButton, 100, 100)
+			s.bot.ctx.HID.Click(game.LeftButton, 100, 100) // corner
 		case 1:
-			s.bot.ctx.HID.Click(game.LeftButton, 640, 602)
+			s.bot.ctx.HID.Click(game.LeftButton, 640, 602) // Continue button on calibration dialogs
 		case 2:
+			s.bot.ctx.HID.Click(game.LeftButton, 640, 360) // screen centre — title InputPrompt hitbox
+		case 3:
 			s.bot.ctx.HID.PressKey(0x47) // VK_G — tiny mod "PRESS G TO PLAY"
+		case 4:
+			s.bot.ctx.HID.PressKey(0x20) // VK_SPACE — dismiss "Press Any Key" intro prompt
+		case 5:
+			s.bot.ctx.HID.PressKey(0x0D) // VK_RETURN — offline profile default-select
 		}
 		clickIdx++
 		time.Sleep(250 * time.Millisecond)

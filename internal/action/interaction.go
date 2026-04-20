@@ -149,8 +149,6 @@ func InteractObjectByID(id data.UnitID, isCompletedFn func() bool) error {
 	return InteractObject(o, isCompletedFn)
 }
 
-// SelectNPCTradeOption sends the "Trade" dialog option via packet 0x38.
-// Falls back to HID KeySequence if packet fails or is not available.
 // SelectNPCOption sends a generic NPC dialog option (0x38) for `npcID`.
 // Replaces any HID.KeySequence(VK_HOME, VK_DOWN..., VK_RETURN) navigation
 // pattern. option=0 → first menu item, 1 → second, 2 → third, etc.
@@ -173,25 +171,59 @@ func SelectNPCOption(option uint32, npcID npc.ID) {
 
 // SelectNPCTradeOption sends the "Trade" dialog option via 0x38 packet.
 // Full-packet bot: no HID fallback (user 2026-04-19).
-// tradeIndex: 0 = first option (Jamella), 1 = second option (most vendors).
+// option: 0 = first option (Jamella), 1 = second option (most vendors).
 func SelectNPCTradeOption(npcID npc.ID) {
 	ctx := context.Get()
 	if ctx.PacketSender == nil {
+		ctx.Logger.Warn("SelectNPCTradeOption: PacketSender nil", "npc", npcID)
 		return
 	}
 	townNPC, found := ctx.Data.Monsters.FindOne(npcID, data.MonsterTypeNone)
 	if !found {
-		ctx.Logger.Warn("SelectNPCTradeOption: NPC not found in monster table", "npc", npcID)
+		ctx.Logger.Warn("SelectNPCTradeOption: NPC not found", "npc", npcID)
 		return
 	}
 	option := uint32(1) // most vendors: Trade is second option
 	if npcID == npc.Jamella {
 		option = 0 // Jamella: Trade is first
 	}
+	// Diagnostic: snapshot menu state before/after so we can see if D2R
+	// transitioned from NPCInteract → Shop after the 0x38 packet.
+	beforeNPC := ctx.Data.OpenMenus.NPCInteract
+	beforeShop := ctx.Data.OpenMenus.NPCShop
+	ctx.Logger.Info("SelectNPCTradeOption: sending 0x38",
+		"npc", npcID, "option", option, "npcGID", townNPC.UnitID,
+		"NPCInteract", beforeNPC, "NPCShop", beforeShop)
 	if err := ctx.PacketSender.NPCDialogOption(option, townNPC.UnitID); err != nil {
 		ctx.Logger.Warn("SelectNPCTradeOption packet failed", "err", err)
+		utils.Sleep(100)
 	}
-	utils.Sleep(100)
+	utils.Sleep(500)
+	ctx.RefreshGameData()
+	afterNPC := ctx.Data.OpenMenus.NPCInteract
+	afterShop := ctx.Data.OpenMenus.NPCShop
+	if !afterShop {
+		// Stateless 0x38 (SendUIPacket vtable[5] or SendDualPacket without
+		// transaction_id threading) does NOT flip NPCShop. Bot then deadlocks
+		// because trade window never becomes available. Fallback: D2R's own
+		// "Home + DOWN + Enter" keyboard navigation picks the Trade menu
+		// entry from inside the dialog. Halbu (Act3 armor vendor) has Trade
+		// as the first entry, so only Home+Enter for him.
+		ctx.Logger.Warn("SelectNPCTradeOption: 0x38 sent but NPCShop did NOT open — HID keyboard fallback",
+			"npc", npcID, "option", option,
+			"NPCInteract_before", beforeNPC, "NPCInteract_after", afterNPC,
+			"NPCShop_before", beforeShop, "NPCShop_after", afterShop)
+		if npcID == npc.Halbu {
+			ctx.HID.KeySequence(0x24 /*HOME*/, 0x0D /*ENTER*/)
+		} else {
+			ctx.HID.KeySequence(0x24 /*HOME*/, 0x28 /*DOWN*/, 0x0D /*ENTER*/)
+		}
+		utils.Sleep(500)
+		ctx.RefreshGameData()
+	} else {
+		ctx.Logger.Info("SelectNPCTradeOption: NPCShop opened ✓",
+			"npc", npcID, "option", option)
+	}
 }
 
 // CloseNPCDialog sends the NPC-close packet 0x30 via DualSend.

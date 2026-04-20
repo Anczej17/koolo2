@@ -60,6 +60,7 @@ type MemoryInjector struct {
 	getKeyStateOrigBytes  [18]byte
 	setCursorPosAddr      uintptr
 	setCursorPosOrigBytes [6]byte
+	sendMessageWAddr      uintptr // user32!SendMessageW — called in-process via APC for HID clicks/keys without OS msg queue
 	logger                *slog.Logger
 	cursorOverrideActive  bool
 	lastCursorX           int
@@ -215,6 +216,7 @@ func (i *MemoryInjector) Load() error {
 			i.getKeyStateAddr, _ = syscall.GetProcAddress(module.ModuleHandle, "GetKeyState")
 			i.trackMouseEventAddr, _ = syscall.GetProcAddress(module.ModuleHandle, "TrackMouseEvent")
 			i.setCursorPosAddr, _ = syscall.GetProcAddress(module.ModuleHandle, "SetCursorPos")
+			i.sendMessageWAddr, _ = syscall.GetProcAddress(module.ModuleHandle, "SendMessageW")
 
 			err = windows.ReadProcessMemory(i.handle, i.getCursorPosAddr, &i.getCursorPosOrigBytes[0], uintptr(len(i.getCursorPosOrigBytes)), nil)
 			if err != nil {
@@ -419,6 +421,27 @@ func buildKeyStateMappedTrampoline(keyDataAddr uintptr, origBytes []byte) []byte
 	code = append(code, origBytes...)
 
 	return code
+}
+
+// SendMessageInProcess calls user32!SendMessageW FROM D2R's own thread (via
+// APC), so WndProc fires synchronously from D2R's legitimate call stack.
+// No cross-process SendMessage / OS message queue involvement — the OS sees
+// only an in-process user32 call, indistinguishable from D2R's own internal
+// message posts. Use this for all HID-style input that must survive in a
+// full-packet bot posture.
+//
+// Blocks up to ~5s via CallFnGameThread. Returns WndProc's LRESULT.
+func (i *MemoryInjector) SendMessageInProcess(hwnd uintptr, msg uint32, wParam, lParam uintptr) (uint64, error) {
+	if i == nil || !i.isLoaded {
+		return 0, nil
+	}
+	if i.sendMessageWAddr == 0 {
+		return 0, fmt.Errorf("SendMessageW not resolved")
+	}
+	if i.presenter == nil || !i.presenter.IsReady() {
+		return 0, fmt.Errorf("presenter not ready for in-process SendMessage")
+	}
+	return i.presenter.CallFnGameThread(i.sendMessageWAddr, hwnd, uintptr(msg), wParam, lParam)
 }
 
 // OverrideGetKeyState temporarily patches GetKeyState to return 0x8000 for the given key.

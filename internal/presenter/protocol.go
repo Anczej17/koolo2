@@ -46,6 +46,7 @@ const (
 	CmdRopScan        = 26 // GID-4: scan D2R .text for ROP gadgets (ret-ending sequences), populate G_ROP_GADGETS
 	CmdRopRead        = 27 // GID-5: copy D2R bytes via chained D2R gadgets (memcpy ROP). Currently gated (returns status=2 until trigger encoding verified).
 	CmdRopReadBatch   = 29 // batch N (src_va, len) tuples in one Present frame — amortises round-trip
+	CmdRopCall3       = 30 // GID-4: 3-arg ROP call into D2R fn (RCX/RDX/R8); dry-run unless arg3 bit63=1
 
 	// Status values written by the Rust DLL, polled by Go.
 	StatusBusy  = 0
@@ -76,6 +77,7 @@ const (
 	offMirrorBufAddr   = 0x68  // u64: D2R global mirror buffer VA (dual-send)
 	offForceMoveAddr   = 0x70  // u64: D2R keystate ForceMove VK entry VA
 	offDualSendWrap    = 0x78  // u64: dual_send_wrap VA (game thread packet send)
+	offSkipPresentHook = 0xA0  // u32: 1 = skip Present detour install (GTC64-only dispatch)
 	// offSessionPrefix: 8 wide chars + null term (18 bytes) holding the
 	// per-session random SHM prefix. The DLL reads this on Init() so its own
 	// SHM creates (sniffer, tracer) match Go-side names. Lives in the
@@ -348,6 +350,17 @@ const (
 	// STATUS (u8 per slot, 0 ok / 1 partial / 2 invalid).
 	OffRopBatchCount    = 0x3070 // u32 — entries to process
 	OffRopBatchTotalLen = 0x3074 // u32 — out: bytes packed into OffRopReadBuffer
+
+	// CMD_ROP_CALL3 — 3-arg ROP-chain call into a D2R function. a3 bit63=1
+	// arms the trigger; otherwise dry-run (chain built + gadgets verified,
+	// trigger not invoked). Status codes: 0=ok, 1=pool-miss, 2=gadget-miss,
+	// 3=exec-fail, 4=not-ready.
+	OffRopCall3Fn     = 0x3900 // u64 — target fn VA
+	OffRopCall3A1     = 0x3908 // u64 — arg1 → RCX
+	OffRopCall3A2     = 0x3910 // u64 — arg2 → RDX
+	OffRopCall3A3     = 0x3918 // u64 — arg3 → R8 (bit63 = arm trigger)
+	OffRopCall3Status = 0x3920 // u32 — 0=ok ... 4=not-ready
+	OffRopCall3Dbg    = 0x3924 // u32 — step marker (0xCA110001..)
 	OffRopBatchEntries  = 0x3080 // BatchEntry[128], 16 B each: src_va u64, len u32, _pad u32
 	OffRopBatchStatus   = 0x3880 // u8[128]
 	RopBatchMax         = 128

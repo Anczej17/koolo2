@@ -47,7 +47,7 @@ func swapWeapon(toCTA bool) error {
 			ctx.Logger.Warn("SwapWeapon: no equipped weapons resolved — skipping swap")
 			return nil
 		}
-		if err := ctx.PacketSender.SwapWeapon(fL, fR, tL, tR); err != nil {
+		if err := ctx.PacketSender.SwapWeapon(fL, fR, tL, tR, uint8(ctx.Data.ActiveWeaponSlot)); err != nil {
 			ctx.Logger.Warn("SwapWeapon packet failed", "err", err)
 		}
 		utils.PingSleep(utils.Light, 150)

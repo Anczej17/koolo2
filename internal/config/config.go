@@ -47,6 +47,18 @@ type AppCfg struct {
 		Screenshots               bool `yaml:"screenshots"`
 		RenderMap                 bool `yaml:"renderMap"`
 		OpenOverlayMapOnGameStart bool `yaml:"openOverlayMapOnGameStart"`
+		// LiveTrace emits every packet send, HID click/keystroke, and action
+		// outcome to logs/livetrace.log as a line-delimited JSON stream. Use
+		// `tail -F` to watch in real time. Heavy — disable for production.
+		LiveTrace struct {
+			Enabled           bool   `yaml:"enabled"`
+			File              string `yaml:"file"`              // output path (default: logs/livetrace.log)
+			TracePackets      bool   `yaml:"tracePackets"`      // every Send* (opcode, len, bytes head, path)
+			TraceClicks       bool   `yaml:"traceClicks"`       // HID.Click / HID.PressKey / HID.KeySequence
+			TraceActions      bool   `yaml:"traceActions"`      // action boundaries (stashItem, cubeTransmute, ...)
+			TraceStateDiffs   bool   `yaml:"traceStateDiffs"`   // poll gamestate + log diffs (HP / gold / area / menus)
+			StatePollMs       int    `yaml:"statePollMs"`       // diff poll interval ms (default 500)
+		} `yaml:"liveTrace"`
 	} `yaml:"debug"`
 	FirstRun              bool   `yaml:"firstRun"`
 	UseCustomSettings     bool   `yaml:"useCustomSettings"`

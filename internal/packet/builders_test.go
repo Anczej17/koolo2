@@ -49,11 +49,20 @@ func TestNewItemFromStash_0x18(t *testing.T) {
 
 func TestNewItemToStash_0x19(t *testing.T) {
 	got := NewItemToStash(data.UnitID(0x53), 7, 1)
-	if len(got) != 21 {
-		t.Fatalf("0x19 length: got %d want 21", len(got))
+	if len(got) != 22 {
+		t.Fatalf("0x19 length: got %d want 22 (live capture format)", len(got))
 	}
 	if got[0] != 0x19 {
 		t.Fatalf("0x19 opcode: got 0x%02X want 0x19", got[0])
+	}
+	if binary.LittleEndian.Uint32(got[1:5]) != 0x53 {
+		t.Fatalf("0x19 gid: got 0x%08X want 0x53", binary.LittleEndian.Uint32(got[1:5]))
+	}
+	if got[17] != 7 || got[19] != 1 {
+		t.Fatalf("0x19 dest: got col=%d row=%d want col=7 row=1", got[17], got[19])
+	}
+	if got[21] != 0x03 {
+		t.Fatalf("0x19 term: got 0x%02X want 0x03", got[21])
 	}
 }
 
@@ -83,27 +92,21 @@ func TestNewGoldTransfer_0x27(t *testing.T) {
 }
 
 func TestNewNPCSellItem_0x33(t *testing.T) {
-	got := NewNPCSellItem(0x68A, data.UnitID(0x17), data.UnitID(0x08), 0, 0, 0)
-	if len(got) != 24 {
-		t.Fatalf("0x33 length: got %d want 24 (cursor-sell format per Discord 04-15)", len(got))
+	got := NewNPCSellItem(0x1D4C, data.UnitID(0x38), data.UnitID(0x0E), 5, 2, 0x03)
+	if len(got) != 22 {
+		t.Fatalf("0x33 length: got %d want 22 (capture_buysell.log last_diff=21)", len(got))
 	}
 	if got[0] != 0x33 {
 		t.Fatalf("0x33 opcode: got 0x%02X want 0x33", got[0])
 	}
-	if binary.LittleEndian.Uint32(got[1:5]) != 0x68A {
-		t.Fatalf("0x33 sellPrice: got 0x%X want 0x68A", binary.LittleEndian.Uint32(got[1:5]))
+	if binary.LittleEndian.Uint32(got[13:17]) != 0x00080009 {
+		t.Fatalf("0x33 constant bytes 13-16: want 09 00 08 00, got %X", got[13:17])
 	}
-	if binary.LittleEndian.Uint32(got[5:9]) != 0x17 {
-		t.Fatalf("0x33 itemGID: got 0x%X want 0x17", binary.LittleEndian.Uint32(got[5:9]))
+	if binary.LittleEndian.Uint16(got[17:19]) != 5 {
+		t.Fatalf("0x33 slot: got %d want 5", binary.LittleEndian.Uint16(got[17:19]))
 	}
-	if binary.LittleEndian.Uint32(got[9:13]) != 0x08 {
-		t.Fatalf("0x33 npcGID: got 0x%X want 0x08", binary.LittleEndian.Uint32(got[9:13]))
-	}
-	// Bytes 13..23 are 11 zero bytes per cursor-sell format.
-	for i := 13; i < 24; i++ {
-		if got[i] != 0 {
-			t.Fatalf("0x33 byte[%d]: got 0x%02X want 0x00 (zero-pad)", i, got[i])
-		}
+	if got[21] != 0x03 {
+		t.Fatalf("0x33 term: got 0x%02X want 0x03", got[21])
 	}
 }
 
@@ -177,7 +180,7 @@ func TestNewItemMoveStash_0x54(t *testing.T) {
 
 func TestNewWeaponSwap_0x50(t *testing.T) {
 	// 0x50 weapon swap - ground truth 30B from logs/sec_*.log
-	got := NewWeaponSwap(data.UnitID(0x5C), data.UnitID(0x56), data.UnitID(0x4B), data.UnitID(0x50))
+	got := NewWeaponSwap(data.UnitID(0x5C), data.UnitID(0x56), data.UnitID(0x4B), data.UnitID(0x50), 0)
 	if len(got) != 30 {
 		t.Fatalf("0x50 length: got %d want 30 (ground truth)", len(got))
 	}

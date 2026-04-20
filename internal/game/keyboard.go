@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"local/internal/svc/internal/gamelib/data"
+	"local/internal/svc/internal/livetrace"
 	"local/internal/svc/internal/utils/winproc"
 	"github.com/lxn/win"
 )
@@ -17,6 +18,7 @@ const (
 
 // PressKey receives an ASCII code and sends a key press event to the game window
 func (hid *HID) PressKey(key byte) {
+	livetrace.Get().Key(key, "")
 	win.PostMessage(hid.gr.HWND, win.WM_KEYDOWN, uintptr(key), hid.calculatelParam(key, true))
 	sleepTime := rand.Intn(keyPressMaxTime-keyPressMinTime) + keyPressMinTime
 	time.Sleep(time.Duration(sleepTime) * time.Millisecond)

@@ -66,21 +66,14 @@ var ErrUnrecoverableClientState = errors.New("unrecoverable client state, forcin
 
 func (s *SinglePlayerSupervisor) orderRuns(runs []string) []string {
 
-	if s.bot.ctx.CharacterCfg.Game.Difficulty == "Nightmare" {
-
-		s.bot.ctx.Logger.Info("Changing difficulty to Nightmare")
-
-		s.changeDifficulty(difficulty.Nightmare)
-
-	}
-
-	if s.bot.ctx.CharacterCfg.Game.Difficulty == "Hell" {
-
-		s.bot.ctx.Logger.Info("Changing difficulty to Hell")
-
-		s.changeDifficulty(difficulty.Hell)
-
-	}
+	// Difficulty is handled inside Manager.NewGame which clicks Play (600,650)
+	// then the difficulty button at the correct Y (Normal 311 / Nightmare 355
+	// / Hell 403) per manager.go:96-102. Calling changeDifficulty here in
+	// orderRuns created a DUPLICATE click sequence with wrong coords that
+	// interfered with the proper flow (observed 2026-04-20 12:00+: bot hit
+	// Play but then clicked at 640,470 which is BELOW the difficulty panel,
+	// so Hell never got selected).
+	_ = difficulty.Hell // keep import
 
 	lvl, _ := s.bot.ctx.Data.PlayerUnit.FindStat(stat.Level, 0)
 
@@ -106,19 +99,24 @@ func (s *SinglePlayerSupervisor) changeDifficulty(d difficulty.Difficulty) {
 
 	utils.Sleep(1000)
 
+	// D2R's Offline Difficulty modal at the default 1280x720 window places
+	// the three difficulty buttons on the vertical centre-line (x≈640) at
+	// roughly 370/420/470 y. The old 400 y-values were shifted off the
+	// buttons on this resolution — user observed "bot nie trafia w
+	// difficulty" 2026-04-20 11:50. Adjusted to match the centre column.
 	switch d {
 
 	case difficulty.Normal:
 
-		s.bot.ctx.HID.Click(game.LeftButton, 400, 350)
+		s.bot.ctx.HID.Click(game.LeftButton, 640, 370)
 
 	case difficulty.Nightmare:
 
-		s.bot.ctx.HID.Click(game.LeftButton, 400, 400)
+		s.bot.ctx.HID.Click(game.LeftButton, 640, 420)
 
 	case difficulty.Hell:
 
-		s.bot.ctx.HID.Click(game.LeftButton, 400, 450)
+		s.bot.ctx.HID.Click(game.LeftButton, 640, 470)
 
 	}
 
@@ -313,7 +311,7 @@ func (s *SinglePlayerSupervisor) Start() error {
 	// NORMAL MODE: Original code unchanged from here
 	firstRun := true
 	var timeSpentNotInGameStart = time.Now()
-	const maxTimeNotInGame = 45 * time.Second
+	const maxTimeNotInGame = 300 * time.Second // D2R title-screen→char-select→in-game transition observed at ~3m50s on this VM (2026-04-20 11:50); 180s triggered false-positive restart loops. 300s gives ample slack.
 
 	for {
 		// Check if the main context has been cancelled
@@ -428,9 +426,13 @@ func (s *SinglePlayerSupervisor) Start() error {
 			rand.Shuffle(len(runs), func(i, j int) { runs[i], runs[j] = runs[j], runs[i] })
 		}
 
-		// Check if this is a rejoin (same game) — skip already completed runs
+		// Check if this is a rejoin (same game) — skip already completed runs.
+		// Offline/single-player has empty game names so every game would match
+		// empty == empty and trigger "rejoin" → 0 runs remain → ExitGame loop
+		// observed 2026-04-20. Require a non-empty gameID to enable rejoin
+		// detection; offline play is treated as a fresh game every time.
 		currentGameID := s.bot.ctx.GameReader.LastGameName()
-		if s.bot.ctx.CompletedGameID == currentGameID {
+		if currentGameID != "" && s.bot.ctx.CompletedGameID == currentGameID {
 			completed := s.bot.ctx.GetCompletedRuns()
 			if len(completed) > 0 {
 				completedSet := make(map[string]bool, len(completed))
@@ -466,6 +468,11 @@ func (s *SinglePlayerSupervisor) Start() error {
 						s.waitForPartyMembers(ctx)
 					}
 
+					// Reset completed runs before exiting so the next game
+					// (even if D2R reuses the same empty game name for offline
+					// play) doesn't re-trigger "all runs completed" → ExitGame
+					// → rejoin loop observed 2026-04-20.
+					s.bot.ctx.ResetCompletedRuns("")
 					s.bot.ctx.Manager.ExitGame()
 					utils.Sleep(3000)
 					timeSpentNotInGameStart = time.Now()
@@ -506,7 +513,7 @@ func (s *SinglePlayerSupervisor) Start() error {
 				// Full-packet bot: always emit 0x50; no HID fallback (user 2026-04-19).
 				if s.bot.ctx.PacketSender != nil {
 					fL, fR, tL, tR := action.WeaponSwapGIDs(s.bot.ctx.Data)
-					if err := s.bot.ctx.PacketSender.SwapWeapon(fL, fR, tL, tR); err != nil {
+					if err := s.bot.ctx.PacketSender.SwapWeapon(fL, fR, tL, tR, uint8(s.bot.ctx.Data.ActiveWeaponSlot)); err != nil {
 						s.bot.ctx.Logger.Warn("supervisor SwapWeapon packet failed", "err", err)
 					}
 				}
@@ -516,6 +523,16 @@ func (s *SinglePlayerSupervisor) Start() error {
 			if s.bot.ctx.Data.ActiveWeaponSlot != 0 {
 				s.bot.ctx.Logger.Warn("Failed to return to main weapon slot after game start", "slot", s.bot.ctx.Data.ActiveWeaponSlot)
 			}
+		}
+
+		// 2026-04-20 test37: Even with SKIP_PRESENT_HOOK (rmod installs only
+		// GTC64 + TimerQueue, no Present detour), HID movement STILL broke.
+		// Something else about rmod injection drops HID input. Fix requires
+		// PACKET-based movement (not HID). Gated behind env var until packet
+		// movement is wired into PathFinder.
+		if os.Getenv("ENABLE_DUAL_PRESENTER") == "1" && firstRun {
+			s.bot.ctx.Logger.Info("Normal mode: activating dual-only presenter (ENABLE_DUAL_PRESENTER=1)")
+			s.initPresenterDualOnly()
 		}
 
 		if s.bot.ctx.CharacterCfg.Companion.Enabled && s.bot.ctx.CharacterCfg.Companion.Leader {
@@ -1580,6 +1597,80 @@ func (s *SinglePlayerSupervisor) dumpArmory() error {
 
 	gameName := s.bot.ctx.GameReader.LastGameName()
 	return dumpArmoryData(s.name, s.bot.ctx.Data, gameName)
+}
+
+// initPresenterDualOnly is the minimal-side-effect variant of
+// initClaudePresenter: load rmod.dll, run pres.Init, wire only
+// SetExternalDualSender + SetForceMoveAddr. Skips the Claude-mode wiring of
+// CallFn/WriteMem/RopRead/BatchRead/SlotBatchRead, which break HID-driven
+// movement and door/WP click in normal mode (test15 04-19: bot stuck on
+// object=119 immediately after full Claude init). With dual-only, every
+// dual-buffer packet (0x38, 0x50, 0x33, 0x32, 0x18, 0x19, 0x54, 0x27) reaches
+// D2R via the Present hook; everything else stays on the legacy APC path.
+func (s *SinglePlayerSupervisor) initPresenterDualOnly() {
+	defer func() {
+		if r := recover(); r != nil {
+			s.bot.ctx.Logger.Error(fmt.Sprintf("PANIC in dual-only presenter init: %v", r))
+		}
+	}()
+
+	if s.bot.ctx.MemoryInjector != nil && s.bot.ctx.MemoryInjector.GetPresenter() != nil {
+		s.bot.ctx.Logger.Warn("Normal mode: presenter already initialized — skipping duplicate init")
+		return
+	}
+
+	gr := s.bot.ctx.GameReader
+	gi := s.bot.ctx.MemoryInjector
+	pid := gr.GetPID()
+	hwnd := gr.HWND
+
+	fnSendPacket, fnErr := gr.Process.GetD2GSSendPacketFn()
+	if fnErr != nil {
+		s.bot.ctx.Logger.Warn("dual-only presenter: could not resolve dispatch function", slog.Any("error", fnErr))
+		return
+	}
+
+	const uiNetManRVA uintptr = 0x19ED860
+	uiNetManAddr := gr.Process.ModuleBaseAddress() + uiNetManRVA
+	const mirrorBufRVA uintptr = 0x1F51330
+	mirrorBufAddr := gr.Process.ModuleBaseAddress() + mirrorBufRVA
+	const dualSendWrapRVA uintptr = 0x147110
+	dualSendWrapAddr := gr.Process.ModuleBaseAddress() + dualSendWrapRVA
+
+	var realClickFn uintptr
+	if rcFn, rcErr := gr.Process.GetRealClickWorkerFn(); rcErr == nil {
+		realClickFn = rcFn
+	}
+
+	presenterDLLPath := filepath.Join("tools", "rmod.dll")
+	if absPath, err := filepath.Abs(presenterDLLPath); err == nil {
+		presenterDLLPath = absPath
+	}
+	if _, statErr := os.Stat(presenterDLLPath); statErr != nil {
+		s.bot.ctx.Logger.Warn("dual-only presenter: rmod.dll missing", slog.String("path", presenterDLLPath))
+		return
+	}
+
+	pres := presenter.New(pid, presenterDLLPath)
+	// SKIP Present hook — only GetTickCount64 IAT + TimerQueue worker. Avoids
+	// render thread slowdown that breaks HID clicks in normal mode (test35/36).
+	pres.SetSkipPresentHook(true)
+	if initErr := pres.Init(fnSendPacket, uiNetManAddr, realClickFn, uintptr(hwnd), mirrorBufAddr, dualSendWrapAddr); initErr != nil {
+		s.bot.ctx.Logger.Error("dual-only presenter init FAILED", slog.Any("error", initErr))
+		return
+	}
+
+	gi.SetPresenter(pres)
+	// NOTE 2026-04-20 test40: tried SendDualPacketGT — D2R crashes 0xC0000005
+	// because dual_send_wrap's Arxan tamper byte-rotates caller return address.
+	// When called from GTC64 thunk (our allocated page), rotation corrupts our
+	// shellcode after ~2 calls → crash. Proper fix requires ROP chain with
+	// gadgets from D2R.text (Arxan tamper harmless self-mod of D2R code).
+	// Reverted to SendDualPacket (render-thread) — same limitation but D2R survives.
+	gr.Process.SetExternalDualSender(pres.SendDualPacket)
+	forceMoveAddr := gr.Process.GetModuleBase() + 0x19D25B4 + 0x49C + 4
+	pres.SetForceMoveAddr(forceMoveAddr)
+	s.bot.ctx.Logger.Info("Normal mode: dual-only presenter initialized — dual-buffer packets routed via rmod")
 }
 
 func (s *SinglePlayerSupervisor) initClaudePresenter() {

@@ -6,19 +6,15 @@ import (
 	"local/internal/svc/internal/gamelib/data"
 )
 
-// NewNPCDialogOption creates an NPC dialog option select packet (0x38).
+// NewNPCDialogOption creates an NPC dialog option select packet (0x38, 9B).
 //
-// AUTHORITATIVE live capture 2026-04-14 (bufpoll, both buf0 and buf1, 9 bytes):
+// Sent after the NPC dialog is already open. Dispatch via SendDualPacket.
 //
-//	38 [option:u32 LE] [npcGID:u32 LE]
-//
-// option=1 is "Trade" (first menu item). Other values for repair, gamble, quest.
-// Sent after the NPC dialog is already open (the dialog open itself must be
-// driven via HID click — 0x2F from main thread crashes send_fn).
-//
-// Dual buffer: must be dispatched via SendDualPacket (mirror write + send_fn).
-// The old 13-byte layout with trailing coords was residue from a mixed buffer
-// read; authoritative bufpoll captures never show those 4 extra bytes.
+// Test27 2026-04-19 confirmed: 6B form [38][option:u32][npcGID_low:u8]
+// (per live capture 08_npc_with_trade buf=1) CRASHES D2R with 0xC0000005
+// AV — the buf=1 "6B" read was likely truncated/residue overlap, not the
+// actual wire format. The 9B form [38][option:u32][npcGID:u32] is safe —
+// server processes Cain Identify dialog correctly (test24 visual-confirmed).
 func NewNPCDialogOption(option uint32, npcGID data.UnitID) []byte {
 	buf := make([]byte, 9)
 	buf[0] = OpNPCDialogResponse

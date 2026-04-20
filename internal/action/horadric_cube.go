@@ -174,10 +174,42 @@ func CubeTransmute() error {
 	ctx.Logger.Debug("Transmuting items in the Horadric Cube")
 	utils.Sleep(150)
 
-	if ctx.Data.LegacyGraphics {
-		ctx.HID.Click(game.LeftButton, ui.CubeTransmuteBtnXClassic, ui.CubeTransmuteBtnYClassic)
-	} else {
-		ctx.HID.Click(game.LeftButton, ui.CubeTransmuteBtnX, ui.CubeTransmuteBtnY)
+	// Snapshot cube contents BEFORE — if the server silently drops the 0x54
+	// (happens when transaction_id threading is missing), the ingredients
+	// stay in the cube. Counting pre/post lets us detect the drop and fall
+	// back to the HID button click instead of looping with stale cube state.
+	cubeIngredientsBefore := len(ctx.Data.Inventory.ByLocation(item.LocationCube))
+
+	sentViaPacket := false
+	if ctx.CharacterCfg.PacketCasting.UseForCubeTransmute && ctx.PacketSender != nil {
+		if cube, ok := ctx.Data.Inventory.Find("HoradricCube", item.LocationInventory, item.LocationStash); ok {
+			if err := ctx.PacketSender.CubeTransmute(cube.UnitID); err == nil {
+				utils.Sleep(600)
+				if err := ctx.PacketSender.CubeCommit(cube.UnitID); err != nil {
+					ctx.Logger.Warn("CubeCommit packet failed", slog.Any("error", err))
+				}
+				utils.Sleep(400)
+				ctx.RefreshGameData()
+				cubeIngredientsAfter := len(ctx.Data.Inventory.ByLocation(item.LocationCube))
+				if cubeIngredientsAfter < cubeIngredientsBefore {
+					sentViaPacket = true
+				} else {
+					ctx.Logger.Warn("CubeTransmute packet sent but cube still has ingredients — falling back to HID",
+						slog.Int("before", cubeIngredientsBefore),
+						slog.Int("after", cubeIngredientsAfter))
+				}
+			} else {
+				ctx.Logger.Warn("CubeTransmute packet send failed, falling back to HID", slog.Any("error", err))
+			}
+		}
+	}
+	if !sentViaPacket {
+		// HID.Click — in-process SendMessageW on transmute button.
+		if ctx.Data.LegacyGraphics {
+			ctx.HID.Click(game.LeftButton, ui.CubeTransmuteBtnXClassic, ui.CubeTransmuteBtnYClassic)
+		} else {
+			ctx.HID.Click(game.LeftButton, ui.CubeTransmuteBtnX, ui.CubeTransmuteBtnY)
+		}
 	}
 
 	utils.Sleep(2000)

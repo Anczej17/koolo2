@@ -350,7 +350,7 @@ func (s *WhirlwindBarb) SwapToSlot(slot int) bool {
 		// Full-packet bot: always emit 0x50; no HID fallback (user 2026-04-19).
 		if ctx.PacketSender != nil {
 			fL, fR, tL, tR := action.WeaponSwapGIDs(ctx.Data)
-			if err := ctx.PacketSender.SwapWeapon(fL, fR, tL, tR); err != nil {
+			if err := ctx.PacketSender.SwapWeapon(fL, fR, tL, tR, uint8(ctx.Data.ActiveWeaponSlot)); err != nil {
 				ctx.Logger.Warn("whirlwind_barb SwapWeapon packet failed", "err", err)
 			}
 		}

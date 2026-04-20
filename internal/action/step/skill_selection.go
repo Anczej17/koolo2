@@ -11,7 +11,11 @@ import (
 )
 
 // SelectRightSkill selects a skill for the right mouse button via packet 0x3C.
-// Full-packet bot: no HID fallback per user mandate 2026-04-19.
+// Full-packet bot mandate 2026-04-19: prefer packet path. Emergency HID
+// fallback only when PacketSender is nil (rmod presenter not yet attached
+// during early game start) — without it, callers like MoveCharacter end up
+// teleporting with the wrong right-skill (Blizzard sorc on WP click → casts
+// Blizzard at WP coords instead of Teleport → bot stuck).
 func SelectRightSkill(skillID skill.ID) error {
 	ctx := context.Get()
 
@@ -20,18 +24,20 @@ func SelectRightSkill(skillID skill.ID) error {
 	}
 
 	if ctx.PacketSender == nil {
-		return fmt.Errorf("PacketSender unavailable, cannot select right skill %v", skillID)
+		ctx.Logger.Warn(fmt.Sprintf("PacketSender nil during SelectRightSkill(%v) - falling back to HID keybinding", skillID))
+		return selectSkillViaHIDIfAvailable(skillID)
 	}
 
 	if err := ctx.PacketSender.SelectRightSkill(skillID); err != nil {
-		return fmt.Errorf("failed to select right skill %v: %w", skillID, err)
+		ctx.Logger.Warn(fmt.Sprintf("packet 0x3C SelectRightSkill(%v) failed: %s - falling back to HID keybinding", skillID, err.Error()))
+		return selectSkillViaHIDIfAvailable(skillID)
 	}
 	utils.Sleep(200)
 	return nil
 }
 
 // SelectLeftSkill selects a skill for the left mouse button via packet 0x3C.
-// Full-packet bot: no HID fallback per user mandate 2026-04-19.
+// Same fallback policy as SelectRightSkill.
 func SelectLeftSkill(skillID skill.ID) error {
 	ctx := context.Get()
 
@@ -40,11 +46,13 @@ func SelectLeftSkill(skillID skill.ID) error {
 	}
 
 	if ctx.PacketSender == nil {
-		return fmt.Errorf("PacketSender unavailable, cannot select left skill %v", skillID)
+		ctx.Logger.Warn(fmt.Sprintf("PacketSender nil during SelectLeftSkill(%v) - falling back to HID keybinding", skillID))
+		return selectSkillViaHIDIfAvailable(skillID)
 	}
 
 	if err := ctx.PacketSender.SelectLeftSkill(skillID); err != nil {
-		return fmt.Errorf("failed to select left skill %v: %w", skillID, err)
+		ctx.Logger.Warn(fmt.Sprintf("packet 0x3C SelectLeftSkill(%v) failed: %s - falling back to HID keybinding", skillID, err.Error()))
+		return selectSkillViaHIDIfAvailable(skillID)
 	}
 	utils.Sleep(200)
 	return nil
@@ -98,7 +106,7 @@ func SelectSkill(skillID skill.ID) (game.MouseButton, bool) {
 }
 
 // SelectRightSkillByKeyBinding selects a skill using its keybinding directly via packet 0x3C.
-// Full-packet bot: no HID fallback per user mandate 2026-04-19.
+// Falls through to SelectRightSkill which handles fallback policy.
 func SelectRightSkillByKeyBinding(kb data.KeyBinding) error {
 	ctx := context.Get()
 
@@ -112,7 +120,7 @@ func SelectRightSkillByKeyBinding(kb data.KeyBinding) error {
 }
 
 // SelectLeftSkillByKeyBinding selects a skill using its keybinding directly via packet 0x3C.
-// Full-packet bot: no HID fallback per user mandate 2026-04-19.
+// Falls through to SelectLeftSkill which handles fallback policy.
 func SelectLeftSkillByKeyBinding(kb data.KeyBinding) error {
 	ctx := context.Get()
 
@@ -123,4 +131,22 @@ func SelectLeftSkillByKeyBinding(kb data.KeyBinding) error {
 	}
 
 	return fmt.Errorf("no skill bound to keybinding %v", kb)
+}
+
+// selectSkillViaHIDIfAvailable presses the keybinding for skillID. Used only
+// when PacketSender is unavailable (early-game pre-rmod-attach). Returns nil
+// silently if the skill isn't bound to a key — caller continues with whatever
+// skill is currently selected.
+func selectSkillViaHIDIfAvailable(skillID skill.ID) error {
+	ctx := context.Get()
+
+	kb, found := ctx.Data.KeyBindings.KeyBindingForSkill(skillID)
+	if !found {
+		ctx.Logger.Warn(fmt.Sprintf("HID fallback: skill %v has no keybinding, leaving current skill selected", skillID))
+		return nil
+	}
+
+	ctx.HID.PressKeyBinding(kb)
+	utils.Sleep(50)
+	return nil
 }

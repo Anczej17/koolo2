@@ -340,7 +340,7 @@ func tryUnequip(ctx *context.Status, itm data.Item) (data.Item, bool, error) {
 		// Full-packet bot: always emit 0x50; no HID fallback (user 2026-04-19).
 		if ctx.PacketSender != nil {
 			fL, fR, tL, tR := WeaponSwapGIDs(ctx.Data)
-			if err := ctx.PacketSender.SwapWeapon(fL, fR, tL, tR); err != nil {
+			if err := ctx.PacketSender.SwapWeapon(fL, fR, tL, tR, uint8(ctx.Data.ActiveWeaponSlot)); err != nil {
 				ctx.Logger.Warn("item.go SwapWeapon (target) packet failed", "err", err)
 			}
 		}
@@ -357,7 +357,7 @@ func tryUnequip(ctx *context.Status, itm data.Item) (data.Item, bool, error) {
 			// Restore original slot via packet — no HID fallback.
 			if ctx.PacketSender != nil {
 				fL, fR, tL, tR := WeaponSwapGIDs(ctx.Data)
-				if err := ctx.PacketSender.SwapWeapon(fL, fR, tL, tR); err != nil {
+				if err := ctx.PacketSender.SwapWeapon(fL, fR, tL, tR, uint8(ctx.Data.ActiveWeaponSlot)); err != nil {
 					ctx.Logger.Warn("item.go SwapWeapon (restore) packet failed", "err", err)
 				}
 			}
