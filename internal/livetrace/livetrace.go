@@ -11,8 +11,14 @@ import (
 	"time"
 )
 
-// Tracer streams per-event JSON lines to a log file. Meant to be tail -F'd
-// in real time. One global instance per bot process; access via Get().
+// Tracer streams per-event JSON lines to a log file. Async buffered emit:
+// call sites are non-blocking; one consumer goroutine serialises to disk.
+// Rate-cap protects D2R against emit floods (a retry loop could otherwise
+// dump hundreds of log lines per second and starve the render thread —
+// see memory feedback_zombie_killer_logging_flood).
+//
+// Tail -F the file for real-time stream. No per-line file.Sync: OS flush
+// cadence is fine and spares the hot path.
 type Tracer struct {
 	mu      sync.Mutex
 	file    *os.File
@@ -22,7 +28,22 @@ type Tracer struct {
 	traceClicks     atomic.Bool
 	traceActions    atomic.Bool
 	traceStateDiffs atomic.Bool
+
+	events     chan map[string]any
+	stopSignal chan struct{}
+	consumerWg sync.WaitGroup
+
+	maxEventsPerSec atomic.Int64 // 0 = unlimited
+	eventsThisSec   atomic.Int64
+	totalEvents     atomic.Uint64
+	droppedEvents   atomic.Uint64
 }
+
+const (
+	eventBufferCap       = 4096
+	defaultMaxEventsPerS = 200
+	statsBannerInterval  = 60 * time.Second
+)
 
 var (
 	global     *Tracer
@@ -36,10 +57,22 @@ func Get() *Tracer {
 	return global
 }
 
-// Init opens the trace file and enables sub-flags. Safe to call twice
-// (second call closes the previous file and opens a new one).
-func Init(path string, tracePackets, traceClicks, traceActions, traceStateDiffs bool) error {
+// Init opens the trace file, starts the consumer + rate-reset + stats
+// goroutines, and stamps a session banner. maxEventsPerSec <= 0 means
+// unlimited (not recommended in production). Safe to call twice — second
+// call stops prior goroutines, closes prior file, and restarts.
+func Init(path string, tracePackets, traceClicks, traceActions, traceStateDiffs bool, maxEventsPerSec int) error {
 	t := Get()
+	t.mu.Lock()
+
+	// Stop prior background work, if any.
+	if t.stopSignal != nil {
+		close(t.stopSignal)
+		t.stopSignal = nil
+	}
+	// Wait for prior consumer to drain before closing the file.
+	t.mu.Unlock()
+	t.consumerWg.Wait()
 	t.mu.Lock()
 
 	if t.file != nil {
@@ -59,40 +92,148 @@ func Init(path string, tracePackets, traceClicks, traceActions, traceStateDiffs 
 		t.mu.Unlock()
 		return fmt.Errorf("livetrace: open %s: %w", path, err)
 	}
+
 	t.file = f
 	t.enabled.Store(true)
 	t.tracePackets.Store(tracePackets)
 	t.traceClicks.Store(traceClicks)
 	t.traceActions.Store(traceActions)
 	t.traceStateDiffs.Store(traceStateDiffs)
+
+	if maxEventsPerSec <= 0 {
+		t.maxEventsPerSec.Store(0)
+	} else {
+		t.maxEventsPerSec.Store(int64(maxEventsPerSec))
+	}
+	t.eventsThisSec.Store(0)
+	t.totalEvents.Store(0)
+	t.droppedEvents.Store(0)
+
+	t.events = make(chan map[string]any, eventBufferCap)
+	t.stopSignal = make(chan struct{})
+
+	t.consumerWg.Add(1)
+	go t.consumerLoop(t.events, t.stopSignal)
+	go t.rateResetLoop(t.stopSignal)
+	go t.statsBannerLoop(t.stopSignal)
+
 	t.mu.Unlock()
 
-	// Session banner — writeLine takes its own lock.
-	t.writeLine(map[string]any{
-		"ts":    time.Now().Format(time.RFC3339Nano),
-		"kind":  "session",
-		"pid":   os.Getpid(),
-		"flags": map[string]bool{"packets": tracePackets, "clicks": traceClicks, "actions": traceActions, "stateDiffs": traceStateDiffs},
+	// Session banner via sync write so it's first line.
+	t.syncWriteLine(map[string]any{
+		"ts":              time.Now().Format(time.RFC3339Nano),
+		"kind":            "session",
+		"pid":             os.Getpid(),
+		"flags":           map[string]bool{"packets": tracePackets, "clicks": traceClicks, "actions": traceActions, "stateDiffs": traceStateDiffs},
+		"maxEventsPerSec": maxEventsPerSec,
+		"eventBufferCap":  eventBufferCap,
 	})
 	return nil
 }
 
-// IsEnabled returns true if any tracing is active.
+// IsEnabled returns true if tracing was initialised and is active.
 func (t *Tracer) IsEnabled() bool { return t != nil && t.enabled.Load() }
 
-// writeLine serialises a map to JSON line. Lock held by caller OR atomic flush.
-func (t *Tracer) writeLine(m map[string]any) {
-	if t == nil || t.file == nil {
+// emit queues an event to the consumer goroutine. Non-blocking — drops on
+// a full channel or a rate-cap overflow. Callers must treat emit as
+// best-effort; no return value.
+func (t *Tracer) emit(m map[string]any) {
+	if t == nil || !t.enabled.Load() {
+		return
+	}
+	if cap := t.maxEventsPerSec.Load(); cap > 0 {
+		if t.eventsThisSec.Add(1) > cap {
+			t.droppedEvents.Add(1)
+			return
+		}
+	} else {
+		t.eventsThisSec.Add(1)
+	}
+	select {
+	case t.events <- m:
+		t.totalEvents.Add(1)
+	default:
+		// Consumer backed up; drop silently.
+		t.droppedEvents.Add(1)
+	}
+}
+
+// syncWriteLine writes a single JSON line directly to the file under the
+// file lock. Used for session banner + periodic stats + drained-on-close
+// tail. Hot-path events go through emit().
+func (t *Tracer) syncWriteLine(m map[string]any) {
+	if t == nil {
+		return
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.file == nil {
 		return
 	}
 	b, err := json.Marshal(m)
 	if err != nil {
 		return
 	}
-	t.mu.Lock()
 	_, _ = t.file.Write(append(b, '\n'))
-	_ = t.file.Sync()
-	t.mu.Unlock()
+}
+
+// consumerLoop drains the events channel to disk. Single writer, no
+// contention with emit callers. Exits when stop is signalled and the
+// channel has been drained.
+func (t *Tracer) consumerLoop(ch <-chan map[string]any, stop <-chan struct{}) {
+	defer t.consumerWg.Done()
+	for {
+		select {
+		case <-stop:
+			// Drain any remaining buffered events, then exit.
+			for {
+				select {
+				case m := <-ch:
+					t.syncWriteLine(m)
+				default:
+					return
+				}
+			}
+		case m := <-ch:
+			t.syncWriteLine(m)
+		}
+	}
+}
+
+// rateResetLoop resets the per-second counter every 1s so the leaky
+// bucket refills.
+func (t *Tracer) rateResetLoop(stop <-chan struct{}) {
+	ticker := time.NewTicker(1 * time.Second)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-stop:
+			return
+		case <-ticker.C:
+			t.eventsThisSec.Store(0)
+		}
+	}
+}
+
+// statsBannerLoop emits a session_stats event every 60s so a viewer can
+// see the cumulative + dropped counts without tailing the whole file.
+func (t *Tracer) statsBannerLoop(stop <-chan struct{}) {
+	ticker := time.NewTicker(statsBannerInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-stop:
+			return
+		case <-ticker.C:
+			t.syncWriteLine(map[string]any{
+				"ts":        time.Now().Format(time.RFC3339Nano),
+				"kind":      "session_stats",
+				"total":     t.totalEvents.Load(),
+				"dropped":   t.droppedEvents.Load(),
+				"bufferCap": eventBufferCap,
+			})
+		}
+	}
 }
 
 // Packet records a SendPacket/SendUIPacket/SendDualPacket event.
@@ -106,7 +247,7 @@ func (t *Tracer) Packet(path string, opcode byte, payload []byte, errStr string,
 	if len(head) > 32 {
 		head = head[:32]
 	}
-	t.writeLine(map[string]any{
+	t.emit(map[string]any{
 		"ts":        time.Now().Format(time.RFC3339Nano),
 		"kind":      "pkt",
 		"path":      path,
@@ -118,12 +259,12 @@ func (t *Tracer) Packet(path string, opcode byte, payload []byte, errStr string,
 	})
 }
 
-// Click records a HID click / modifier click / press key event.
+// Click records a HID click / modifier click.
 func (t *Tracer) Click(btn string, x, y int, modifier string) {
 	if !t.IsEnabled() || !t.traceClicks.Load() {
 		return
 	}
-	t.writeLine(map[string]any{
+	t.emit(map[string]any{
 		"ts":       time.Now().Format(time.RFC3339Nano),
 		"kind":     "click",
 		"btn":      btn,
@@ -138,7 +279,7 @@ func (t *Tracer) Key(vk byte, modifier string) {
 	if !t.IsEnabled() || !t.traceClicks.Load() {
 		return
 	}
-	t.writeLine(map[string]any{
+	t.emit(map[string]any{
 		"ts":       time.Now().Format(time.RFC3339Nano),
 		"kind":     "key",
 		"vk":       fmt.Sprintf("0x%02X", vk),
@@ -146,8 +287,8 @@ func (t *Tracer) Key(vk byte, modifier string) {
 	})
 }
 
-// Action records a bot-side action boundary (start / result / warning).
-// stage = "begin" | "ok" | "fail" | "note". Details is free-form.
+// Action records a bot-side action boundary (begin / ok / fail / note).
+// Details is a free-form map merged into the event.
 func (t *Tracer) Action(name, stage string, details map[string]any) {
 	if !t.IsEnabled() || !t.traceActions.Load() {
 		return
@@ -161,7 +302,7 @@ func (t *Tracer) Action(name, stage string, details map[string]any) {
 	for k, v := range details {
 		m[k] = v
 	}
-	t.writeLine(m)
+	t.emit(m)
 }
 
 // StateDiff records a state snapshot delta (one field changed at a time).
@@ -169,11 +310,17 @@ func (t *Tracer) StateDiff(field string, from, to any) {
 	if !t.IsEnabled() || !t.traceStateDiffs.Load() {
 		return
 	}
-	t.writeLine(map[string]any{
+	t.emit(map[string]any{
 		"ts":    time.Now().Format(time.RFC3339Nano),
 		"kind":  "state",
 		"field": field,
 		"from":  from,
 		"to":    to,
 	})
+}
+
+// TraceStateDiffsEnabled exposes the stateDiffs sub-flag so callers can
+// skip expensive snapshot work when the tracer is off.
+func (t *Tracer) TraceStateDiffsEnabled() bool {
+	return t != nil && t.enabled.Load() && t.traceStateDiffs.Load()
 }

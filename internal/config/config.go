@@ -57,7 +57,8 @@ type AppCfg struct {
 			TraceClicks       bool   `yaml:"traceClicks"`       // HID.Click / HID.PressKey / HID.KeySequence
 			TraceActions      bool   `yaml:"traceActions"`      // action boundaries (stashItem, cubeTransmute, ...)
 			TraceStateDiffs   bool   `yaml:"traceStateDiffs"`   // poll gamestate + log diffs (HP / gold / area / menus)
-			StatePollMs       int    `yaml:"statePollMs"`       // diff poll interval ms (default 500)
+			StatePollMs       int    `yaml:"statePollMs"`       // diff poll interval ms (default 500, clamp >=200)
+			MaxEventsPerSec   int    `yaml:"maxEventsPerSec"`   // leaky-bucket cap per tracer instance. 0 = unlimited. default 200.
 		} `yaml:"liveTrace"`
 	} `yaml:"debug"`
 	FirstRun              bool   `yaml:"firstRun"`

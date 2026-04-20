@@ -120,7 +120,8 @@ func ensureAreaSync(ctx *context.Status, expectedArea area.ID) error {
 	return fmt.Errorf("area sync timeout - expected: %v, current: %v", expectedArea, ctx.Data.PlayerUnit.Area)
 }
 
-func MoveToArea(dst area.ID) error {
+func MoveToArea(dst area.ID) (err error) {
+	defer deferredTrace(fmt.Sprintf("MoveToArea:%d", dst), &err)()
 	ctx := context.Get()
 	ctx.SetLastAction("MoveToArea")
 
@@ -254,8 +255,6 @@ func MoveToArea(dst area.ID) error {
 		return cachedPos, true
 	}
 
-	var err error
-
 	// Areas that require a distance override for proper entrance interaction (Tower, Harem, Sewers)
 	if dst == area.HaremLevel1 && ctx.Data.PlayerUnit.Area == area.LutGholein ||
 		dst == area.SewersLevel3Act2 && ctx.Data.PlayerUnit.Area == area.SewersLevel2Act2 ||
@@ -339,7 +338,8 @@ func MoveToArea(dst area.ID) error {
 	return nil
 }
 
-func MoveToCoords(to data.Position, options ...step.MoveOption) error {
+func MoveToCoords(to data.Position, options ...step.MoveOption) (err error) {
+	defer deferredTrace(fmt.Sprintf("MoveToCoords:(%d,%d)", to.X, to.Y), &err)()
 	ctx := context.Get()
 
 	// Proactive death check at the start of the action
@@ -398,7 +398,8 @@ func getPathOffsets(to data.Position) (int, int) {
 	return minOffsetX, minOffsetY
 }
 
-func MoveTo(toFunc func() (data.Position, bool), options ...step.MoveOption) error {
+func MoveTo(toFunc func() (data.Position, bool), options ...step.MoveOption) (err error) {
+	defer deferredTrace("MoveTo", &err)()
 	ctx := context.Get()
 	ctx.SetLastAction("MoveTo")
 

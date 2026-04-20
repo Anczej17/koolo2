@@ -17,23 +17,24 @@ import (
 	"local/internal/svc/internal/utils"
 )
 
-func InteractNPC(npc npc.ID) error {
+func InteractNPC(npcID npc.ID) (err error) {
+	defer deferredTrace(fmt.Sprintf("InteractNPC:%d", npcID), &err)()
+
 	ctx := context.Get()
 	ctx.SetLastAction("InteractNPC")
 
-	pos, found := getNPCPosition(npc, ctx.Data)
+	pos, found := getNPCPosition(npcID, ctx.Data)
 	if !found {
-		return fmt.Errorf("npc with ID %d not found", npc)
+		return fmt.Errorf("npc with ID %d not found", npcID)
 	}
 
-	var err error
 	for range 5 {
 		err = MoveToCoords(pos)
 		if err != nil {
 			continue
 		}
 
-		err = step.InteractNPC(npc)
+		err = step.InteractNPC(npcID)
 		if err != nil {
 			continue
 		}
@@ -43,7 +44,7 @@ func InteractNPC(npc npc.ID) error {
 		return err
 	}
 
-	event.Send(event.InteractedTo(event.Text(ctx.Name, ""), int(npc), event.InteractionTypeNPC))
+	event.Send(event.InteractedTo(event.Text(ctx.Name, ""), int(npcID), event.InteractionTypeNPC))
 
 	return nil
 }
