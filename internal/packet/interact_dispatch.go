@@ -47,18 +47,17 @@ func NewUsePotion(playerGID, itemGID data.UnitID, beltSlot byte) []byte {
 
 // NewNPCBuy builds the 22-byte 0x32 "buy from merchant" packet.
 //
-// AUTHORITATIVE live capture sec_npc_buy.log (8 identical samples, D2R base=0x7ff79d3d0000):
+// AUTHORITATIVE live capture 08_npc_with_trade.json buf=1 entry#44 tick=40785078:
 //
-//	32 [price:u32] [itemGID:u32] [npcGID:u32] [09 00 06 00] [slot:u16] [seq:u16] [term:u8]
+//	32 1c060000 53000000 0e000000 09000800 0700 0100 03
 //
-// Example (price=0x1C2, itemGID=0x1D2, npcGID=0x0E Charsi, slot=5, seq=1, term=0x03):
+// Layout: [32][price:u32][itemGID:u32][npcGID:u32][09 00 08 00][slot:u16][seq:u16][term:u8]
 //
-//	32 c2010000 d2010000 0e000000 09000600 0500 0100 03
-//
-// Note: constant is `09 00 06 00` for BUY (differs from 0x33 sell's `09 00 08 00`
-// and 0x32 gamble's `09 00 01 00`). Using wrong constant triggers D2R send_fn AV.
-// Previous 24B zero-pad form was silently dropped; 22B with correct constant is
-// what D2R itself writes when user HID-clicks buy item in vendor.
+// Note: constant bytes 13-16 are `09 00 08 00` — the SAME as 0x33 NPCSell.
+// Earlier versions here hardcoded `09 00 06 00` with a warning "Using wrong
+// constant triggers D2R send_fn AV" — that claim was stale/unsourced per
+// CAPTURE_AUDIT_2026_04_19 and contradicts buf=1 mirror bytes. 0x32 gamble
+// and 0x32 potion sub-forms DO differ (see NewGambleBuy, NewUsePotion).
 func NewNPCBuy(price uint32, itemGID, npcGID data.UnitID, slot, seq uint16, term byte) []byte {
 	buf := make([]byte, 22)
 	buf[0] = OpInteractDispatch
@@ -67,7 +66,7 @@ func NewNPCBuy(price uint32, itemGID, npcGID data.UnitID, slot, seq uint16, term
 	binary.LittleEndian.PutUint32(buf[9:13], uint32(npcGID))
 	buf[13] = 0x09
 	buf[14] = 0x00
-	buf[15] = 0x06
+	buf[15] = 0x08
 	buf[16] = 0x00
 	binary.LittleEndian.PutUint16(buf[17:19], slot)
 	binary.LittleEndian.PutUint16(buf[19:21], seq)

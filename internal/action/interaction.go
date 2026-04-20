@@ -238,7 +238,9 @@ func CloseNPCDialog(npcID npc.ID) {
 		ctx.Logger.Warn("CloseNPCDialog: NPC not found", "npc", npcID)
 		return
 	}
-	if err := ctx.PacketSender.TerminateNPCChat(townNPC.UnitID); err != nil {
+	npcX := uint16(townNPC.Position.X)
+	npcY := uint16(townNPC.Position.Y)
+	if err := ctx.PacketSender.TerminateNPCChat(townNPC.UnitID, npcX, npcY); err != nil {
 		ctx.Logger.Warn("CloseNPCDialog packet failed", "err", err)
 	}
 	utils.Sleep(100)

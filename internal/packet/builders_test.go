@@ -1,7 +1,9 @@
 package packet
 
 import (
+	"bytes"
 	"encoding/binary"
+	"encoding/hex"
 	"testing"
 
 	"local/internal/svc/internal/gamelib/data"
@@ -197,5 +199,87 @@ func TestNewCubeTransmute_0x54_legacy_34B(t *testing.T) {
 	}
 	if got[0] != 0x54 {
 		t.Fatalf("cube 0x54 opcode: got 0x%02X want 0x54", got[0])
+	}
+}
+
+// TestNewNPCBuy_0x32 asserts the byte-15 constant is 0x08 (not 0x06 as
+// stale code comment claimed), matching live 08_npc_with_trade.json buf=1
+// entry#44 tick=40785078: `321c060000530000000e000000090008000700010003`.
+func TestNewNPCBuy_0x32(t *testing.T) {
+	got := NewNPCBuy(0x061C, data.UnitID(0x53), data.UnitID(0x0E), 7, 1, 0x03)
+	wantHex := "321c060000530000000e000000090008000700010003"
+	want, _ := hex.DecodeString(wantHex)
+	if !bytes.Equal(got, want) {
+		t.Fatalf("0x32 NPCBuy layout mismatch:\n got %s\nwant %s",
+			hex.EncodeToString(got), wantHex)
+	}
+	if got[15] != 0x08 {
+		t.Fatalf("0x32 byte 15 (buy constant): got 0x%02X want 0x08 (stale 0x06 was wrong per CAPTURE_AUDIT_2026_04_19)", got[15])
+	}
+}
+
+// TestNewNPCChatInit_0x2F asserts the 13-byte form matches live
+// 02_npc_chat_clean.json buf=1 entry#1 tick=40902296:
+// `2f0e0000000e000000b511fe11`.
+//
+// Prior 5-byte form (per stale "Discord plaintext" memory) was silently
+// rejected by server — CAPTURE_AUDIT_2026_04_19 revert.
+func TestNewNPCChatInit_0x2F(t *testing.T) {
+	got := NewNPCChatInit(data.UnitID(0x0E), 0x11B5, 0x11FE)
+	wantHex := "2f0e0000000e000000b511fe11"
+	want, _ := hex.DecodeString(wantHex)
+	if !bytes.Equal(got, want) {
+		t.Fatalf("0x2F NPCChatInit layout mismatch:\n got %s\nwant %s",
+			hex.EncodeToString(got), wantHex)
+	}
+	if len(got) != 13 {
+		t.Fatalf("0x2F length: got %d want 13", len(got))
+	}
+}
+
+// TestNewNPCChatTerminate_0x30 asserts the 13-byte clean-close form matches
+// live 02_npc_chat_clean.json buf=1 entry#3 tick=40903328:
+// `300e0000000e000000b511fe11`.
+func TestNewNPCChatTerminate_0x30(t *testing.T) {
+	got := NewNPCChatTerminate(data.UnitID(0x0E), 0x11B5, 0x11FE)
+	wantHex := "300e0000000e000000b511fe11"
+	want, _ := hex.DecodeString(wantHex)
+	if !bytes.Equal(got, want) {
+		t.Fatalf("0x30 NPCChatTerminate layout mismatch:\n got %s\nwant %s",
+			hex.EncodeToString(got), wantHex)
+	}
+}
+
+// TestNewNPCChatTerminatePostTrade_0x30_22B asserts the 22-byte post-trade
+// form matches live 08_npc_with_trade.json buf=1 entry#54 tick=40788671:
+// `300e000000 07000000 01000000 00000000 0700 0100 03`.
+func TestNewNPCChatTerminatePostTrade_0x30_22B(t *testing.T) {
+	got := NewNPCChatTerminatePostTrade(data.UnitID(0x0E), 7, 1, 0x03)
+	wantHex := "300e00000007000000010000000000000007000100030000"
+	// Note: live shows `03` at byte 21 plus `00 00` residue — capture trims
+	// those. Test 22B output exactly (no trailing residue).
+	wantHex = wantHex[:22*2]
+	want, _ := hex.DecodeString(wantHex)
+	if !bytes.Equal(got, want) {
+		t.Fatalf("0x30 PostTrade layout mismatch:\n got %s\nwant %s",
+			hex.EncodeToString(got), wantHex)
+	}
+}
+
+// TestNewNPCEntityAction_0x4D asserts the 29-byte form matches live
+// 02_npc_chat_clean.json buf=0 entry#0 tick=40781765:
+// `4d0e000000d6000000000004010000000e000000b411011201b511fb11`.
+//
+// Prior 5-byte truncated form was rejected by server.
+func TestNewNPCEntityAction_0x4D(t *testing.T) {
+	got := NewNPCEntityAction(data.UnitID(0x0E), data.UnitID(0xD6), 0x11B4, 0x1201, 0x11B5, 0x11FB)
+	wantHex := "4d0e000000d6000000000004010000000e000000b411011201b511fb11"
+	want, _ := hex.DecodeString(wantHex)
+	if !bytes.Equal(got, want) {
+		t.Fatalf("0x4D NPCEntityAction layout mismatch:\n got  %s\nwant %s",
+			hex.EncodeToString(got), wantHex)
+	}
+	if len(got) != 29 {
+		t.Fatalf("0x4D length: got %d want 29", len(got))
 	}
 }

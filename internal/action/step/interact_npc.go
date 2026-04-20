@@ -32,9 +32,11 @@ func InteractNPC(npcID npc.ID) error {
 			if distance <= maxDistance {
 				npcX := uint16(townNPC.Position.X)
 				npcY := uint16(townNPC.Position.Y)
+				playerX := uint16(ctx.Data.PlayerUnit.Position.X)
+				playerY := uint16(ctx.Data.PlayerUnit.Position.Y)
 				playerGID := ctx.Data.PlayerUnit.ID
-				ctx.Logger.Debug("Attempting NPC interaction via packet 0x4D+0x2F", "npc", npcID, "unitID", townNPC.UnitID, "npcX", npcX, "npcY", npcY)
-				err := ctx.PacketSender.InteractNPC(townNPC.UnitID, playerGID, npcX, npcY)
+				ctx.Logger.Debug("Attempting NPC interaction via packet 0x4D+0x2F", "npc", npcID, "unitID", townNPC.UnitID, "npcX", npcX, "npcY", npcY, "playerX", playerX, "playerY", playerY)
+				err := ctx.PacketSender.InteractNPC(townNPC.UnitID, playerGID, playerX, playerY, npcX, npcY)
 				if err == nil {
 					utils.Sleep(200)
 					// Wait for NPC dialog to open — refresh game data each tick

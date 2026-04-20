@@ -6,60 +6,18 @@ import (
 	"testing"
 )
 
-// TestDiscordCaptureFormats verifies that our packet builders emit
-// byte-exact output matching plaintext captures provided by the Discord
-// colleague on 2026-04-15. Source: C:\Users\Administrator\Desktop\packets..txt
+// TestDiscordCaptureFormats originally asserted 5B 0x2F/0x4D outputs from a
+// Discord plaintext claim (2026-04-15). Those 5B shapes contradicted the
+// buf=1 mirror sniffer captures (logs/live_captures_2026_04_15/) which show
+// 13B (0x2F/0x30) and 29B (0x4D). The 5B form was accepted by D2R's local
+// dispatch but server silently dropped it — which is why "trade u Akary
+// nie dziala" and full HID fallback was required throughout. CAPTURE_AUDIT
+// _2026_04_19 restored the 13B/29B forms; see builders_test.go for the
+// authoritative regression tests (TestNewNPCChatInit_0x2F etc.).
 //
-// The colleague reads D2R's internal plaintext buffer (post-decrypt for
-// incoming, pre-encrypt for outgoing) — so these are 100% on-wire bytes.
-// If any of our builders fails this test, our format is wrong.
-func TestDiscordCaptureFormats(t *testing.T) {
-	tests := []struct {
-		name    string
-		got     []byte
-		wantHex string
-	}{
-		{
-			name:    "0x2F NPCInit Akara GID=8",
-			got:     NewNPCChatInit(8, 0, 0),
-			wantHex: "2F08000000",
-		},
-		{
-			name:    "0x2F NPCInit Deckard GID=2",
-			got:     NewNPCChatInit(2, 0, 0),
-			wantHex: "2F02000000",
-		},
-		{
-			name:    "0x4D PreInteract NPC=8",
-			got:     NewNPCEntityAction(8, 0, 0, 0),
-			wantHex: "4D08000000",
-		},
-		{
-			name:    "0x4D PreInteract NPC=2",
-			got:     NewNPCEntityAction(2, 0, 0, 0),
-			wantHex: "4D02000000",
-		},
-		// Repair test is split — builder sets cost=0 (server computes),
-		// so exact byte match varies. We verify header + npcGID + sentinel.
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			want, err := hex.DecodeString(tc.wantHex)
-			if err != nil {
-				// skip tests with typo'd hex literals
-				t.Skipf("bad wantHex: %s", err)
-				return
-			}
-			if !bytes.Equal(tc.got, want) {
-				t.Errorf("%s: wrong output\n got: %s\nwant: %s",
-					tc.name,
-					hex.EncodeToString(tc.got),
-					hex.EncodeToString(want))
-			}
-		})
-	}
-}
+// Remaining tests in this file (0x35 repair, 0x19 pickup) keep their
+// original Discord-plaintext-derived expectations — those opcodes remain
+// live-unverified; they should be re-checked during Phase 5 live test pass.
 
 // TestRepairAll_FormatStructure verifies the 16-byte layout: opcode + subcmd
 // + pad + npcGID + cost + sentinel. Cost left to server (bytes 8..12 zero).

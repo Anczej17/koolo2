@@ -206,8 +206,11 @@ func (ps *PacketSender) SwapWeapon(fromLeftGID, fromRightGID, toLeftGID, toRight
 // as a signal to fall back to HID click, and even a nil return does not
 // guarantee the dialog opened. Keep CharacterCfg.PacketCasting.UseForNPCInteraction
 // disabled until game-thread execution is solved.
-func (ps *PacketSender) InteractNPC(npcGID, playerGID data.UnitID, npcX, npcY uint16) error {
-	if err := ps.SendUIPacket(packet.NewNPCEntityAction(npcGID, playerGID, npcX, npcY)); err != nil {
+//
+// Parameters now include playerX/playerY because 0x4D PreInteract is 29B and
+// carries the player's position in-wire (per CAPTURE_AUDIT_2026_04_19).
+func (ps *PacketSender) InteractNPC(npcGID, playerGID data.UnitID, playerX, playerY, npcX, npcY uint16) error {
+	if err := ps.SendUIPacket(packet.NewNPCEntityAction(npcGID, playerGID, playerX, playerY, npcX, npcY)); err != nil {
 		return fmt.Errorf("failed to send NPC entity action 0x4D: %w", err)
 	}
 	if err := ps.SendPacket(packet.NewNPCChatInit(npcGID, npcX, npcY)); err != nil {
@@ -269,10 +272,11 @@ func (ps *PacketSender) CainIdentifyAll(cainGID data.UnitID) error {
 }
 
 
-// TerminateNPCChat closes the NPC dialog (0x30, 5 bytes, dual buffer).
-// Authoritative format per bufpoll 2026-04-14.
-func (ps *PacketSender) TerminateNPCChat(npcGID data.UnitID) error {
-	if err := ps.SendDualPacket(packet.NewNPCChatTerminate(npcGID)); err != nil {
+// TerminateNPCChat closes the NPC dialog (0x30, 13 bytes, dual buffer).
+// Authoritative format per live capture 02_npc_chat_clean.json buf=1 entry#3.
+// Builder expects npcX/npcY because the 13B wire form carries them (not 5B).
+func (ps *PacketSender) TerminateNPCChat(npcGID data.UnitID, npcX, npcY uint16) error {
+	if err := ps.SendDualPacket(packet.NewNPCChatTerminate(npcGID, npcX, npcY)); err != nil {
 		return fmt.Errorf("failed to send npc chat terminate packet: %w", err)
 	}
 	return nil

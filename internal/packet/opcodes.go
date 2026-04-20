@@ -49,14 +49,17 @@ const (
 
 	// === NPC dialog ===
 	// 0x2F CRASHES send_fn from main thread — open dialog via HID click instead.
-	OpNPCChatInit      = 0x2F // CORRECTED 2026-04-15 (Discord plaintext capture) — [2F][npcGID:u32] = 5B (was wrongly 13B)
-	OpNPCChatTerminate = 0x30 // live 2026-04-14 — [30][npcGID:u32] (5B, dual buffer)
+	// RE-VERIFIED 2026-04-20 against live buf=1 mirror: 13B form authoritative.
+	OpNPCChatInit      = 0x2F // live 02_npc_chat_clean.json — [2F][npcGID:u32][npcGID:u32][npcPos:u32] = 13B (prior 5B Discord claim contradicted by sniffer)
+	OpNPCChatTerminate = 0x30 // live 02_npc_chat_clean.json — 13B clean close; 22B post-trade variant (NewNPCChatTerminatePostTrade)
 
 	// === Generic interact dispatcher (potion / buy / gamble / use) ===
 	// 0x32 shares layout with 0x33 for the NPC-buy subform. Potion/gamble
 	// subforms use different sizes and trailing flags — see NewUsePotion /
 	// NewGambleBuy for those specific encodings.
-	OpInteractDispatch = 0x32 // live 2026-04-14 — NPC buy: [32][price:u32][itemGID:u32][npcGID:u32][09000000][slot:u16][seq:u16][term:u8][00] (22B, dual)
+	// RE-VERIFIED 2026-04-20: NPC buy constant bytes 13-16 are `09 00 08 00`
+	// (same as 0x33 NPCSell), NOT `09 00 06 00` as stale code comment claimed.
+	OpInteractDispatch = 0x32 // live 08_npc_with_trade.json entry#44 — NPC buy: [32][price:u32][itemGID:u32][npcGID:u32][09 00 08 00][slot:u16][seq:u16][term:u8] (22B)
 	OpNPCSellItem      = 0x33 // live 2026-04-14 — [33][price:u32][itemGID:u32][npcGID:u32][09000000][slot:u16][seq:u16][term:u8][00] (22B, dual)
 
 	// === NPC services ===
