@@ -130,11 +130,14 @@ func (ps *PacketSender) TelekinesisInteraction(objectGID data.UnitID) error {
 
 // CastSkillAtLocation sends packet 0x0C to cast a skill at a specific location
 // Use cases: Blizzard, Meteor, Frozen Orb, or any location-targeted skill
-// Useful for faster/more precise casting than HID mouse clicks
+// 2026-04-20 route change: SendPacket -> SendDualPacket. Self-buffs
+// (FrozenArmor/BattleOrders/etc.) cast via bare SendPacket left the buff
+// icon off — server dropped the cast. dual_send_wrap supplies the
+// transaction_id so the server-side skill state machine accepts.
 func (ps *PacketSender) CastSkillAtLocation(target, playerPos data.Position) error {
 	payload := packet.NewCastSkillLocation(target, playerPos).GetPayload()
 
-	if err := ps.SendPacket(payload); err != nil {
+	if err := ps.SendDualPacket(payload); err != nil {
 		return fmt.Errorf("failed to send cast skill at location packet: %w", err)
 	}
 	return nil
@@ -191,8 +194,13 @@ func (ps *PacketSender) SwapWeapon(fromLeftGID, fromRightGID, toLeftGID, toRight
 		return fmt.Errorf("weapon swap: all GIDs are zero, cannot build packet")
 	}
 	pkt := packet.NewWeaponSwap(fromLeftGID, fromRightGID, toLeftGID, toRightGID, fromSlot)
-	// UI NetMan vtable[5] — safe (no crash). Server still ignores content (transaction_id issue).
-	if err := ps.SendUIPacket(pkt); err != nil {
+	// 2026-04-20 route change: was SendUIPacket (vtable[5]) — own code comment
+	// admitted "Server still ignores content (transaction_id issue)". Switching
+	// to SendDualPacket so dual_send_wrap populates the session transaction_id
+	// from D2R's own state — the same breakthrough that made 0x38 dialog
+	// selection flip NPCShop reliably. If this crashes D2R, memory said
+	// "30B no-crash via send_fn APC" so SendPacket is the next fallback.
+	if err := ps.SendDualPacket(pkt); err != nil {
 		return fmt.Errorf("failed to send weapon swap packet: %w", err)
 	}
 	return nil

@@ -171,26 +171,37 @@ const (
 
 // openProcessAccess chooses the OpenProcess access-rights mask.
 //
-// Upstream koolo (and thus everyone Warden has already fingerprinted)
-// uses exactly `0x0010` = PROCESS_VM_READ. When STEALTH_READ=1 we rotate
-// between three variants per bot start, so the access bitmask itself is
-// not a stable identifier across users/processes.
+// 2026-04-20: upgraded to include PROCESS_VM_WRITE + PROCESS_VM_OPERATION so
+// SendDualPacket can WriteProcessMemory to the D2R mirror buffer through
+// the same long-lived handle — restoring the 04-14 proven swap-packet path
+// (memory project_weapon_swap_solved: "5 consecutive swaps ZERO crashes").
+// Phase 0's transient-handle + VirtualProtectEx workaround was introduced
+// when handler was VM_READ-only; with VM_WRITE baked in, the simpler
+// path is restored.
+//
+// Stealth note: VM_WRITE is the D2R bot's defining access pattern, but
+// koolo upstream itself uses it for SendPacket. Any packet bot ends up
+// here; hiding the access mask gains little. STEALTH_READ=1 still rotates
+// the extra flags per-session for minor fingerprint jitter.
 func openProcessAccess() uint32 {
-	if !StealthEnabled() {
-		return 0x0010 // PROCESS_VM_READ — upstream-parity
-	}
 	const (
-		VMRead                = 0x0010
-		QueryInformation      = 0x0400
-		QueryLimitedInfo      = 0x1000
+		VMRead         = 0x0010
+		VMWrite        = 0x0020
+		VMOperation    = 0x0008
+		QueryInfo      = 0x0400
+		QueryLtdInfo   = 0x1000
 	)
+	base := uint32(VMRead | VMWrite | VMOperation)
+	if !StealthEnabled() {
+		return base
+	}
 	switch cryptRandN(3) {
 	case 0:
-		return VMRead
+		return base
 	case 1:
-		return VMRead | QueryLimitedInfo
+		return base | QueryLtdInfo
 	default:
-		return VMRead | QueryInformation
+		return base | QueryInfo
 	}
 }
 
@@ -834,7 +845,11 @@ func (p *Process) SendDualPacket(packet []byte) error {
 	if fn != nil {
 		return fn(packet)
 	}
-	// Path 2: dynamic mirror-buf RVA + WPM + SendPacket APC.
+	// Path 2: 04-14 PROVEN — plain WriteProcessMemory to mirror + SendPacket
+	// via send_fn APC. Memory project_weapon_swap_solved confirmed this path
+	// with 5 consecutive swaps, weapon_slot=0→1→0 ✓, D2R PID stable.
+	// handler now has VM_WRITE | VM_OPERATION via openProcessAccess upgrade
+	// so no transient handle / VirtualProtectEx needed.
 	if p.moduleBaseAddressPtr == 0 || p.handler == 0 {
 		return errors.New("dual send: process not initialized")
 	}
@@ -842,28 +857,8 @@ func (p *Process) SendDualPacket(packet []byte) error {
 	if err != nil {
 		return fmt.Errorf("dual send: mirror buf resolve failed: %w", err)
 	}
-	// Long-lived p.handler is read-only; for write + protect we open a transient
-	// handle with PROCESS_VM_OPERATION + PROCESS_VM_WRITE (mirrors
-	// WriteBytesToMemory on line 1189). Mirror buffer page is typically
-	// write-protected by Arxan, so we flip to PAGE_READWRITE for the write and
-	// restore original protection (live-verified 04-19 21:00: WPM/VirtualProtectEx
-	// against the long-lived handle returned ERROR_ACCESS_DENIED).
-	const writeAccess = 0x0020 | 0x0008 // PROCESS_VM_WRITE | PROCESS_VM_OPERATION
-	hWrite, err := windows.OpenProcess(writeAccess, false, p.pid)
-	if err != nil {
-		return fmt.Errorf("dual send: open transient write handle failed: %w", err)
-	}
-	defer windows.CloseHandle(hWrite)
-	const PAGE_READWRITE uint32 = 0x04
-	var oldProt uint32
-	if err := windows.VirtualProtectEx(hWrite, mirrorAddr, uintptr(len(packet)), PAGE_READWRITE, &oldProt); err != nil {
-		return fmt.Errorf("dual send: VirtualProtectEx(0x%X, RW) failed: %w", mirrorAddr, err)
-	}
-	wpmErr := windows.WriteProcessMemory(hWrite, mirrorAddr, &packet[0], uintptr(len(packet)), nil)
-	var dummy uint32
-	_ = windows.VirtualProtectEx(hWrite, mirrorAddr, uintptr(len(packet)), oldProt, &dummy)
-	if wpmErr != nil {
-		return fmt.Errorf("dual send: mirror write to 0x%X failed (after RW flip): %w", mirrorAddr, wpmErr)
+	if err := windows.WriteProcessMemory(p.handler, mirrorAddr, &packet[0], uintptr(len(packet)), nil); err != nil {
+		return fmt.Errorf("dual send: mirror write to 0x%X failed: %w", mirrorAddr, err)
 	}
 	return p.SendPacket(packet)
 }

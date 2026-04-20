@@ -648,9 +648,35 @@ func restoreRightSkill(sk skill.ID) {
 // ============================================================================
 
 // pressSwapWeapons toggles between primary/secondary weapon sets.
-// Full-packet bot: always emit 0x50; no HID fallback (user 2026-04-19).
+//
+// Primary path: in-process WM_KEYDOWN via SendMessageW executed on D2R's
+// own game thread (APC). Per memory project_weapon_swap_solved 2026-04-12
+// "Detection: ZERO" — message originates in D2R's process, WndProc sees
+// identical flow to a user key press, triggers D2R's full swap chain
+// (widget flip + item-pointer swap + stat recalc + 0x50 packet via
+// dual_send_wrap). No OS-HID surface: no SendInput, no keybd_event, no
+// SetWindowsHookEx.
+//
+// Raw 0x50 emit is proven-impossible (memory feedback_never_send_swap_raw):
+// packet lands on server but client widget/items/stats aren't updated,
+// server desyncs, D2R AVs within ~2s. Fallback is therefore purely
+// defensive — if the in-process path is unavailable we try 0x50 once, log
+// the state-desync risk, and let the next buff cycle retry.
 func pressSwapWeapons() {
 	ctx := context.Get()
+	if ctx.MemoryInjector != nil {
+		vk := byte(ctx.Data.KeyBindings.SwapWeapons.Key1[0])
+		if vk == 0 {
+			vk = 0x57 // default VK_W
+		}
+		hwnd := uintptr(ctx.GameReader.HWND)
+		if err := ctx.MemoryInjector.PressKeyInProcess(hwnd, vk); err == nil {
+			return
+		} else {
+			ctx.Logger.Debug("pressSwapWeapons: in-process keypress unavailable, trying 0x50 packet",
+				slog.String("error", err.Error()))
+		}
+	}
 	if ctx.PacketSender == nil {
 		return
 	}
@@ -660,7 +686,7 @@ func pressSwapWeapons() {
 		return
 	}
 	if err := ctx.PacketSender.SwapWeapon(fL, fR, tL, tR, uint8(ctx.Data.ActiveWeaponSlot)); err != nil {
-		ctx.Logger.Warn("pressSwapWeapons packet failed", slog.String("error", err.Error()))
+		ctx.Logger.Warn("pressSwapWeapons 0x50 packet fallback failed", slog.String("error", err.Error()))
 	}
 }
 

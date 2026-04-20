@@ -37,6 +37,29 @@ type Tracer struct {
 	eventsThisSec   atomic.Int64
 	totalEvents     atomic.Uint64
 	droppedEvents   atomic.Uint64
+
+	// lastPacket stores a snapshot of the most recent outgoing packet for
+	// crash-correlation. Crash() reads it and emits a combined event so
+	// the log shows "D2R died Xms after 0x30 13B" without external join.
+	lastPacket atomic.Value // holds *lastPacketInfo
+	// lastAction stores the most recent action begin+name so Crash() can
+	// pin the crash to a specific bot operation.
+	lastAction atomic.Value // holds *lastActionInfo
+}
+
+type lastPacketInfo struct {
+	ts   time.Time
+	op   byte
+	path string
+	len  int
+	hex  string // head up to 32 bytes
+	err  string
+}
+
+type lastActionInfo struct {
+	ts    time.Time
+	name  string
+	stage string
 }
 
 const (
@@ -247,13 +270,25 @@ func (t *Tracer) Packet(path string, opcode byte, payload []byte, errStr string,
 	if len(head) > 32 {
 		head = head[:32]
 	}
+	hexStr := hex.EncodeToString(head)
+	now := time.Now()
+	// Record for crash correlation (always, even when pkt tracing is off
+	// — cheap atomic store). Crash() reads this to build a corr event.
+	t.lastPacket.Store(&lastPacketInfo{
+		ts:   now,
+		op:   opcode,
+		path: path,
+		len:  len(payload),
+		hex:  hexStr,
+		err:  errStr,
+	})
 	t.emit(map[string]any{
-		"ts":        time.Now().Format(time.RFC3339Nano),
+		"ts":        now.Format(time.RFC3339Nano),
 		"kind":      "pkt",
 		"path":      path,
 		"op":        fmt.Sprintf("0x%02X", opcode),
 		"len":       len(payload),
-		"hex":       hex.EncodeToString(head),
+		"hex":       hexStr,
 		"err":       errStr,
 		"elapsedUs": elapsedUs,
 	})
@@ -293,8 +328,11 @@ func (t *Tracer) Action(name, stage string, details map[string]any) {
 	if !t.IsEnabled() || !t.traceActions.Load() {
 		return
 	}
+	now := time.Now()
+	// Always track last action for crash-correlation.
+	t.lastAction.Store(&lastActionInfo{ts: now, name: name, stage: stage})
 	m := map[string]any{
-		"ts":    time.Now().Format(time.RFC3339Nano),
+		"ts":    now.Format(time.RFC3339Nano),
 		"kind":  "act",
 		"name":  name,
 		"stage": stage,
@@ -303,6 +341,40 @@ func (t *Tracer) Action(name, stage string, details map[string]any) {
 		m[k] = v
 	}
 	t.emit(m)
+}
+
+// Crash records a fatal external event (D2R exit, supervisor panic, etc.)
+// and pairs it with the most recent packet + action so the cause chain is
+// visible in one line. Uses syncWriteLine so the crash event never gets
+// dropped by the rate cap or async queue.
+func (t *Tracer) Crash(reason string, pid uint32, exitCode uint32, extra map[string]any) {
+	if t == nil || !t.enabled.Load() {
+		return
+	}
+	now := time.Now()
+	m := map[string]any{
+		"ts":       now.Format(time.RFC3339Nano),
+		"kind":     "crash",
+		"reason":   reason,
+		"pid":      pid,
+		"exitCode": fmt.Sprintf("0x%X", exitCode),
+	}
+	if lp, ok := t.lastPacket.Load().(*lastPacketInfo); ok && lp != nil {
+		m["lastPacketOp"] = fmt.Sprintf("0x%02X", lp.op)
+		m["lastPacketPath"] = lp.path
+		m["lastPacketLen"] = lp.len
+		m["lastPacketHex"] = lp.hex
+		m["msSinceLastPacket"] = now.Sub(lp.ts).Milliseconds()
+	}
+	if la, ok := t.lastAction.Load().(*lastActionInfo); ok && la != nil {
+		m["lastActionName"] = la.name
+		m["lastActionStage"] = la.stage
+		m["msSinceLastAction"] = now.Sub(la.ts).Milliseconds()
+	}
+	for k, v := range extra {
+		m[k] = v
+	}
+	t.syncWriteLine(m)
 }
 
 // StateDiff records a state snapshot delta (one field changed at a time).

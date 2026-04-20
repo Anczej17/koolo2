@@ -983,6 +983,7 @@ func (s *HttpServer) Listen(port int) error {
 	http.HandleFunc("/debug/sendpacket", s.debugSendPacket)
 	http.HandleFunc("/debug/click", s.debugClick)
 	http.HandleFunc("/debug/hidclick", s.debugHIDClick)
+	http.HandleFunc("/debug/keypress-inproc", s.debugPressKeyInProcess)
 	http.HandleFunc("/debug/walkpacket", s.debugWalkPacket)
 	http.HandleFunc("/debug/senduipacket-apc", s.debugSendUIPacketAPC)
 	http.HandleFunc("/debug/set-game-tid", s.debugSetGameTID)
@@ -5685,6 +5686,53 @@ func (s *HttpServer) debugHIDClick(w http.ResponseWriter, r *http.Request) {
 	}
 	c.HID.Click(btn, int(x), int(y))
 	fmt.Fprintf(w, `{"ok":true,"x":%d,"y":%d}`, x, y)
+}
+
+// debugPressKeyInProcess posts WM_KEYDOWN+WM_KEYUP to D2R's window via
+// the APC-on-game-thread SendMessageW path. Usage:
+//
+//	/debug/presskey?vk=0x57                — default any supervisor, W key (swap)
+//	/debug/presskey?character=Blizzard&vk=57
+//
+// For validating the in-process keypress swap path without waiting for
+// the bot's buff cycle to trigger.
+func (s *HttpServer) debugPressKeyInProcess(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	character := r.URL.Query().Get("character")
+	vkStr := strings.TrimPrefix(strings.ToLower(r.URL.Query().Get("vk")), "0x")
+	if vkStr == "" {
+		vkStr = "57" // VK_W
+	}
+	vk, err := strconv.ParseUint(vkStr, 16, 8)
+	if err != nil {
+		fmt.Fprintf(w, `{"error":"bad vk: %s"}`, err.Error())
+		return
+	}
+	var c *ctx.Context
+	if character != "" {
+		c = s.manager.GetContext(character)
+	} else {
+		for _, name := range s.manager.AvailableSupervisors() {
+			c = s.manager.GetContext(name)
+			if c != nil {
+				break
+			}
+		}
+	}
+	if c == nil {
+		fmt.Fprintf(w, `{"error":"no context"}`)
+		return
+	}
+	if c.MemoryInjector == nil {
+		fmt.Fprintf(w, `{"error":"no memory injector"}`)
+		return
+	}
+	hwnd := uintptr(c.GameReader.HWND)
+	if err := c.MemoryInjector.PressKeyInProcess(hwnd, byte(vk)); err != nil {
+		fmt.Fprintf(w, `{"error":"PressKeyInProcess: %s"}`, err.Error())
+		return
+	}
+	fmt.Fprintf(w, `{"ok":true,"vk":"0x%02X","hwnd":"0x%X"}`, vk, hwnd)
 }
 
 func (s *HttpServer) debugSendUIPacketAPC(w http.ResponseWriter, r *http.Request) {

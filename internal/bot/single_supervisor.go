@@ -525,11 +525,13 @@ func (s *SinglePlayerSupervisor) Start() error {
 			}
 		}
 
-		// 2026-04-20 test37: Even with SKIP_PRESENT_HOOK (rmod installs only
-		// GTC64 + TimerQueue, no Present detour), HID movement STILL broke.
-		// Something else about rmod injection drops HID input. Fix requires
-		// PACKET-based movement (not HID). Gated behind env var until packet
-		// movement is wired into PathFinder.
+		// Dual-only presenter (rmod GTC64 IAT + TimerQueue, no Present detour).
+		// Required for action.pressSwapWeapons in-process WM_KEYDOWN via
+		// CallFnGameThread. Gated via ENABLE_DUAL_PRESENTER=1 because loading
+		// rmod during char-select flow breaks HID navigation — presenter must
+		// come up only once we're past the pre-game HID phase. Current solution
+		// is manual: user sets env var, bot loads presenter early, char select
+		// is already past when game loop reaches here on re-runs.
 		if os.Getenv("ENABLE_DUAL_PRESENTER") == "1" && firstRun {
 			s.bot.ctx.Logger.Info("Normal mode: activating dual-only presenter (ENABLE_DUAL_PRESENTER=1)")
 			s.initPresenterDualOnly()

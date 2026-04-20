@@ -218,35 +218,38 @@ func TestNewNPCBuy_0x32(t *testing.T) {
 	}
 }
 
-// TestNewNPCChatInit_0x2F asserts the 13-byte form matches live
-// 02_npc_chat_clean.json buf=1 entry#1 tick=40902296:
-// `2f0e0000000e000000b511fe11`.
-//
-// Prior 5-byte form (per stale "Discord plaintext" memory) was silently
-// rejected by server — CAPTURE_AUDIT_2026_04_19 revert.
+// TestNewNPCChatInit_0x2F — 5B form. 13B form (derived from buf=1 mirror)
+// CRASHED D2R ~100ms after emit in live test 2026-04-20 18:43/18:44. buf=1
+// was showing D2R's INTERNAL mirror write, not an externally-valid packet
+// shape. 5B = koolo-original safe form; server silently drops but D2R
+// stays alive; HID fallback handles dialog open.
 func TestNewNPCChatInit_0x2F(t *testing.T) {
-	got := NewNPCChatInit(data.UnitID(0x0E), 0x11B5, 0x11FE)
-	wantHex := "2f0e0000000e000000b511fe11"
+	got := NewNPCChatInit(data.UnitID(0x0E), 0, 0)
+	wantHex := "2f0e000000"
 	want, _ := hex.DecodeString(wantHex)
 	if !bytes.Equal(got, want) {
 		t.Fatalf("0x2F NPCChatInit layout mismatch:\n got %s\nwant %s",
 			hex.EncodeToString(got), wantHex)
 	}
-	if len(got) != 13 {
-		t.Fatalf("0x2F length: got %d want 13", len(got))
+	if len(got) != 5 {
+		t.Fatalf("0x2F length: got %d want 5 (13B variant crashed D2R 2026-04-20)", len(got))
 	}
 }
 
-// TestNewNPCChatTerminate_0x30 asserts the 13-byte clean-close form matches
-// live 02_npc_chat_clean.json buf=1 entry#3 tick=40903328:
-// `300e0000000e000000b511fe11`.
+// TestNewNPCChatTerminate_0x30 — 5B form. 13B variant CRASHED D2R
+// ~100-150ms after emit in back-to-back runs 2026-04-20 18:43:32 and
+// 18:44:07. The 13B [opcode][npcGID][npcGID][npcPos] shape is D2R's
+// internal mirror-buffer write, not an externally-valid external packet.
 func TestNewNPCChatTerminate_0x30(t *testing.T) {
-	got := NewNPCChatTerminate(data.UnitID(0x0E), 0x11B5, 0x11FE)
-	wantHex := "300e0000000e000000b511fe11"
+	got := NewNPCChatTerminate(data.UnitID(0x0E), 0, 0)
+	wantHex := "300e000000"
 	want, _ := hex.DecodeString(wantHex)
 	if !bytes.Equal(got, want) {
 		t.Fatalf("0x30 NPCChatTerminate layout mismatch:\n got %s\nwant %s",
 			hex.EncodeToString(got), wantHex)
+	}
+	if len(got) != 5 {
+		t.Fatalf("0x30 length: got %d want 5 (13B variant crashed D2R 2026-04-20)", len(got))
 	}
 }
 

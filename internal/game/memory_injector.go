@@ -25,6 +25,7 @@ import (
 	"strings"
 	"sync"
 	"syscall"
+	"time"
 	"unsafe"
 
 	"local/internal/svc/internal/gamelib/memory"
@@ -442,6 +443,52 @@ func (i *MemoryInjector) SendMessageInProcess(hwnd uintptr, msg uint32, wParam, 
 		return 0, fmt.Errorf("presenter not ready for in-process SendMessage")
 	}
 	return i.presenter.CallFnGameThread(i.sendMessageWAddr, hwnd, uintptr(msg), wParam, lParam)
+}
+
+// PressKeyInProcess posts WM_KEYDOWN + WM_KEYUP to D2R's window via
+// SendMessageW executed on D2R's OWN game thread (APC). From D2R's
+// perspective this is indistinguishable from a real key press: its
+// WndProc processes the message, looks up the keybinding in the dispatch
+// table, runs handler1 (widget toggle) and handler2 (state propagator),
+// and triggers the FULL action chain — for weapon swap: widget flip +
+// item-pointer swap + stat recalc + 0x50 packet via dual_send_wrap.
+//
+// Detection surface: ZERO OS-HID. No SendInput, no keybd_event, no
+// SetWindowsHookEx. Message originates in D2R process, APC fires on
+// D2R's own game thread, WndProc runs on its own window thread —
+// Warden cannot distinguish from legitimate internal message posting.
+//
+// Used for state-dependent packets that CANNOT be emitted externally
+// (0x50 swap, 0x5C Cain identify, etc.) — see memory
+// project_weapon_swap_solved 2026-04-12 HID-SOLUTION block.
+func (i *MemoryInjector) PressKeyInProcess(hwnd uintptr, vk byte) error {
+	if i == nil || !i.isLoaded {
+		return fmt.Errorf("memory injector not loaded")
+	}
+	if i.sendMessageWAddr == 0 {
+		return fmt.Errorf("SendMessageW not resolved")
+	}
+	if i.presenter == nil || !i.presenter.IsReady() {
+		return fmt.Errorf("presenter not ready for in-process key press")
+	}
+	const (
+		wmKeyDown uint32 = 0x0100
+		wmKeyUp   uint32 = 0x0101
+	)
+	// lParam for WM_KEYDOWN: bit 0..15 = repeat count (1), rest 0.
+	lparamDown := uintptr(1)
+	if _, err := i.presenter.CallFnGameThread(i.sendMessageWAddr, hwnd, uintptr(wmKeyDown), uintptr(vk), lparamDown); err != nil {
+		return fmt.Errorf("WM_KEYDOWN vk=0x%02X: %w", vk, err)
+	}
+	// Brief natural delay between down + up so D2R's WndProc processes
+	// the key-down action before seeing the release.
+	time.Sleep(30 * time.Millisecond)
+	// lParam for WM_KEYUP: bit 30 (was-down) + bit 31 (transition) + repeat.
+	lparamUp := uintptr(1) | (1 << 30) | (1 << 31)
+	if _, err := i.presenter.CallFnGameThread(i.sendMessageWAddr, hwnd, uintptr(wmKeyUp), uintptr(vk), lparamUp); err != nil {
+		return fmt.Errorf("WM_KEYUP vk=0x%02X: %w", vk, err)
+	}
+	return nil
 }
 
 // OverrideGetKeyState temporarily patches GetKeyState to return 0x8000 for the given key.

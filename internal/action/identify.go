@@ -112,12 +112,28 @@ func CainIdentify() error {
 	utils.Sleep(400)
 	ctx.RefreshGameData()
 
-	// Cain's menu: option 0 = Identify Items. Send via NPCDialogOption (0x38
-	// with 9B form — SendUIPacket path). If server drops silently, the HID
-	// keyboard fallback inside SelectNPCOption (Home + Enter) picks it up.
+	// Cain's menu: option 0 = Identify Items. Send via NPCDialogOption (0x38).
+	// This only OPENS the "Identify" sub-menu — D2R does NOT auto-identify on
+	// dialog selection alone (verified live 2026-04-20: 0x38 option=0 opens
+	// sub-menu, 0x30 closes, nothing identified).
 	SelectNPCOption(0, cainID)
-	utils.Sleep(800)
+	utils.Sleep(400)
 	ctx.RefreshGameData()
+
+	// Now actually trigger the identify via 0x5C CainIdentifyAll — 17B dual
+	// buffer packet using builder NewCainIdentifyItem(cainGID, 0, 0) which the
+	// server treats as "identify all items in inventory". Older 0x34 14B form
+	// CRASHED D2R (test31 04-19); the 0x5C 17B form is the surviving path.
+	if ctx.PacketSender != nil {
+		townCain, found := ctx.Data.Monsters.FindOne(cainID, data.MonsterTypeNone)
+		if found {
+			if err := ctx.PacketSender.CainIdentifyAll(townCain.UnitID); err != nil {
+				ctx.Logger.Warn("CainIdentifyAll 0x5C packet failed", "err", err)
+			}
+			utils.Sleep(600)
+			ctx.RefreshGameData()
+		}
+	}
 
 	// Verify: are items now identified?
 	unidAfter := countUnidentifiedItems(ctx)

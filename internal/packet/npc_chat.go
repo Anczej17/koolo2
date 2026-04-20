@@ -6,55 +6,45 @@ import (
 	"local/internal/svc/internal/gamelib/data"
 )
 
-// NewNPCChatInit creates an NPC chat-open packet (0x2F, 13 bytes).
+// NewNPCChatInit creates an NPC chat-open packet (0x2F, 5 bytes).
 //
-// AUTHORITATIVE live capture (logs/live_captures_2026_04_15/02_npc_chat_clean.json
-// buf=1 mirror entry#1 tick=40902296):
+// ROLLBACK 2026-04-20 18:44: The 13B form [opcode][npcGID][npcGID][npcPos]
+// derived from buf=1 mirror capture 02_npc_chat_clean.json CRASHES D2R
+// ~100-150ms after emit (correlated over two runs at 18:43:32 and 18:44:07,
+// both fatal 0xC0000005 shortly after 0x30 13B landed on server). The 13B
+// shape is what D2R ITSELF writes to its mirror buffer via dual_send_wrap
+// when a user closes a dialog — NOT a valid externally-submitted packet.
+// D2R's packet validator on a bot-emitted 13B 0x2F/0x30 trips and AVs.
 //
-//	2f 0e000000 0e000000 b511fe11
+// Back to 5B [opcode][npcGID:u32] — the original koolo shape. Server
+// silently drops without opening dialog, so callers must HID-fallback for
+// NPC open (step/interact_npc.go already does this after a 1.7s timeout).
 //
-// Layout: [2F][npcGID:u32][npcGID:u32][npcX:u16][npcY:u16]
-//
-// The second u32 appears identical to the first in this capture (both 0x0E
-// = Akara). Field-2 semantic is uncertain — could be a repeated npcGID,
-// could be entity-type marker, could be playerGID that happened to equal
-// Akara's GID. Writing field-2 = npcGID matches observed bytes. Fresh
-// capture during Phase 5 with different player/npc GIDs will disambiguate.
-//
-// Prior 5B "Discord plaintext" form was per-memory CORRECTED 2026-04-15 but
-// contradicts buf=1 sniffer bytes — the server accepts 5B via local dispatch
-// but silently drops without a dialog state change. CAPTURE_AUDIT_2026_04_19
-// revert.
-//
-// Trade-mode variant extends to 18B with a 5-byte playerPos block in the
-// middle — not emitted here; use the 13B form for initial chat open.
+// Extra playerX/Y params retained for API compatibility, ignored.
 func NewNPCChatInit(npcGID data.UnitID, npcX, npcY uint16) []byte {
-	buf := make([]byte, 13)
+	_ = npcX
+	_ = npcY
+	buf := make([]byte, 5)
 	buf[0] = OpNPCChatInit
 	binary.LittleEndian.PutUint32(buf[1:5], uint32(npcGID))
-	binary.LittleEndian.PutUint32(buf[5:9], uint32(npcGID))
-	binary.LittleEndian.PutUint16(buf[9:11], npcX)
-	binary.LittleEndian.PutUint16(buf[11:13], npcY)
 	return buf
 }
 
-// NewNPCChatTerminate creates an NPC chat-close packet (0x30, 13 bytes).
+// NewNPCChatTerminate creates an NPC chat-close packet (0x30, 5 bytes).
 //
-// AUTHORITATIVE live capture 02_npc_chat_clean.json buf=1 entry#3 tick=40903328:
+// ROLLBACK 2026-04-20 18:44: same reason as 0x2F above — 13B form CRASHES
+// D2R ~100ms after emit. buf=1 13B is D2R's internal mirror write, not an
+// acceptable external packet. 5B is the koolo-original safe shape.
 //
-//	30 0e000000 0e000000 b511fe11
-//
-// Layout mirrors 0x2F: [30][npcGID:u32][npcGID:u32][npcX:u16][npcY:u16].
-//
-// Note: a distinct 22B post-trade variant exists (see NewNPCChatTerminatePostTrade)
-// emitted when closing after a sell/buy with an item-move trailer.
+// The 22B post-trade variant (NewNPCChatTerminatePostTrade) lives in its
+// own function and MAY still be valid for the specific sell/buy-close
+// context — awaiting fresh empirical test during Phase 5b.
 func NewNPCChatTerminate(npcGID data.UnitID, npcX, npcY uint16) []byte {
-	buf := make([]byte, 13)
+	_ = npcX
+	_ = npcY
+	buf := make([]byte, 5)
 	buf[0] = OpNPCChatTerminate
 	binary.LittleEndian.PutUint32(buf[1:5], uint32(npcGID))
-	binary.LittleEndian.PutUint32(buf[5:9], uint32(npcGID))
-	binary.LittleEndian.PutUint16(buf[9:11], npcX)
-	binary.LittleEndian.PutUint16(buf[11:13], npcY)
 	return buf
 }
 

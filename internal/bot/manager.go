@@ -23,6 +23,7 @@ import (
 	"local/internal/svc/internal/game"
 	"local/internal/svc/internal/gamelib/memory"
 	"local/internal/svc/internal/health"
+	"local/internal/svc/internal/livetrace"
 	"local/internal/svc/internal/mule"
 	"local/internal/svc/internal/ntapi"
 	"local/internal/svc/internal/pather"
@@ -523,6 +524,7 @@ func (mng *SupervisorManager) buildSupervisor(supervisorName string, logger *slo
 						}
 						if exit != 259 { // STILL_ACTIVE
 							logger.Error(fmt.Sprintf("D2R watchdog: D2R EXITED pid=%d exitCode=%#x (%d)", watchPID, exit, exit))
+							livetrace.Get().Crash("d2r_exit", watchPID, exit, nil)
 							snapshotAndLogCrashDiag(gi, logger, watchPID)
 							return
 						}
