@@ -266,20 +266,19 @@ func TestNewNPCChatTerminatePostTrade_0x30_22B(t *testing.T) {
 	}
 }
 
-// TestNewNPCEntityAction_0x4D asserts the 29-byte form matches live
-// 02_npc_chat_clean.json buf=0 entry#0 tick=40781765:
-// `4d0e000000d6000000000004010000000e000000b411011201b511fb11`.
-//
-// Prior 5-byte truncated form was rejected by server.
+// TestNewNPCEntityAction_0x4D asserts the 5-byte form after the 29B
+// live test 14:29:58 crash (exitCode=0xc0000005). The 29B claim was from
+// buf=0 residue, not a real packet. Server silently drops 5B; callers
+// HID-fallback when dialog doesn't open.
 func TestNewNPCEntityAction_0x4D(t *testing.T) {
-	got := NewNPCEntityAction(data.UnitID(0x0E), data.UnitID(0xD6), 0x11B4, 0x1201, 0x11B5, 0x11FB)
-	wantHex := "4d0e000000d6000000000004010000000e000000b411011201b511fb11"
+	got := NewNPCEntityAction(data.UnitID(0x0E), data.UnitID(0xD6), 0, 0, 0, 0)
+	wantHex := "4d0e000000"
 	want, _ := hex.DecodeString(wantHex)
 	if !bytes.Equal(got, want) {
 		t.Fatalf("0x4D NPCEntityAction layout mismatch:\n got  %s\nwant %s",
 			hex.EncodeToString(got), wantHex)
 	}
-	if len(got) != 29 {
-		t.Fatalf("0x4D length: got %d want 29", len(got))
+	if len(got) != 5 {
+		t.Fatalf("0x4D length: got %d want 5 (29B variant crashed D2R 2026-04-20 14:29)", len(got))
 	}
 }
