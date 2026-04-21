@@ -109,12 +109,13 @@ func main() {
 	_ = buildID
 	_ = buildTime
 
-	// Stealth RPM Layer default ON in production. Opt-out: STEALTH_READ=0.
-	// Must run before any code path imports `internal/gamelib/memory` and
-	// triggers stealthOnce (sync.Once gate inside StealthEnabled()).
-	if os.Getenv("STEALTH_READ") == "" {
-		os.Setenv("STEALTH_READ", "1")
-	}
+	// Stealth RPM Layer default OFF — historically the stealth chaff reader
+	// races MemoryInjector.Load at D2R attach and trips Arxan SEH → app.exe
+	// SIGSEGV before game entry (live-reproduced 2026-04-21 without env vars
+	// or with STEALTH_READ=1). Opt in via STEALTH_READ=1 when the chaff-vs-
+	// init race has a fix. This block was previously "force STEALTH_READ=1
+	// when empty" which override'd stealth.go's OFF default and defeated the
+	// direct-click-exe launch path; now only honors an explicitly-set env.
 
 	// Capture stderr (panic stacks) to file. Without this, -H windowsgui swallows
 	// all panic output and crashes are silent. Cheap insurance.

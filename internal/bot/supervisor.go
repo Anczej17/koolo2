@@ -132,61 +132,34 @@ func (s *baseSupervisor) logGameStart(runs []run.Run) {
 func (s *baseSupervisor) waitUntilCharacterSelectionScreen() error {
 	s.bot.ctx.Logger.Info("Waiting for character selection screen...")
 
-	// Cycle through input types per iteration (every ~250 ms).
-	//
-	// IMPORTANT (2026-04-21): ESC is case 0 — tiny-mod's PRESS-G-TO-PLAY title
-	// overlay has a chat input "[Game]" auto-focused on the left side; a click
-	// at (100,100) FOCUSES the chat and subsequent VK_G typing lands in the
-	// chat box instead of triggering the Play shortcut. ESC cleanly closes
-	// chat every tick so keyboard events reach the intended target. Captured
-	// live via /debug/screenshot at 2026-04-21 17:06.
-	//
-	// Remaining cases cover: fresh-boot calibration (Gamma/ScreenSpace/
-	// ColorBlind dialogs), title InputPrompt, tiny-mod PRESS-G, press-any-key,
-	// default-profile ENTER, classic-mod difficulty select (Normal/NM/Hell
-	// buttons vertically stacked around x=640). InGame() short-circuits the
-	// wait because tiny-mod's G can jump straight from title into game with
-	// no separate char-select panel.
-	// SAFE-INPUTS ONLY. Live-captured 2026-04-21 tiny-mod main menu shows:
-	//   - PLAY button bottom-center at (640, 645)
-	//   - OFFLINE tab top-right with last character pre-selected
-	//   - Difficulty picker appears after PLAY for multi-diff characters
-	// Removed ESC + RETURN — the pair can confirm D2R's "quit game?" prompt
-	// and terminate D2R in a loop. Removed corner-click (100,100) — on tiny-
-	// mod PRESS-G screen it focuses the chat input and subsequent VK_G types
-	// "g" into chat. Removed dead centre-click (640,360) — tiny-mod main menu
-	// has nothing there, clicks do nothing useful.
-	cfgDiff := strings.ToLower(string(s.bot.ctx.CharacterCfg.Game.Difficulty))
-	// Select difficulty Y-coord for config — live-captured 1280x720 coords
-	// (screenshot 2026-04-21 17:25 showed NORMAL at y≈300, NIGHTMARE y≈350,
-	// HELL y≈390 with x centered at 640).
-	diffY := 390 // default Hell
-	switch cfgDiff {
-	case "normal":
-		diffY = 300
-	case "nightmare":
-		diffY = 350
-	case "hell":
-		diffY = 390
-	}
-	// Rotation: PLAY click first, then Diff click in the very next tick so
-	// D2R's difficulty-select screen survives to receive the diff click.
-	// Gaps between PLAY and Diff filled by harmless non-click inputs (G/SPACE
-	// don't cancel difficulty screen; a stray mid-rotation click at a wrong
-	// coord would re-open main menu before the Diff click lands).
+	// Cycle through 3 input types per iteration (every ~750 ms):
+	//  1. (100,100) left click — safe corner, dismisses most intro overlays
+	//  2. (640,602) left click — hits Continue on Gamma/ScreenSpace/ColorBlind
+	//     calibration dialogs D2R re-shows on every fresh boot without a persisted
+	//     calibration state
+	//  3. VK_G (0x47) — tiny mod's "PRESS G TO PLAY" custom char-select flow
+	//     bypasses vanilla's click-PLAY-button + click-difficulty sequence and
+	//     jumps straight into the last-played character's game. Also harmless on
+	//     vanilla char select (G maps to a chat shortcut in-game, doesn't affect
+	//     menu UI).
+	// InGame() short-circuits because tiny-mod's G jumps straight from title
+	// screen to in-game with no separate char-select panel — we detect success
+	// via InGame, not a specific "char select panel visible" signal.
 	clickIdx := 0
 	for !s.bot.ctx.GameReader.IsInCharacterSelectionScreen() && !s.bot.ctx.GameReader.InGame() {
-		switch clickIdx % 5 {
+		switch clickIdx % 6 {
 		case 0:
-			s.bot.ctx.HID.Click(game.LeftButton, 640, 645) // PLAY button on tiny-mod main menu
+			s.bot.ctx.HID.Click(game.LeftButton, 100, 100) // corner
 		case 1:
-			s.bot.ctx.HID.Click(game.LeftButton, 640, diffY) // Difficulty per-config on SELECT DIFFICULTY screen
+			s.bot.ctx.HID.Click(game.LeftButton, 640, 602) // Continue button on calibration dialogs
 		case 2:
-			s.bot.ctx.HID.PressKey(0x47) // VK_G — tiny mod PRESS-G shortcut (alt path)
+			s.bot.ctx.HID.Click(game.LeftButton, 640, 360) // screen centre — title InputPrompt hitbox
 		case 3:
-			s.bot.ctx.HID.PressKey(0x20) // VK_SPACE — dismiss "Press Any Key" intro
+			s.bot.ctx.HID.PressKey(0x47) // VK_G — tiny mod "PRESS G TO PLAY"
 		case 4:
-			s.bot.ctx.HID.Click(game.LeftButton, 640, 602) // Continue on calibration dialogs
+			s.bot.ctx.HID.PressKey(0x20) // VK_SPACE — dismiss "Press Any Key" intro prompt
+		case 5:
+			s.bot.ctx.HID.PressKey(0x0D) // VK_RETURN — offline profile default-select
 		}
 		clickIdx++
 		time.Sleep(250 * time.Millisecond)
