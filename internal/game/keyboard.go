@@ -16,19 +16,9 @@ const (
 	keyPressMaxTime = 90 // ms
 )
 
-// PressKey receives an ASCII code and sends a key press event to the game window.
-//
-// When presenter is installed, uses PostKeyInProcess — zero cross-process
-// surface, PostMessageW via APC on D2R's own game thread. Falls back to
-// cross-process win.PostMessage when presenter not available.
+// PressKey receives an ASCII code and sends a key press event to the game window
 func (hid *HID) PressKey(key byte) {
 	livetrace.Get().Key(key, "")
-	if hid.gi.HasInProcessMsgPath() {
-		if err := hid.gi.PostKeyInProcess(uintptr(hid.gr.HWND), key); err == nil {
-			return
-		}
-		// Fallthrough to cross-process on error.
-	}
 	win.PostMessage(hid.gr.HWND, win.WM_KEYDOWN, uintptr(key), hid.calculatelParam(key, true))
 	sleepTime := rand.Intn(keyPressMaxTime-keyPressMinTime) + keyPressMinTime
 	time.Sleep(time.Duration(sleepTime) * time.Millisecond)

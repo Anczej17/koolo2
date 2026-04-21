@@ -496,53 +496,6 @@ func (i *MemoryInjector) PostKeyInProcess(hwnd uintptr, vk byte) error {
 	return nil
 }
 
-// HasInProcessMsgPath reports whether PostKeyInProcess / PostClickInProcess /
-// PostMouseMoveInProcess can run — i.e. rmod.dll is injected, presenter is
-// ready, and user32!PostMessageW is resolved. Used by game/mouse.go and
-// game/keyboard.go to decide between the in-process path and the legacy
-// cross-process win.SendMessage / win.PostMessage fallback.
-func (i *MemoryInjector) HasInProcessMsgPath() bool {
-	if i == nil || !i.isLoaded {
-		return false
-	}
-	if i.postMessageWAddr == 0 {
-		return false
-	}
-	return i.presenter != nil && i.presenter.IsReady()
-}
-
-// PostMouseMoveInProcess posts the move-only prefix of the mouse-click
-// sequence (WM_NCHITTEST + WM_SETCURSOR + WM_MOUSEMOVE). Mirror of
-// PostClickInProcess minus the button events, for MovePointer migration.
-// Expects SCREEN coords.
-func (i *MemoryInjector) PostMouseMoveInProcess(hwnd uintptr, x, y int32) error {
-	if !i.HasInProcessMsgPath() {
-		return fmt.Errorf("in-process message path not available")
-	}
-	const (
-		wmNcHitTest uint32 = 0x0084
-		wmSetCursor uint32 = 0x0020
-		wmMouseMove uint32 = 0x0200
-	)
-	i.presenter.SetCursor(x, y)
-	i.mu.Lock()
-	i.lastCursorX = int(x)
-	i.lastCursorY = int(y)
-	i.cursorOverrideActive = true
-	i.mu.Unlock()
-	lparam := uintptr(uint32(uint16(y))<<16 | uint32(uint16(x)))
-	if _, err := i.presenter.CallFnGameThread(i.postMessageWAddr, hwnd, uintptr(wmNcHitTest), 0, lparam); err != nil {
-		return fmt.Errorf("PostMessageW WM_NCHITTEST: %w", err)
-	}
-	if _, err := i.presenter.CallFnGameThread(i.postMessageWAddr, hwnd, uintptr(wmSetCursor), hwnd, 0x2010001); err != nil {
-		return fmt.Errorf("PostMessageW WM_SETCURSOR: %w", err)
-	}
-	if _, err := i.presenter.CallFnGameThread(i.postMessageWAddr, hwnd, uintptr(wmMouseMove), 0, lparam); err != nil {
-		return fmt.Errorf("PostMessageW WM_MOUSEMOVE: %w", err)
-	}
-	return nil
-}
-
 // PostClickInProcess is the click-path analogue of PostKeyInProcess.
 // Posts WM_MOUSEMOVE + WM_xBUTTONDOWN + WM_xBUTTONUP to D2R's window via
 // PostMessageW executed on D2R's OWN game thread (APC). D2R's WndProc pulls
