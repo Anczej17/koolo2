@@ -30,10 +30,10 @@ const (
 	OpEntityInteract     = 0x13 // verified — [13][type:u32][gid:u32]
 	OpMoveToEntity       = 0x04 // sniffed  — [04][type:u32][gid:u32](+coords?)
 	OpEntranceInteract     = 0x40 // verified — [40][gid:u32]
-	OpTpInteract           = 0x41 // verified — [41][gid:u32][FFFFFFFF]
-	OpTpConfirmTravel      = 0x43 // sniffed 2026-04-15 (paired post-0x41) — [43][01000000][01000000] (9B fixed)
+	OpTpInteract           = 0x41 // verified — [41][gid:u32][FFFFFFFF] (13B)
+	OpTpConfirmTravel      = 0x43 // verified 04-18 (13B) — [43][01000000][01000000][00000000]; was wrongly 9B in pre-buf=1 audit
 	OpWaypointTravel       = 0x49 // verified — [49][wp_gid:u32][dest:u8][000000]
-	OpTpDestinationSelect  = 0x4B // sniffed 2026-04-15 — [4B][dest:u8][000000] (5B); paired with 0x43 to confirm
+	OpTpDestinationSelect  = 0x4B // verified 04-18 (13B) — [4B][dest:u32][action=02:u32][FFFFFFFF]; was wrongly 5B in pre-buf=1 audit
 
 	// === Inventory / items ===
 	OpPickupItem    = 0x16 // verified — [16][gid:u32]

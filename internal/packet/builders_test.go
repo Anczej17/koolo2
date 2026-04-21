@@ -285,3 +285,92 @@ func TestNewNPCEntityAction_0x4D(t *testing.T) {
 		t.Fatalf("0x4D length: got %d want 5 (29B variant crashed D2R 2026-04-20 14:29)", len(got))
 	}
 }
+
+// TestNewNPCDialogOption_0x38 locks the 9-byte format. buf=1 corpus shows
+// a 6B shape but sending that length triggered 0xC0000005 on test27
+// 2026-04-19 — server expects the full 4-byte npcGID, not just the low
+// byte. The 6B buf=1 view is D2R's internal mirror write (post-process
+// state), not a re-emittable wire form.
+func TestNewNPCDialogOption_0x38(t *testing.T) {
+	got := NewNPCDialogOption(1, data.UnitID(0x0E))
+	if len(got) != 9 {
+		t.Fatalf("0x38 length: got %d want 9 (6B buf=1 form crashes D2R)", len(got))
+	}
+	if got[0] != 0x38 {
+		t.Fatalf("0x38 opcode: got 0x%02X want 0x38", got[0])
+	}
+	if binary.LittleEndian.Uint32(got[1:5]) != 1 {
+		t.Fatalf("0x38 option: got %d want 1", binary.LittleEndian.Uint32(got[1:5]))
+	}
+	if binary.LittleEndian.Uint32(got[5:9]) != 0x0E {
+		t.Fatalf("0x38 npcGID: got 0x%X want 0x0E", binary.LittleEndian.Uint32(got[5:9]))
+	}
+}
+
+// TestNewSkillSelection_0x3C locks the 9-byte koolo-original form. Live
+// buf=1 shows a 15B variant carrying trailing cursor coordinates, but
+// the 9B minimal form is sufficient for skill swap and is the shape
+// proven to work across years of koolo usage.
+func TestNewSkillSelection_0x3C(t *testing.T) {
+	// Right-click skill (Glacial Spike, id=45)
+	p := NewSkillSelection(45)
+	got := p.GetPayload()
+	if len(got) != 9 {
+		t.Fatalf("0x3C length: got %d want 9", len(got))
+	}
+	wantHex := "3c2d000000ffffffff"
+	want, _ := hex.DecodeString(wantHex)
+	if !bytes.Equal(got, want) {
+		t.Fatalf("0x3C right-click layout mismatch:\n got  %s\nwant %s",
+			hex.EncodeToString(got), wantHex)
+	}
+	// Left-click skill (Frost Nova, id=39) — btn=0x80
+	pl := NewLeftSkillSelection(39)
+	gotL := pl.GetPayload()
+	wantLHex := "3c27000080ffffffff"
+	wantL, _ := hex.DecodeString(wantLHex)
+	if !bytes.Equal(gotL, wantL) {
+		t.Fatalf("0x3C left-click layout mismatch:\n got  %s\nwant %s",
+			hex.EncodeToString(gotL), wantLHex)
+	}
+}
+
+// TestBuildersMatchLUT walks every builder output from other tests and
+// confirms it lies inside the LUT's [Min, Max] range. Catches drift where
+// a builder changes length without updating opcode_lengths.go.
+func TestBuildersMatchLUT(t *testing.T) {
+	cases := []struct {
+		name string
+		data []byte
+	}{
+		{"0x04 move-to-entity", NewMoveToEntity(MoveToEntityActionWalk, 0x12FB1101, 1).GetPayload()},
+		{"0x18 item-to-stash", NewItemToStash(data.UnitID(0x53), 4, 1)},
+		{"0x19 item-from-stash", NewItemFromStash(data.UnitID(0x53), 7, 1)},
+		{"0x2F chat-init", NewNPCChatInit(data.UnitID(0x0E), 0, 0)},
+		{"0x30 chat-terminate", NewNPCChatTerminate(data.UnitID(0x0E), 0, 0)},
+		{"0x30 chat-terminate post-trade", NewNPCChatTerminatePostTrade(data.UnitID(0x0E), 0, 0, 0x03)},
+		{"0x33 sell", NewNPCSellItem(0x1D4C, data.UnitID(0x38), data.UnitID(0x0E), 5, 2, 0x03)},
+		{"0x38 dialog", NewNPCDialogOption(1, data.UnitID(0x0E))},
+		{"0x3C select-skill", NewSkillSelection(45).GetPayload()},
+		{"0x43 tp-confirm", NewTpConfirmTravel().GetPayload()},
+		{"0x4B tp-dest", NewTpDestinationSelect(6).GetPayload()},
+		{"0x4D npc-entity-action", NewNPCEntityAction(data.UnitID(0x0E), data.UnitID(0xD6), 0, 0, 0, 0)},
+		{"0x50 weapon-swap 0→1", NewWeaponSwap(data.UnitID(0x5C), data.UnitID(0x56), data.UnitID(0x4B), data.UnitID(0x50), 0)},
+	}
+	for _, tc := range cases {
+		if len(tc.data) == 0 {
+			t.Errorf("%s: empty payload", tc.name)
+			continue
+		}
+		op := tc.data[0]
+		info, ok := OpcodeLengths[op]
+		if !ok {
+			t.Errorf("%s: opcode 0x%02X missing from LUT", tc.name, op)
+			continue
+		}
+		if len(tc.data) < int(info.Min) || len(tc.data) > int(info.Max) {
+			t.Errorf("%s: len=%d outside LUT[0x%02X]=[%d..%d]",
+				tc.name, len(tc.data), op, info.Min, info.Max)
+		}
+	}
+}
