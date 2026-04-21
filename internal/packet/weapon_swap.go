@@ -33,18 +33,24 @@ func NewWeaponSwap(fromLeftGID, fromRightGID, toLeftGID, toRightGID data.UnitID,
 	binary.LittleEndian.PutUint32(buf[9:13], uint32(toLeftGID))
 	binary.LittleEndian.PutUint32(buf[13:17], uint32(toRightGID))
 	binary.LittleEndian.PutUint64(buf[17:25], 0xFFFFFFFFFFFFFFFF)
-	if fromSlot == 0 {
-		buf[25] = 0x00
-		buf[26] = 0x00
-		buf[27] = 0x36
-		buf[28] = 0x00
-		buf[29] = 0x00
-	} else {
-		buf[25] = 0x37
-		buf[26] = 0x00
-		buf[27] = 0x95
-		buf[28] = 0x00
-		buf[29] = 0x01
-	}
+	// Trailer layout, corrected 2026-04-21 from live capture of user's
+	// manual CTA pre-buff sequence in Outer Cloister:
+	//   slot 0->1: ...FF FF FF FF FF FF FF FF 37 00 95 00 01
+	//   slot 1->0: ...FF FF FF FF FF FF FF FF 37 00 28 00 00
+	// So:
+	//   [25] = 0x37 anim byte, CONSTANT for both directions
+	//   [26] = 0x00 constant
+	//   [27:29] = u16 session seq counter (observed 95/28/36/9b — varies;
+	//             server appears not to strict-validate, 0 works)
+	//   [29] = target weapon slot = fromSlot XOR 1
+	// Old builder wrote [25]=0x00 for fromSlot==0 AND set [29]=fromSlot
+	// (not target slot). Both wrong — server silent-drops an all-zero-anim
+	// trailer, and a dir byte matching the current slot means "swap to
+	// where I already am" which the server treats as no-op.
+	buf[25] = 0x37
+	buf[26] = 0x00
+	buf[27] = 0x00
+	buf[28] = 0x00
+	buf[29] = fromSlot ^ 1
 	return buf
 }
