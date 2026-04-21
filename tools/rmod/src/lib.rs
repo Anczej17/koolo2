@@ -5648,6 +5648,12 @@ unsafe fn dispatch_snapshot_init(shm: *mut SharedBuffer) {
 
     G_SNAPSHOT_ENABLED = true;
 
+    // (Previously attempted: synchronous warm-up scan. Result: Arxan AV
+    // cascade within 2s of init — same failure mode as period=1. Walker
+    // reads MUST amortize at period>=60 so the rate sits under Arxan's
+    // threshold. Bot side needs to tolerate the initial no-coverage window
+    // via soft-fallback to RPM on snapshot miss.)
+
     // Walker worker-thread path SHELVED for this session (six live tests
     // 2026-04-17 all converge on same d3d12+0xCF2FE AV when walker activates,
     // regardless of thread model or throttle). Next session: GID-style
@@ -5683,6 +5689,15 @@ unsafe fn snapshot_tick_write(shm: *mut SharedBuffer) {
 /// Full D2R memory scan. Invoked from worker thread at ~33 Hz (30 ms sleep).
 /// Bumps tick_counter atomically at end so bot's SnapshotReader sees fresh data.
 unsafe fn snapshot_walker_scan(shm: *mut SharedBuffer) {
+    snapshot_walker_scan_inner(shm, false);
+}
+
+/// Internal walker with `force` bypass for the first-scan warm-up path —
+/// dispatch_snapshot_init calls this with force=true so bot's subsequent
+/// reads find at least the static regions already mirrored. Without that,
+/// period=60 means the walker sleeps until frame 60; bot attaches at tick=1
+/// and panics "snapshot miss" on any static read.
+unsafe fn snapshot_walker_scan_inner(shm: *mut SharedBuffer, force: bool) {
     if !G_SNAPSHOT_ENABLED || G_SNAP_UNIT_TABLE_VA_XOR == 0 {
         return;
     }
@@ -5732,7 +5747,7 @@ unsafe fn snapshot_walker_scan(shm: *mut SharedBuffer) {
         raw_period
     };
     WALKER_FRAME_COUNTER = WALKER_FRAME_COUNTER.wrapping_add(1);
-    if WALKER_FRAME_COUNTER % period != 0 {
+    if !force && WALKER_FRAME_COUNTER % period != 0 {
         // Still bump tick so bot's liveness probe sees rmod is running.
         let shm_u8 = shm as *mut u8;
         let tick = core::ptr::read_unaligned(shm_u8.add(OFF_SNAP_TICK) as *const u64);

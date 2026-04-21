@@ -1855,6 +1855,8 @@ func (s *SinglePlayerSupervisor) initClaudePresenter() {
 		failSnapshot(fmt.Sprintf("snapshot init failed: %v", snapErr))
 	}
 	sr := memory.NewSnapshotReader(pres.LocalView(), uintptr(presenter.SharedBufSize))
+	// Soft-fallback to RPM for walker-coverage gaps during bootstrap.
+	sr.SetFallback(gr.Process)
 	if tickErr := sr.WaitForFirstTick(3 * time.Second); tickErr != nil {
 		failSnapshot(fmt.Sprintf("snapshot tick never advanced: %v", tickErr))
 	}

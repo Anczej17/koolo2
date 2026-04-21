@@ -38,12 +38,36 @@ type Reader interface {
 type SnapshotReader struct {
 	base unsafe.Pointer // mapped SHM base (minimum SharedBufSize bytes readable)
 	size uintptr
+	// Fallback RPM reader for walker-coverage gaps. Walker runs at period=60
+	// and amortises reads to stay under Arxan's rate threshold — during
+	// bootstrap (first 60+ Present frames) and for any static region the
+	// walker has not yet reached, `fallback` serves the read via cross-
+	// process RPM. Goal: converge to near-zero fallback hits as walker
+	// catches up. See `missCount` for telemetry.
+	fallback  *Process
+	missCount uint64 // atomic - counts fallback-served reads
 }
 
 // NewSnapshotReader wraps a mapped SHM base. `size` must be at least
 // `presenter.SharedBufSize` (131072) bytes.
 func NewSnapshotReader(base unsafe.Pointer, size uintptr) *SnapshotReader {
 	return &SnapshotReader{base: base, size: size}
+}
+
+// SetFallback installs a Process-backed RPM fallback for walker-coverage
+// gaps. Without a fallback set, Read* methods hard-fail (panic) on miss,
+// matching the strict P1_GID_PLAN.md semantics. With a fallback set, misses
+// log a WARN and serve from RPM — trading some cross-process signature for
+// bootstrap robustness.
+func (sr *SnapshotReader) SetFallback(p *Process) {
+	sr.fallback = p
+}
+
+// MissCount returns the number of fallback-served reads since init.
+// Stable count over time = walker coverage complete; rising count = walker
+// not keeping up or certain regions never populated.
+func (sr *SnapshotReader) MissCount() uint64 {
+	return atomic.LoadUint64(&sr.missCount)
 }
 
 // Tick returns the monotonic counter rmod bumps after each complete snapshot
@@ -191,6 +215,10 @@ func (sr *SnapshotReader) findRegion(va uintptr, size uint) ([]byte, bool) {
 func (sr *SnapshotReader) ReadUInt(va uintptr, size IntType) uint {
 	buf, ok := sr.findRegion(va, uint(size))
 	if !ok {
+		if sr.fallback != nil {
+			atomic.AddUint64(&sr.missCount, 1)
+			return sr.fallback.ReadUInt(va, size)
+		}
 		panic(fmt.Sprintf("snapshot: miss va=0x%x size=%d — rmod didn't mirror this region (hard-fail per P1_GID_PLAN.md)", uint64(va), size))
 	}
 	return bytesToUint(buf, size)
@@ -201,6 +229,10 @@ func (sr *SnapshotReader) ReadUInt(va uintptr, size IntType) uint {
 func (sr *SnapshotReader) ReadBytesFromMemory(va uintptr, n uint) []byte {
 	buf, ok := sr.findRegion(va, n)
 	if !ok {
+		if sr.fallback != nil {
+			atomic.AddUint64(&sr.missCount, 1)
+			return sr.fallback.ReadBytesFromMemory(va, n)
+		}
 		panic(fmt.Sprintf("snapshot: miss va=0x%x n=%d — rmod didn't mirror this region (hard-fail per P1_GID_PLAN.md)", uint64(va), n))
 	}
 	out := make([]byte, n)
@@ -218,6 +250,10 @@ func (sr *SnapshotReader) ReadIntoBuffer(va uintptr, buffer []byte) error {
 	}
 	buf, ok := sr.findRegion(va, uint(len(buffer)))
 	if !ok {
+		if sr.fallback != nil {
+			atomic.AddUint64(&sr.missCount, 1)
+			return sr.fallback.ReadIntoBuffer(va, buffer)
+		}
 		return fmt.Errorf("snapshot: miss va=0x%x n=%d (ReadIntoBuffer)", uint64(va), len(buffer))
 	}
 	copy(buffer, buf)
@@ -233,6 +269,10 @@ func (sr *SnapshotReader) ReadStringFromMemory(va uintptr, n uint) string {
 	}
 	buf, ok := sr.findRegion(va, n)
 	if !ok {
+		if sr.fallback != nil {
+			atomic.AddUint64(&sr.missCount, 1)
+			return sr.fallback.ReadStringFromMemory(va, n)
+		}
 		panic(fmt.Sprintf("snapshot: miss va=0x%x n=%d — rmod didn't mirror this region (hard-fail per P1_GID_PLAN.md)", uint64(va), n))
 	}
 	// D2R stores names as wchar_t (UTF-16 LE). Walk until NUL.

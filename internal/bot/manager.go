@@ -478,6 +478,11 @@ func (mng *SupervisorManager) buildSupervisor(supervisorName string, logger *slo
 								failSnapshot(fmt.Sprintf("snapshot init failed: %v", snapErr))
 							}
 							sr := memory.NewSnapshotReader(pres.LocalView(), uintptr(presenter.SharedBufSize))
+							// Soft-fallback to RPM for walker-coverage gaps during
+							// bootstrap. Walker at period=60 needs ~1 second at 60 FPS
+							// to populate statics; without fallback bot panics on
+							// first read before the first scan lands.
+							sr.SetFallback(gr.Process)
 							if tickErr := sr.WaitForFirstTick(3 * time.Second); tickErr != nil {
 								failSnapshot(fmt.Sprintf("snapshot tick never advanced: %v", tickErr))
 							}
