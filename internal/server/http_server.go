@@ -984,6 +984,8 @@ func (s *HttpServer) Listen(port int) error {
 	http.HandleFunc("/debug/click", s.debugClick)
 	http.HandleFunc("/debug/hidclick", s.debugHIDClick)
 	http.HandleFunc("/debug/keypress-inproc", s.debugPressKeyInProcess)
+	http.HandleFunc("/debug/postkey-inproc", s.debugPostKeyInProcess)
+	http.HandleFunc("/debug/postclick-inproc", s.debugPostClickInProcess)
 	http.HandleFunc("/debug/swap-test", s.debugSwapTest)
 	http.HandleFunc("/debug/walkpacket", s.debugWalkPacket)
 	http.HandleFunc("/debug/senduipacket-apc", s.debugSendUIPacketAPC)
@@ -5184,9 +5186,15 @@ func (s *HttpServer) debugSendPacket(w http.ResponseWriter, r *http.Request) {
 		}
 	case "game", "":
 		sendErr = ctx.PacketSender.SendPacket(pkt)
+	case "apc":
+		// Bypass presenter — force main-thread APC path (04-14 proven).
+		sendErr = ctx.GameReader.Process.SendPacketAPC(pkt)
+	case "dual-apc":
+		// 04-14 proven: WPM to mirror + send_fn APC on main thread.
+		sendErr = ctx.GameReader.Process.SendDualPacketAPC(pkt)
 	default:
 		w.WriteHeader(http.StatusBadRequest)
-		fmt.Fprintf(w, `{"error":"invalid path: %s (use game/ui/dual)"}`, pathParam)
+		fmt.Fprintf(w, `{"error":"invalid path: %s (use game/ui/dual/apc/dual-apc)"}`, pathParam)
 		return
 	}
 	elapsed := time.Since(start)
@@ -5734,6 +5742,129 @@ func (s *HttpServer) debugPressKeyInProcess(w http.ResponseWriter, r *http.Reque
 		return
 	}
 	fmt.Fprintf(w, `{"ok":true,"vk":"0x%02X","hwnd":"0x%X"}`, vk, hwnd)
+}
+
+// debugPostKeyInProcess posts WM_KEYDOWN+WM_KEYUP via user32!PostMessageW
+// on D2R's OWN game thread (APC). PostMessage queues into D2R's message
+// pump so the WndProc processes it as a genuine keyboard event — per
+// memory project_weapon_swap_callfn_working this is the ZERO-DETECTION
+// path for weapon swap. Compare /debug/keypress-inproc which uses
+// SendMessageW and appears to be filtered by D2R 3.0.92198.
+//
+//	/debug/postkey-inproc?vk=0x57                — default any supervisor, W key (swap)
+//	/debug/postkey-inproc?character=Blizzard&vk=57
+func (s *HttpServer) debugPostKeyInProcess(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	character := r.URL.Query().Get("character")
+	vkStr := strings.TrimPrefix(strings.ToLower(r.URL.Query().Get("vk")), "0x")
+	if vkStr == "" {
+		vkStr = "57" // VK_W
+	}
+	vk, err := strconv.ParseUint(vkStr, 16, 8)
+	if err != nil {
+		fmt.Fprintf(w, `{"error":"bad vk: %s"}`, err.Error())
+		return
+	}
+	var c *ctx.Context
+	if character != "" {
+		c = s.manager.GetContext(character)
+	} else {
+		for _, name := range s.manager.AvailableSupervisors() {
+			c = s.manager.GetContext(name)
+			if c != nil {
+				break
+			}
+		}
+	}
+	if c == nil {
+		fmt.Fprintf(w, `{"error":"no context"}`)
+		return
+	}
+	if c.MemoryInjector == nil {
+		fmt.Fprintf(w, `{"error":"no memory injector"}`)
+		return
+	}
+	hwnd := uintptr(c.GameReader.HWND)
+	if err := c.MemoryInjector.PostKeyInProcess(hwnd, byte(vk)); err != nil {
+		fmt.Fprintf(w, `{"error":"PostKeyInProcess: %s"}`, err.Error())
+		return
+	}
+	fmt.Fprintf(w, `{"ok":true,"vk":"0x%02X","hwnd":"0x%X","path":"PostMessageW"}`, vk, hwnd)
+}
+
+// debugPostClickInProcess posts WM_MOUSEMOVE + WM_xBUTTONDOWN + WM_xBUTTONUP
+// via user32!PostMessageW on D2R's OWN game thread (APC). Click-path analogue
+// of /debug/postkey-inproc — zero SendInput, zero cross-process driver call,
+// D2R sees the click as a queued event from its own message pump.
+//
+// Input x,y are CLIENT coords (relative to D2R window top-left). The handler
+// translates to SCREEN coords using the GameReader window offset before
+// passing to PostClickInProcess (which expects screen coords to match the
+// existing game/mouse.go pattern and to sync D2R's internal cursor buffer).
+//
+//	/debug/postclick-inproc?character=Blizzard&x=640&y=400&btn=L
+//	/debug/postclick-inproc?x=640&y=400                          (default btn=L, any supervisor)
+//
+// btn: L|l = left (default), R|r = right, M|m = middle.
+func (s *HttpServer) debugPostClickInProcess(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	character := r.URL.Query().Get("character")
+	xStr := r.URL.Query().Get("x")
+	yStr := r.URL.Query().Get("y")
+	btnStr := strings.ToUpper(r.URL.Query().Get("btn"))
+	if btnStr == "" {
+		btnStr = "L"
+	}
+	xVal, xErr := strconv.ParseInt(xStr, 10, 32)
+	if xErr != nil {
+		fmt.Fprintf(w, `{"error":"bad x: %s"}`, xErr.Error())
+		return
+	}
+	yVal, yErr := strconv.ParseInt(yStr, 10, 32)
+	if yErr != nil {
+		fmt.Fprintf(w, `{"error":"bad y: %s"}`, yErr.Error())
+		return
+	}
+	var btn byte
+	switch btnStr {
+	case "L":
+		btn = 0
+	case "R":
+		btn = 1
+	case "M":
+		btn = 2
+	default:
+		fmt.Fprintf(w, `{"error":"bad btn: %s (want L|R|M)"}`, btnStr)
+		return
+	}
+	var c *ctx.Context
+	if character != "" {
+		c = s.manager.GetContext(character)
+	} else {
+		for _, name := range s.manager.AvailableSupervisors() {
+			c = s.manager.GetContext(name)
+			if c != nil {
+				break
+			}
+		}
+	}
+	if c == nil {
+		fmt.Fprintf(w, `{"error":"no context"}`)
+		return
+	}
+	if c.MemoryInjector == nil {
+		fmt.Fprintf(w, `{"error":"no memory injector"}`)
+		return
+	}
+	gr := c.GameReader
+	screenX := int32(gr.WindowLeftX) + int32(xVal)
+	screenY := int32(gr.WindowTopY) + int32(yVal)
+	hwnd := uintptr(gr.HWND)
+	if err := c.MemoryInjector.PostClickInProcess(hwnd, screenX, screenY, btn); err != nil {
+		fmt.Fprintf(w, `{"error":"PostClickInProcess: %s"}`, err.Error())
+		return
+	}
+	fmt.Fprintf(w, `{"ok":true,"client":{"x":%d,"y":%d},"screen":{"x":%d,"y":%d},"btn":"%s","hwnd":"0x%X","path":"PostMessageW"}`, xVal, yVal, screenX, screenY, btnStr, hwnd)
 }
 
 // debugSwapTest executes D2R's internal widget_toggle function (RVA 0x102220)

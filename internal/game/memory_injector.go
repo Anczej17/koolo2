@@ -62,6 +62,7 @@ type MemoryInjector struct {
 	setCursorPosAddr      uintptr
 	setCursorPosOrigBytes [6]byte
 	sendMessageWAddr      uintptr // user32!SendMessageW — called in-process via APC for HID clicks/keys without OS msg queue
+	postMessageWAddr      uintptr // user32!PostMessageW — ASYNC queue into D2R message pump, for stealth weapon-swap keypress per memory project_weapon_swap_callfn_working
 	logger                *slog.Logger
 	cursorOverrideActive  bool
 	lastCursorX           int
@@ -218,6 +219,7 @@ func (i *MemoryInjector) Load() error {
 			i.trackMouseEventAddr, _ = syscall.GetProcAddress(module.ModuleHandle, "TrackMouseEvent")
 			i.setCursorPosAddr, _ = syscall.GetProcAddress(module.ModuleHandle, "SetCursorPos")
 			i.sendMessageWAddr, _ = syscall.GetProcAddress(module.ModuleHandle, "SendMessageW")
+			i.postMessageWAddr, _ = syscall.GetProcAddress(module.ModuleHandle, "PostMessageW")
 
 			err = windows.ReadProcessMemory(i.handle, i.getCursorPosAddr, &i.getCursorPosOrigBytes[0], uintptr(len(i.getCursorPosOrigBytes)), nil)
 			if err != nil {
@@ -461,6 +463,124 @@ func (i *MemoryInjector) SendMessageInProcess(hwnd uintptr, msg uint32, wParam, 
 // Used for state-dependent packets that CANNOT be emitted externally
 // (0x50 swap, 0x5C Cain identify, etc.) — see memory
 // project_weapon_swap_solved 2026-04-12 HID-SOLUTION block.
+// PostKeyInProcess posts WM_KEYDOWN + WM_KEYUP to D2R's window via
+// PostMessageW executed on D2R's OWN game thread (APC). PostMessage queues
+// into D2R's own message pump — indistinguishable from a user-keyboard event
+// pulled from the queue. This is the path memory project_weapon_swap_callfn_working
+// proved works for weapon swap with ZERO detection. Compare PressKeyInProcess
+// which uses SendMessageW — D2R 3.0.92198 appears to filter SendMessage out
+// before the keybind lookup runs.
+func (i *MemoryInjector) PostKeyInProcess(hwnd uintptr, vk byte) error {
+	if i == nil || !i.isLoaded {
+		return fmt.Errorf("memory injector not loaded")
+	}
+	if i.postMessageWAddr == 0 {
+		return fmt.Errorf("PostMessageW not resolved")
+	}
+	if i.presenter == nil || !i.presenter.IsReady() {
+		return fmt.Errorf("presenter not ready for in-process key post")
+	}
+	const (
+		wmKeyDown uint32 = 0x0100
+		wmKeyUp   uint32 = 0x0101
+	)
+	lparamDown := uintptr(1)
+	if _, err := i.presenter.CallFnGameThread(i.postMessageWAddr, hwnd, uintptr(wmKeyDown), uintptr(vk), lparamDown); err != nil {
+		return fmt.Errorf("PostMessageW WM_KEYDOWN vk=0x%02X: %w", vk, err)
+	}
+	time.Sleep(30 * time.Millisecond)
+	lparamUp := uintptr(1) | (1 << 30) | (1 << 31)
+	if _, err := i.presenter.CallFnGameThread(i.postMessageWAddr, hwnd, uintptr(wmKeyUp), uintptr(vk), lparamUp); err != nil {
+		return fmt.Errorf("PostMessageW WM_KEYUP vk=0x%02X: %w", vk, err)
+	}
+	return nil
+}
+
+// PostClickInProcess is the click-path analogue of PostKeyInProcess.
+// Posts WM_MOUSEMOVE + WM_xBUTTONDOWN + WM_xBUTTONUP to D2R's window via
+// PostMessageW executed on D2R's OWN game thread (APC). D2R's WndProc pulls
+// the messages off its own queue and processes them as if a user mouse event
+// fired — no SendInput, no cross-process input driver call, no injected thread.
+//
+// Coordinates are SCREEN coords (matching the existing game/mouse.go pattern
+// — after gr.WindowLeftX/TopY offset applied). The call syncs D2R's internal
+// cursor buffer via presenter.SetCursor first so the click handler reads the
+// right position (D2R uses its own cursor state rather than WM lParam during
+// click processing — 2026-04-21 smoke showed subsequent clicks at different
+// coords didn't move the character unless the cursor was also updated).
+//
+// btn: 0 = left, 1 = right, 2 = middle.
+func (i *MemoryInjector) PostClickInProcess(hwnd uintptr, x, y int32, btn byte) error {
+	if i == nil || !i.isLoaded {
+		return fmt.Errorf("memory injector not loaded")
+	}
+	if i.postMessageWAddr == 0 {
+		return fmt.Errorf("PostMessageW not resolved")
+	}
+	if i.presenter == nil || !i.presenter.IsReady() {
+		return fmt.Errorf("presenter not ready for in-process click")
+	}
+	const (
+		wmNcHitTest   uint32  = 0x0084
+		wmSetCursor   uint32  = 0x0020
+		wmMouseMove   uint32  = 0x0200
+		wmLButtonDown uint32  = 0x0201
+		wmLButtonUp   uint32  = 0x0202
+		wmRButtonDown uint32  = 0x0204
+		wmRButtonUp   uint32  = 0x0205
+		wmMButtonDown uint32  = 0x0207
+		wmMButtonUp   uint32  = 0x0208
+		mkLButton     uintptr = 0x0001
+		mkRButton     uintptr = 0x0002
+		mkMButton     uintptr = 0x0010
+	)
+	var wmDown, wmUp uint32
+	var mkFlag uintptr
+	switch btn {
+	case 0:
+		wmDown, wmUp, mkFlag = wmLButtonDown, wmLButtonUp, mkLButton
+	case 1:
+		wmDown, wmUp, mkFlag = wmRButtonDown, wmRButtonUp, mkRButton
+	case 2:
+		wmDown, wmUp, mkFlag = wmMButtonDown, wmMButtonUp, mkMButton
+	default:
+		return fmt.Errorf("invalid click button %d (0=L,1=R,2=M)", btn)
+	}
+	// Sync D2R's internal cursor buffer via presenter (zero cross-process writes).
+	i.presenter.SetCursor(x, y)
+	i.mu.Lock()
+	i.lastCursorX = int(x)
+	i.lastCursorY = int(y)
+	i.cursorOverrideActive = true
+	i.mu.Unlock()
+	// MAKELPARAM(x, y): low u16 = x, high u16 = y. Matches calculateLparam in mouse.go.
+	lparam := uintptr(uint32(uint16(y))<<16 | uint32(uint16(x)))
+	// WM_NCHITTEST + WM_SETCURSOR mirror the sequence in game/mouse.go MovePointer.
+	// D2R's WndProc updates its internal cursor buffer (0x7ff7...ec3bb8) during
+	// WM_SETCURSOR handling — without this, click lands at the previous cursor
+	// position regardless of MOUSEMOVE/BUTTONDOWN lParam. Live-confirmed 2026-04-21.
+	if _, err := i.presenter.CallFnGameThread(i.postMessageWAddr, hwnd, uintptr(wmNcHitTest), 0, lparam); err != nil {
+		return fmt.Errorf("PostMessageW WM_NCHITTEST: %w", err)
+	}
+	if _, err := i.presenter.CallFnGameThread(i.postMessageWAddr, hwnd, uintptr(wmSetCursor), hwnd, 0x2010001); err != nil {
+		return fmt.Errorf("PostMessageW WM_SETCURSOR: %w", err)
+	}
+	// WM_MOUSEMOVE with wParam=0 — feeds WndProc hover tracking.
+	if _, err := i.presenter.CallFnGameThread(i.postMessageWAddr, hwnd, uintptr(wmMouseMove), 0, lparam); err != nil {
+		return fmt.Errorf("PostMessageW WM_MOUSEMOVE: %w", err)
+	}
+	// WM_xBUTTONDOWN — wParam carries the MK flag indicating the button is held.
+	if _, err := i.presenter.CallFnGameThread(i.postMessageWAddr, hwnd, uintptr(wmDown), mkFlag, lparam); err != nil {
+		return fmt.Errorf("PostMessageW WM_xBUTTONDOWN btn=%d: %w", btn, err)
+	}
+	time.Sleep(30 * time.Millisecond)
+	// WM_xBUTTONUP — wParam=0 (button released, no MK flag).
+	if _, err := i.presenter.CallFnGameThread(i.postMessageWAddr, hwnd, uintptr(wmUp), 0, lparam); err != nil {
+		return fmt.Errorf("PostMessageW WM_xBUTTONUP btn=%d: %w", btn, err)
+	}
+	return nil
+}
+
 func (i *MemoryInjector) PressKeyInProcess(hwnd uintptr, vk byte) error {
 	if i == nil || !i.isLoaded {
 		return fmt.Errorf("memory injector not loaded")
