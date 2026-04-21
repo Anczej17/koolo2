@@ -36,26 +36,62 @@ const pointerReleaseDelay = 150 * time.Millisecond
 
 // MovePointer moves the mouse to the requested position, x and y should be the final position based on
 // pixels shown in the screen. Top-left corner is 0,0
+//
+// When presenter is installed (rmod.dll injected via Claude mode or MODE2),
+// the NCHITTEST + SETCURSOR + MOUSEMOVE sequence is posted via PostMessageW
+// on D2R's OWN game thread — zero cross-process input surface. Falls back
+// to cross-process win.SendMessage / win.PostMessage when presenter not
+// available (pre-attach / MODE2 not enabled).
 func (hid *HID) MovePointer(x, y int) {
 	hid.gr.updateWindowPositionData()
 	x = hid.gr.WindowLeftX + x
 	y = hid.gr.WindowTopY + y
 
 	hid.gi.CursorPos(x, y)
+
+	if hid.gi.HasInProcessMsgPath() {
+		if err := hid.gi.PostMouseMoveInProcess(uintptr(hid.gr.HWND), int32(x), int32(y)); err == nil {
+			return
+		}
+		// Fallthrough to cross-process on error.
+	}
+
 	lParam := calculateLparam(x, y)
 	win.SendMessage(hid.gr.HWND, win.WM_NCHITTEST, 0, lParam)
 	win.SendMessage(hid.gr.HWND, win.WM_SETCURSOR, 0x000105A8, 0x2010001)
 	win.PostMessage(hid.gr.HWND, win.WM_MOUSEMOVE, 0, lParam)
 }
 
-// Click just does a single mouse click at current pointer position.
-// In-process SendMessageW via APC was tested 2026-04-20 11:14 and CRASHED
-// D2R with 0xC0000005 ~10s after character entered game — likely Arxan's
-// caller-context check on APC-originated SendMessage returns. Reverted to
-// cross-process win.SendMessage until a safer in-process path is designed
-// (e.g. inline hook + retaddr forge in D2R .text).
+// Click does a single mouse click at (x, y).
+//
+// When presenter is installed, uses PostClickInProcess — zero cross-process
+// surface, PostMessageW via APC on D2R's own game thread. The full NCHITTEST
+// + SETCURSOR + MOUSEMOVE + BUTTONDOWN + BUTTONUP sequence matches the
+// historical cross-process path.
+//
+// Previous attempt at in-process SendMessageW via APC (2026-04-20) crashed
+// D2R — Arxan's caller-context check on APC-originated SendMessage returns.
+// PostMessageW is safe because the message is queued, not synchronously
+// invoked.
+//
+// Falls back to cross-process win.SendMessage when presenter not available.
 func (hid *HID) Click(btn MouseButton, x, y int) {
 	livetrace.Get().Click(traceClickLabel(btn), x, y, "")
+
+	if hid.gi.HasInProcessMsgPath() {
+		hid.gr.updateWindowPositionData()
+		screenX := int32(hid.gr.WindowLeftX + x)
+		screenY := int32(hid.gr.WindowTopY + y)
+		var btnByte byte
+		if btn == RightButton {
+			btnByte = 1
+		}
+		if err := hid.gi.PostClickInProcess(uintptr(hid.gr.HWND), screenX, screenY, btnByte); err == nil {
+			return
+		}
+		// Fallthrough to cross-process on error.
+	}
+
 	hid.MovePointer(x, y)
 	lParam := calculateLparam(x, y)
 	buttonDown := uint32(win.WM_LBUTTONDOWN)
