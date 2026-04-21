@@ -663,6 +663,45 @@ func (p *Process) SendPacket(packet []byte) (err error) {
 	return p.SendPacketWithTimeout(packet, 100*time.Millisecond)
 }
 
+// SendPacketAPC forces the main-thread APC path, bypassing any externalSend
+// override (presenter / rmod render-thread path). Memory project_weapon_swap_solved
+// 04-14 proved 5 consecutive 0x50 swaps work via this exact path; the presenter
+// regressed to render-thread call and server stopped accepting the swap.
+// Swaps externalSend temporarily — debug-only, not concurrency safe vs other
+// SendPacket callers.
+func (p *Process) SendPacketAPC(packet []byte) error {
+	saved := p.externalSend
+	p.externalSend = nil
+	err := p.SendPacketWithTimeout(packet, 100*time.Millisecond)
+	p.externalSend = saved
+	return err
+}
+
+// SendDualPacketAPC replicates the 04-14 proven dual-send path:
+//  1. WriteProcessMemory to D2R mirror buffer
+//  2. send_fn APC on main thread (NOT render thread like the presenter path)
+// Used for 0x50 and other opcodes that need main-thread local dispatch plus
+// a populated mirror buffer. Bypasses any presenter override.
+func (p *Process) SendDualPacketAPC(packet []byte) error {
+	if p == nil {
+		return errors.New("process is nil")
+	}
+	if p.moduleBaseAddressPtr == 0 || p.handler == 0 {
+		return errors.New("dual APC: process not initialized")
+	}
+	mirrorAddr, merr := p.ResolveMirrorBufAddr()
+	if merr != nil {
+		// Fallback to pre-3.0 hardcoded RVA if dynamic resolve fails
+		// (dual_send_wrap body obfuscated). Sniffer evidence shows
+		// 0x1F51330 still receives writes on D2R 3.0.92198.
+		mirrorAddr = p.moduleBaseAddressPtr + 0x1F51330
+	}
+	if err := windows.WriteProcessMemory(p.handler, mirrorAddr, &packet[0], uintptr(len(packet)), nil); err != nil {
+		return fmt.Errorf("dual APC: mirror write to 0x%X: %w", mirrorAddr, err)
+	}
+	return p.SendPacketAPC(packet)
+}
+
 // SendPacketViaDualWrap sends a packet through D2R's dual_send_wrap function
 // via APC on the main thread. This is required for opcodes that crash through
 // send_fn (0x50 swap, 0x32/0x33 sell/buy, etc.). The APC shellcode is identical

@@ -853,7 +853,7 @@ func (p *Process) SendDualPacket(packet []byte) error {
 	if p.moduleBaseAddressPtr == 0 || p.handler == 0 {
 		return errors.New("dual send: process not initialized")
 	}
-	mirrorAddr, err := p.resolveMirrorBufAddr()
+	mirrorAddr, err := p.ResolveMirrorBufAddr()
 	if err != nil {
 		return fmt.Errorf("dual send: mirror buf resolve failed: %w", err)
 	}
@@ -863,7 +863,7 @@ func (p *Process) SendDualPacket(packet []byte) error {
 	return p.SendPacket(packet)
 }
 
-// resolveMirrorBufAddr finds the dual-buffer mirror global by reading the
+// ResolveMirrorBufAddr finds the dual-buffer mirror global by reading the
 // first ~512 bytes of dual_send_wrap and locating the `LEA RCX, [rip+disp32]`
 // instruction — D2R uses `lea rcx, [mirror_buf]` early in the wrapper before
 // the memcpy. Result is cached in mirrorBufAddrCache for subsequent calls.
@@ -871,7 +871,7 @@ func (p *Process) SendDualPacket(packet []byte) error {
 // Returns an error if the LEA pattern is not found in the scan window, which
 // usually means dualSendWrapRVA itself is stale and the function entry no
 // longer points at dual_send_wrap.
-func (p *Process) resolveMirrorBufAddr() (uintptr, error) {
+func (p *Process) ResolveMirrorBufAddr() (uintptr, error) {
 	p.sendPacketMu.Lock()
 	cached := p.mirrorBufAddrCache
 	p.sendPacketMu.Unlock()
