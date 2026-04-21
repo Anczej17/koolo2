@@ -26,11 +26,16 @@ var (
 
 func initStealthFlags() {
 	stealthOnce.Do(func() {
-		// Stealth RPM is ON by default — user running Icarius normally gets
-		// shuffled dispatches, chunked cache, jitter, access-flag rotation,
-		// and chaff reads. Opt-out with STEALTH_READ=0 for upstream-parity
-		// behaviour (only useful when diffing against koolo for debugging).
-		stealthFlag.Store(os.Getenv("STEALTH_READ") != "0")
+		// Stealth RPM defaults OFF — historically the stealth layer's chaff
+		// reader + chunk-cache NtQueryVirtualMemory races D2R's early-attach
+		// page layout and trips Arxan SEH → app.exe SIGSEGV before game entry.
+		// Live-reproduced 2026-04-21 17:07: direct .exe click (no env) =
+		// segfault at MemoryInjector.Load; adding STEALTH_READ=0 (or this new
+		// default) = clean boot to char-select and beyond.
+		//
+		// Opt-in via STEALTH_READ=1 once the chaff-vs-init race is fixed
+		// (see project_stealth_rpm_layer_2026_04_15 + feedback-loop work).
+		stealthFlag.Store(os.Getenv("STEALTH_READ") == "1")
 		stealthTrace.Store(os.Getenv("STEALTH_TRACE") == "1")
 	})
 }
