@@ -21,8 +21,8 @@ const (
 type Presenter struct {
 	mu              sync.Mutex
 	pid             uint32
-	hSection        windows.Handle  // named file mapping handle
-	localView       unsafe.Pointer  // our mapped view of the shared buffer
+	hSection        windows.Handle // named file mapping handle
+	localView       unsafe.Pointer // our mapped view of the shared buffer
 	initialized     bool
 	modulePath      string
 	skipPresentHook bool // if true, rmod init skips Present detour (GTC64-only dispatch)
@@ -65,23 +65,22 @@ func (p *Presenter) Init(fnDispatch, uiNetManAddr, fnRealClick, hwnd, mirrorBufA
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
+	traceActive := traceEnabled || os.Getenv("PRESENTER_ATTACH_TRACE") == "1" || os.Getenv("LM_TRACE") == "1"
 	traceStart := time.Now()
 	trace := func(format string, args ...interface{}) {
-		if !traceEnabled {
+		if !traceActive {
 			return
 		}
-		if traceEnabled {
-			fmt.Fprintf(os.Stderr, "[PRES] t+%dms pid=%d "+format+"\n",
-				append([]interface{}{time.Since(traceStart).Milliseconds(), p.pid}, args...)...)
-		}
+		fmt.Fprintf(os.Stderr, "[PRES] t+%dms pid=%d "+format+"\n",
+			append([]interface{}{time.Since(traceStart).Milliseconds(), p.pid}, args...)...)
 	}
-	if traceEnabled {
+	if traceActive {
 		trace("Init begin fnDispatch=%#x uiNetMan=%#x realClick=%#x hwnd=%#x mirror=%#x module=%s",
 			fnDispatch, uiNetManAddr, fnRealClick, hwnd, mirrorBufAddr, p.modulePath)
 	}
 
 	if p.initialized {
-		if traceEnabled {
+		if traceActive {
 			trace("Init already initialized — skip")
 		}
 		return nil
@@ -92,18 +91,18 @@ func (p *Presenter) Init(fnDispatch, uiNetManAddr, fnRealClick, hwnd, mirrorBufA
 	// is still held by D2R and CreateFileMapping would either fail or return a
 	// handle to a buffer with stale state. Open-first lets us reuse the live
 	// runtime without re-injecting the DLL.
-	if traceEnabled {
+	if traceActive {
 		trace("Init 1a: probing existing named mapping for pid=%d", p.pid)
 	}
 	if hSection, localView, err := openSharedMemory(p.pid); err == nil {
 		magic := readU32(localView, uintptr(offMagic))
 		ready := readU32(localView, uintptr(offReadyFlag))
 		debugStep := readU32(localView, uintptr(offDebugStep))
-		if traceEnabled {
+		if traceActive {
 			trace("Init 1a: existing mapping found magic=%#x ready=%d debugStep=%#x", magic, ready, debugStep)
 		}
 		if magic == SharedMagic && ready == 1 {
-			if traceEnabled {
+			if traceActive {
 				trace("Init 1a: live rmod detected — reusing")
 			}
 			writeU64(localView, uintptr(offFnSendPacket), uint64(fnDispatch))
@@ -115,41 +114,41 @@ func (p *Presenter) Init(fnDispatch, uiNetManAddr, fnRealClick, hwnd, mirrorBufA
 			p.hSection = hSection
 			p.localView = localView
 			p.initialized = true
-			if traceEnabled {
+			if traceActive {
 				trace("Init DONE via reuse path")
 			}
 			return nil
 		}
-		if traceEnabled {
+		if traceActive {
 			trace("Init 1a: existing mapping unusable, releasing")
 		}
 		_ = closeSharedMemory(hSection, localView)
 	} else {
-		if traceEnabled {
+		if traceActive {
 			trace("Init 1a: no existing mapping (%v) — fresh create", err)
 		}
 	}
 
 	// 1b. Fresh create — first init, or rmod.dll died with the prior session.
-	if traceEnabled {
+	if traceActive {
 		trace("Init 1b: createSharedMemory")
 	}
 	hSection, localView, err := createSharedMemory(p.pid)
 	if err != nil {
-		if traceEnabled {
+		if traceActive {
 			trace("Init 1b FAIL: %v", err)
 		}
 		return fmt.Errorf("create shared memory: %w", err)
 	}
-	if traceEnabled {
+	if traceActive {
 		trace("Init 1b OK: localView=%p hSection=%#x", localView, uintptr(hSection))
 	}
 
 	// 2. Write header into the mapped view.
-	gameThreadID := findFirstThread(p.pid)
-	if traceEnabled {
-		trace("Init 2: findFirstThread=%d", gameThreadID)
-	}
+	// Do not guess the game thread from the first Toolhelp thread entry.
+	// A wrong non-zero TID is worse than "unknown" because later APC/game-thread
+	// dispatch paths may trust it instead of falling back to runtime discovery.
+	var gameThreadID uint32
 	writeU64(localView, uintptr(offFnSendPacket), uint64(fnDispatch))
 	writeU64(localView, uintptr(offUINetManAddr), uint64(uiNetManAddr))
 	writeU64(localView, uintptr(offFnRealClick), uint64(fnRealClick))
@@ -160,7 +159,7 @@ func (p *Presenter) Init(fnDispatch, uiNetManAddr, fnRealClick, hwnd, mirrorBufA
 	if p.skipPresentHook {
 		writeU32(localView, uintptr(offSkipPresentHook), 1)
 	}
-	if traceEnabled {
+	if traceActive {
 		trace("Init 2: header written to local view (magic=%#x version=%d)",
 			readU32(localView, uintptr(offMagic)), readU32(localView, uintptr(offVersion)))
 	}
@@ -172,38 +171,43 @@ func (p *Presenter) Init(fnDispatch, uiNetManAddr, fnRealClick, hwnd, mirrorBufA
 		windows.PROCESS_VM_WRITE |
 		windows.PROCESS_QUERY_INFORMATION
 
-	if traceEnabled {
+	if traceActive {
 		trace("Init 3: OpenProcess pid=%d access=%#x", p.pid, injectAccess)
 	}
 	hProc, err := ntapi.OpenProcess(injectAccess, p.pid)
 	if err != nil {
-		if traceEnabled {
+		if traceActive {
 			trace("Init 3 FAIL: %v", err)
 		}
 		_ = closeSharedMemory(hSection, localView)
 		return fmt.Errorf("open process: %w", err)
 	}
-	if traceEnabled {
+	if traceActive {
 		trace("Init 3 OK: hProc=%#x", uintptr(hProc))
 	}
+	defer ntapi.CloseHandle(hProc)
 
 	// DLL still needs a remoteBuf param for the APC call — allocate a small
 	// fallback page. The DLL will prefer the named mapping over this pointer.
 	// Write valid header so legacy path also works if named mapping fails.
-	if traceEnabled {
+	if traceActive {
 		trace("Init 4: VirtualAllocEx fallback buf size=%d", SharedBufSize)
 	}
 	fallbackBuf, err := virtualAllocEx(hProc, 0, SharedBufSize,
 		windows.MEM_COMMIT|windows.MEM_RESERVE, windows.PAGE_READWRITE)
 	if err != nil {
-		if traceEnabled {
+		if traceActive {
 			trace("Init 4 FAIL: %v", err)
 		}
-		ntapi.CloseHandle(hProc)
 		_ = closeSharedMemory(hSection, localView)
 		return fmt.Errorf("alloc fallback buf: %w", err)
 	}
-	if traceEnabled {
+	defer func() {
+		if fallbackBuf != 0 {
+			_ = virtualFreeEx(hProc, fallbackBuf, 0, windows.MEM_RELEASE)
+		}
+	}()
+	if traceActive {
 		trace("Init 4 OK: fallbackBuf=%#x", fallbackBuf)
 	}
 
@@ -236,40 +240,34 @@ func (p *Presenter) Init(fnDispatch, uiNetManAddr, fnRealClick, hwnd, mirrorBufA
 		copy(fallbackHdr[offSessionPrefix:offSessionPrefix+copyLen], nameBytes[:copyLen])
 	}
 	if werr := windows.WriteProcessMemory(hProc, fallbackBuf, &fallbackHdr[0], uintptr(len(fallbackHdr)), nil); werr != nil {
-		if traceEnabled {
+		if traceActive {
 			trace("Init 4b WPM fallback header: %v", werr)
 		}
 	} else {
-		if traceEnabled {
+		if traceActive {
 			trace("Init 4b: fallback header written (%d bytes) → %#x", len(fallbackHdr), fallbackBuf)
 		}
 	}
 
 	// 4. Manual-map DLL + execute Init via APC.
-	if traceEnabled {
+	if traceActive {
 		trace("Init 5: loadModule start")
 	}
-	if lerr := loadModule(p.pid, p.modulePath, fallbackBuf); lerr != nil {
-		if traceEnabled {
+	remoteModuleBase, lerr := loadModule(p.pid, p.modulePath, fallbackBuf)
+	if lerr != nil {
+		if traceActive {
 			trace("Init 5 FAIL: %v", lerr)
 		}
-		ntapi.CloseHandle(hProc)
 		_ = closeSharedMemory(hSection, localView)
 		return fmt.Errorf("load module: %w", lerr)
 	}
-	if traceEnabled {
+	if traceActive {
 		trace("Init 5 OK: loadModule returned")
-	}
-
-	// 5. Close process handle immediately — no longer needed.
-	ntapi.CloseHandle(hProc)
-	if traceEnabled {
-		trace("Init 5b: hProc closed")
 	}
 
 	// 6. Poll the local mapped view for ready_flag. Log debugStep transitions
 	// so we see EXACTLY where the DLL is stuck if it doesn't reach ready.
-	if traceEnabled {
+	if traceActive {
 		trace("Init 6: polling localView for ready (timeout=%s)", initReadyTimeout)
 	}
 	deadline := time.Now().Add(initReadyTimeout)
@@ -280,17 +278,19 @@ func (p *Presenter) Init(fnDispatch, uiNetManAddr, fnRealClick, hwnd, mirrorBufA
 		step := readU32(localView, uintptr(offDebugStep))
 		ec := readU32(localView, uintptr(offErrorCode))
 		if step != lastStep || ec != lastErr {
-			if traceEnabled {
+			if traceActive {
 				trace("Init 6: debugStep=%#x errorCode=%#x ready=%d", step, ec, ready)
 			}
 			lastStep = step
 			lastErr = ec
 		}
 		if ready == 1 {
+			_ = virtualFreeEx(hProc, fallbackBuf, 0, windows.MEM_RELEASE)
+			fallbackBuf = 0
 			p.hSection = hSection
 			p.localView = localView
 			p.initialized = true
-			if traceEnabled {
+			if traceActive {
 				trace("Init DONE ready=1 at step=%#x (elapsed=%dms)",
 					step, time.Since(traceStart).Milliseconds())
 			}
@@ -302,7 +302,7 @@ func (p *Presenter) Init(fnDispatch, uiNetManAddr, fnRealClick, hwnd, mirrorBufA
 	// Timed out.
 	debugStep := readU32(localView, uintptr(offDebugStep))
 	errCode := readU32(localView, uintptr(offErrorCode))
-	if traceEnabled {
+	if traceActive {
 		trace("Init TIMEOUT: debugStep=%#x errorCode=%#x (localView not updated by DLL)",
 			debugStep, errCode)
 	}
@@ -311,8 +311,14 @@ func (p *Presenter) Init(fnDispatch, uiNetManAddr, fnRealClick, hwnd, mirrorBufA
 	for i := range headerDump {
 		headerDump[i] = readU8(localView, uintptr(i))
 	}
-	if traceEnabled {
+	if traceActive {
 		trace("Init TIMEOUT header dump: %x", headerDump)
+	}
+	// Safe rollback boundary: before install_detour starts, rmod has not yet
+	// patched Present, so the manual-mapped image can be released without
+	// leaving a live hook behind.
+	if debugStep < 0x09 && remoteModuleBase != 0 {
+		_ = virtualFreeEx(hProc, remoteModuleBase, 0, windows.MEM_RELEASE)
 	}
 	_ = closeSharedMemory(hSection, localView)
 	if errCode != 0 {
@@ -386,7 +392,7 @@ func (p *Presenter) WriteSnapshotStatics(entries []SnapshotStatic) error {
 // SnapshotInit dispatches CmdSnapshotInit on the rmod side, writing the
 // caller-supplied D2R offset VAs (UnitTable, Expansion, WaypointTable) into
 // SHM first so rmod picks them up when handling the command. Blocks up to
-// ~2 s waiting for STATUS_DONE. See PLAYER_UNIT_FIELDS.md for the offset
+// ~2 s waiting for STATUS_DONE. See docs/archive/PLAYER_UNIT_FIELDS.md for the offset
 // contract.
 //
 // This is a plumbing call only — it does not wait for the first snapshot
@@ -925,6 +931,10 @@ func (p *Presenter) UninstallDetour() error {
 	if !p.initialized || p.localView == nil {
 		return fmt.Errorf("presenter not initialized")
 	}
+	// The SHM command channel is no longer safe to reuse once teardown starts.
+	// Always invalidate the local presenter state before returning so callers
+	// cannot keep routing work through a stale mapping after uninstall/timeout.
+	defer p.closeLocked()
 
 	writeU32(p.localView, uintptr(offCommandType), CmdUninstallDetour)
 	writeU32(p.localView, uintptr(offStatusFlag), StatusBusy)
@@ -997,7 +1007,7 @@ func (p *Presenter) SendPacket(packet []byte) error {
 					fmt.Fprintf(os.Stderr, "[PKT] SendPacket CRASH opcode=0x%02X exc=0x%04X hex=%s\n",
 						op, excCode, hexHead)
 				}
-				return fmt.Errorf("send_fn CRASHED on opcode 0x%02X, exception 0x%04X (caught by VEH, D2R alive)", op, excCode)
+				return fmt.Errorf("native send path crashed on opcode 0x%02X, exception 0x%04X (caught by VEH, D2R alive)", op, excCode)
 			}
 			if traceEnabled {
 				fmt.Fprintf(os.Stderr, "[PKT] SendPacket ERROR opcode=0x%02X code=0x%X\n", opcode, ec)
@@ -1516,25 +1526,47 @@ func (p *Presenter) HwbpVerify() error {
 	return p.sendCommand(CmdHwbpVerify)
 }
 
+// ArgTraceInstall installs a short-lived inline argument capture hook at
+// targetVA+offset. Captured entries reuse HwbpDrain; Callstack[0..15] contain
+// raw qwords from the original entry stack instead of an unwind.
+func (p *Presenter) ArgTraceInstall(targetVA uint64, offset uint32) error {
+	p.mu.Lock()
+	if !p.initialized || p.localView == nil {
+		p.mu.Unlock()
+		return fmt.Errorf("presenter not initialized")
+	}
+	clearBytes(p.localView, uintptr(offPacketData), 16)
+	writeU64(p.localView, uintptr(offPacketData), targetVA)
+	writeU32(p.localView, uintptr(offPacketData+8), offset)
+	writeU32(p.localView, uintptr(offPacketSize), 12)
+	p.mu.Unlock()
+	return p.sendCommand(CmdArgTraceInstall)
+}
+
+// ArgTraceUninstall restores the bytes patched by ArgTraceInstall.
+func (p *Presenter) ArgTraceUninstall() error {
+	return p.sendCommand(CmdArgTraceUninstall)
+}
+
 // DrProbeEntry is one D2R thread sampled by the DR0 persist probe.
 type DrProbeEntry struct {
-	TID         uint32 // D2R thread ID
-	StepFailed  uint32 // 0=ok, 1=open, 2=suspend, 3=getctx1, 4=setctx, 5=getctx2
-	LastErr     uint32 // GetLastError of the failing step
-	Dr7Orig     uint32 // low 32b of original DR7 (for context)
-	Dr0Orig     uint64 // DR0 BEFORE we wrote
-	Dr0After    uint64 // DR0 AFTER our SetThreadContext + GetThreadContext readback
-	Persisted   bool   // Dr0After == DrProbeTestDR0 — Arxan did NOT revert
+	TID        uint32 // D2R thread ID
+	StepFailed uint32 // 0=ok, 1=open, 2=suspend, 3=getctx1, 4=setctx, 5=getctx2
+	LastErr    uint32 // GetLastError of the failing step
+	Dr7Orig    uint32 // low 32b of original DR7 (for context)
+	Dr0Orig    uint64 // DR0 BEFORE we wrote
+	Dr0After   uint64 // DR0 AFTER our SetThreadContext + GetThreadContext readback
+	Persisted  bool   // Dr0After == DrProbeTestDR0 — Arxan did NOT revert
 }
 
 // DrProbeResult is the aggregate verdict + per-thread breakdown.
 type DrProbeResult struct {
-	Status   uint32         // 0=not run, 1=running, 2=done, 0xEExx=err
-	Total    uint32         // D2R threads enumerated
-	Ok       uint32         // count of threads where DR0 persisted
-	Revert   uint32         // count where Arxan reverted DR0
-	Err      uint32         // count of probe errors
-	Entries  []DrProbeEntry // per-thread results
+	Status  uint32         // 0=not run, 1=running, 2=done, 0xEExx=err
+	Total   uint32         // D2R threads enumerated
+	Ok      uint32         // count of threads where DR0 persisted
+	Revert  uint32         // count where Arxan reverted DR0
+	Err     uint32         // count of probe errors
+	Entries []DrProbeEntry // per-thread results
 }
 
 // HwbpEntry is one captured invocation of the HWBP target (dual_send_wrap).
@@ -1557,33 +1589,33 @@ type HwbpEntry struct {
 
 // HwbpStatus is the SHM header snapshot.
 type HwbpStatus struct {
-	Installed     uint32
-	Target        uint64
-	Fires         uint32
-	SsTotal       uint32
-	LastRip       uint64
-	InstallOk     uint32
-	InstallFail   uint32
-	VerifyStill   uint32
-	VerifyLost    uint32
-	ReenumNew     uint32
-	ReenumTotal   uint32
-	RingHead      uint32
-	RingTail      uint32
-	RingTotal     uint32
-	RingDropped   uint32
-	VehAny        uint32
-	VehBp         uint32
-	VehAv         uint32
-	VehOther      uint32
-	VehLastCode   uint32
-	WorkerProg    uint32
-	WorkerTid     uint32
-	WorkerSeen    uint32
-	WorkerOk      uint32
-	WorkerFail    uint32
-	Gtc64Count    uint32
-	Gtc64Diag     uint32
+	Installed   uint32
+	Target      uint64
+	Fires       uint32
+	SsTotal     uint32
+	LastRip     uint64
+	InstallOk   uint32
+	InstallFail uint32
+	VerifyStill uint32
+	VerifyLost  uint32
+	ReenumNew   uint32
+	ReenumTotal uint32
+	RingHead    uint32
+	RingTail    uint32
+	RingTotal   uint32
+	RingDropped uint32
+	VehAny      uint32
+	VehBp       uint32
+	VehAv       uint32
+	VehOther    uint32
+	VehLastCode uint32
+	WorkerProg  uint32
+	WorkerTid   uint32
+	WorkerSeen  uint32
+	WorkerOk    uint32
+	WorkerFail  uint32
+	Gtc64Count  uint32
+	Gtc64Diag   uint32
 }
 
 // HwbpReadStatus returns the current SHM header snapshot. Cheap, can be polled.
@@ -1770,6 +1802,178 @@ type SniffDiag struct {
 	HwbpWorkerAlive uint32 // heartbeat (incremented every tick)
 }
 
+// PresentLatency is the raw rdtsc-cycle latency snapshot of the Present
+// detour body (dispatch_commands_inner). Raw cycles — caller converts to µs
+// via the host CPU's TSC frequency (~3 GHz typical on the Windows VM, so
+// 1 µs ≈ 3000 cycles). See tools/rmod/src/lib.rs record_present_latency.
+type PresentLatency struct {
+	LastCyc   uint64 // cycles in most recent dispatch
+	MinCyc    uint64 // running min since Init
+	MaxCyc    uint64 // running max since Init
+	SumCyc    uint64 // running sum
+	Count     uint64 // sample count (avg = SumCyc / Count)
+	PathsLast uint32 // bitmask of paths taken in most recent sample
+}
+
+// RuntimeState is a raw SHM snapshot used for lifecycle diagnostics. These
+// fields come directly from the Go<->rmod protocol and should be interpreted
+// as "what the injected runtime has acknowledged", not as bot-side intent.
+type RuntimeState struct {
+	Initialized      bool   `json:"initialized"`
+	PID              uint32 `json:"pid"`
+	ReadyFlag        uint32 `json:"ready_flag"`
+	Capabilities     uint32 `json:"capabilities"`
+	CommandFlag      uint32 `json:"command_flag"`
+	StatusFlag       uint32 `json:"status_flag"`
+	CommandType      uint32 `json:"command_type"`
+	PacketSize       uint32 `json:"packet_size"`
+	ErrorCode        uint32 `json:"error_code"`
+	DebugStep        uint32 `json:"debug_step"`
+	GameThreadID     uint32 `json:"game_thread_id"`
+	SkipPresentHook  uint32 `json:"skip_present_hook"`
+	OriginalPresent  uint64 `json:"original_present"`
+	RemoteViewAddr   uint64 `json:"remote_view_addr"`
+	FnSendPacket     uint64 `json:"fn_send_packet"`
+	UINetManAddr     uint64 `json:"ui_netman_addr"`
+	FnRealClick      uint64 `json:"fn_real_click"`
+	HwndD2R          uint64 `json:"hwnd_d2r"`
+	MirrorBufAddr    uint64 `json:"mirror_buf_addr"`
+	DualSendWrap     uint64 `json:"dual_path"`
+	Gtc64HookCount   uint32 `json:"gtc64_hook_count"`
+	Gtc64InstallDiag uint32 `json:"gtc64_install_diag"`
+	TimerQueueTicks  uint32 `json:"timer_queue_ticks"`
+	TimerCommandRuns uint32 `json:"timer_command_runs"`
+	TimerCommandDiag uint32 `json:"timer_command_diag"`
+	TimerLastStatus  uint32 `json:"timer_last_status"`
+	TimerLastFlag    uint32 `json:"timer_last_command_flag"`
+	PresentCount     uint64 `json:"present_count"`
+	PresentPathsLast uint32 `json:"present_paths_last"`
+	HwbpWorkerAlive  uint32 `json:"hwbp_worker_alive"`
+	HwbpWorkerProg   uint32 `json:"hwbp_worker_prog"`
+	HwbpWorkerThread uint32 `json:"hwbp_worker_thread"`
+	HwbpWorkerSeen   uint32 `json:"hwbp_worker_seen"`
+	HwbpWorkerOk     uint32 `json:"hwbp_worker_ok"`
+	HwbpWorkerFail   uint32 `json:"hwbp_worker_fail"`
+}
+
+// ReadRuntimeState returns the raw shared-memory command and hook counters.
+func (p *Presenter) ReadRuntimeState() RuntimeState {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	st := RuntimeState{
+		Initialized: p.initialized,
+		PID:         p.pid,
+	}
+	if !p.initialized || p.localView == nil {
+		return st
+	}
+	st.ReadyFlag = readU32(p.localView, uintptr(offReadyFlag))
+	st.Capabilities = readU32(p.localView, uintptr(offCapabilities))
+	st.CommandFlag = readU32(p.localView, uintptr(offCommandFlag))
+	st.StatusFlag = readU32(p.localView, uintptr(offStatusFlag))
+	st.CommandType = readU32(p.localView, uintptr(offCommandType))
+	st.PacketSize = readU32(p.localView, uintptr(offPacketSize))
+	st.ErrorCode = readU32(p.localView, uintptr(offErrorCode))
+	st.DebugStep = readU32(p.localView, uintptr(offDebugStep))
+	st.GameThreadID = readU32(p.localView, uintptr(offGameThreadID))
+	st.SkipPresentHook = readU32(p.localView, uintptr(offSkipPresentHook))
+	st.OriginalPresent = readU64(p.localView, uintptr(offOriginalPresent))
+	st.RemoteViewAddr = readU64(p.localView, uintptr(offRemoteViewAddr))
+	st.FnSendPacket = readU64(p.localView, uintptr(offFnSendPacket))
+	st.UINetManAddr = readU64(p.localView, uintptr(offUINetManAddr))
+	st.FnRealClick = readU64(p.localView, uintptr(offFnRealClick))
+	st.HwndD2R = readU64(p.localView, uintptr(offHwndD2R))
+	st.MirrorBufAddr = readU64(p.localView, uintptr(offMirrorBufAddr))
+	st.DualSendWrap = readU64(p.localView, uintptr(offDualSendWrap))
+	st.Gtc64HookCount = readU32(p.localView, uintptr(OffGtc64HookCount))
+	st.Gtc64InstallDiag = readU32(p.localView, uintptr(OffGtc64InstallDiag))
+	st.TimerQueueTicks = readU32(p.localView, uintptr(OffTimerQueueTicks))
+	st.TimerCommandRuns = readU32(p.localView, uintptr(OffTimerCommandRuns))
+	st.TimerCommandDiag = readU32(p.localView, uintptr(OffTimerCommandDiag))
+	st.TimerLastStatus = readU32(p.localView, uintptr(OffTimerLastStatus))
+	st.TimerLastFlag = readU32(p.localView, uintptr(OffTimerLastCommandFlag))
+	st.PresentCount = readU64(p.localView, uintptr(OffPresentLatCount))
+	st.PresentPathsLast = readU32(p.localView, uintptr(OffPresentLatPaths))
+	st.HwbpWorkerAlive = readU32(p.localView, uintptr(OffHwbpWorkerAlive))
+	st.HwbpWorkerProg = readU32(p.localView, uintptr(OffHwbpWorkerProg))
+	st.HwbpWorkerThread = readU32(p.localView, uintptr(OffHwbpWorkerTid))
+	st.HwbpWorkerSeen = readU32(p.localView, uintptr(OffHwbpWorkerSeen))
+	st.HwbpWorkerOk = readU32(p.localView, uintptr(OffHwbpWorkerOk))
+	st.HwbpWorkerFail = readU32(p.localView, uintptr(OffHwbpWorkerFail))
+	return st
+}
+
+// ForceClearCommand clears a stale command slot in the shared rmod buffer.
+// It is only for debug recovery after a timed-out command has left command_flag
+// set and would block later packet/native commands in the same process.
+func (p *Presenter) ForceClearCommand() RuntimeState {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	st := RuntimeState{
+		Initialized: p.initialized,
+		PID:         p.pid,
+	}
+	if !p.initialized || p.localView == nil {
+		return st
+	}
+	writeU32(p.localView, uintptr(offCommandFlag), 0)
+	writeU32(p.localView, uintptr(offStatusFlag), StatusDone)
+	writeU32(p.localView, uintptr(offCommandType), CmdNop)
+	writeU32(p.localView, uintptr(offPacketSize), 0)
+	st.ReadyFlag = readU32(p.localView, uintptr(offReadyFlag))
+	st.Capabilities = readU32(p.localView, uintptr(offCapabilities))
+	st.CommandFlag = readU32(p.localView, uintptr(offCommandFlag))
+	st.StatusFlag = readU32(p.localView, uintptr(offStatusFlag))
+	st.CommandType = readU32(p.localView, uintptr(offCommandType))
+	st.PacketSize = readU32(p.localView, uintptr(offPacketSize))
+	st.ErrorCode = readU32(p.localView, uintptr(offErrorCode))
+	st.DebugStep = readU32(p.localView, uintptr(offDebugStep))
+	st.GameThreadID = readU32(p.localView, uintptr(offGameThreadID))
+	st.SkipPresentHook = readU32(p.localView, uintptr(offSkipPresentHook))
+	st.OriginalPresent = readU64(p.localView, uintptr(offOriginalPresent))
+	st.RemoteViewAddr = readU64(p.localView, uintptr(offRemoteViewAddr))
+	st.FnSendPacket = readU64(p.localView, uintptr(offFnSendPacket))
+	st.UINetManAddr = readU64(p.localView, uintptr(offUINetManAddr))
+	st.FnRealClick = readU64(p.localView, uintptr(offFnRealClick))
+	st.HwndD2R = readU64(p.localView, uintptr(offHwndD2R))
+	st.MirrorBufAddr = readU64(p.localView, uintptr(offMirrorBufAddr))
+	st.DualSendWrap = readU64(p.localView, uintptr(offDualSendWrap))
+	st.Gtc64HookCount = readU32(p.localView, uintptr(OffGtc64HookCount))
+	st.Gtc64InstallDiag = readU32(p.localView, uintptr(OffGtc64InstallDiag))
+	st.TimerQueueTicks = readU32(p.localView, uintptr(OffTimerQueueTicks))
+	st.TimerCommandRuns = readU32(p.localView, uintptr(OffTimerCommandRuns))
+	st.TimerCommandDiag = readU32(p.localView, uintptr(OffTimerCommandDiag))
+	st.TimerLastStatus = readU32(p.localView, uintptr(OffTimerLastStatus))
+	st.TimerLastFlag = readU32(p.localView, uintptr(OffTimerLastCommandFlag))
+	st.PresentCount = readU64(p.localView, uintptr(OffPresentLatCount))
+	st.PresentPathsLast = readU32(p.localView, uintptr(OffPresentLatPaths))
+	st.HwbpWorkerAlive = readU32(p.localView, uintptr(OffHwbpWorkerAlive))
+	st.HwbpWorkerProg = readU32(p.localView, uintptr(OffHwbpWorkerProg))
+	st.HwbpWorkerThread = readU32(p.localView, uintptr(OffHwbpWorkerTid))
+	st.HwbpWorkerSeen = readU32(p.localView, uintptr(OffHwbpWorkerSeen))
+	st.HwbpWorkerOk = readU32(p.localView, uintptr(OffHwbpWorkerOk))
+	st.HwbpWorkerFail = readU32(p.localView, uintptr(OffHwbpWorkerFail))
+	return st
+}
+
+// ReadPresentLatency pulls the 5 u64 latency counters + paths bitmask from SHM.
+// Zero-valued until rmod has measured at least one Present frame.
+func (p *Presenter) ReadPresentLatency() PresentLatency {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if !p.initialized || p.localView == nil {
+		return PresentLatency{}
+	}
+	return PresentLatency{
+		LastCyc:   readU64(p.localView, uintptr(OffPresentLatLastCyc)),
+		MinCyc:    readU64(p.localView, uintptr(OffPresentLatMinCyc)),
+		MaxCyc:    readU64(p.localView, uintptr(OffPresentLatMaxCyc)),
+		SumCyc:    readU64(p.localView, uintptr(OffPresentLatSumCyc)),
+		Count:     readU64(p.localView, uintptr(OffPresentLatCount)),
+		PathsLast: readU32(p.localView, uintptr(OffPresentLatPaths)),
+	}
+}
+
 // ReadSniffDiag returns just the diagnostic counters (no entries).
 func (p *Presenter) ReadSniffDiag() SniffDiag {
 	p.mu.Lock()
@@ -1822,8 +2026,8 @@ type CrashDiag struct {
 	Regs [16]uint64
 
 	// Raw memory snapshots — see protocol.go OffCrash*Bytes.
-	RIPBytes    []byte   // CrashRIPBytesLen bytes starting at RIP - CrashRIPBytesPre
-	FrameBytes  [][]byte // per-frame raw bytes (CrashFrameBytesLen each), nil if frame skipped
+	RIPBytes   []byte   // CrashRIPBytesLen bytes starting at RIP - CrashRIPBytesPre
+	FrameBytes [][]byte // per-frame raw bytes (CrashFrameBytesLen each), nil if frame skipped
 
 	// Per-code exception counters maintained by the VEH on every fire.
 	CountAV  uint32
@@ -1860,10 +2064,10 @@ func (p *Presenter) ReadCrashDiag() CrashDiag {
 		RIP:       readU64(p.localView, uintptr(OffCrashRIP)),
 		FaultVA:   readU64(p.localView, uintptr(OffCrashFaultVA)),
 		RSP:       readU64(p.localView, uintptr(OffCrashRSP)),
-		CountAV:        readU32(p.localView, 0xA0),
-		CountSO:        readU32(p.localView, 0xA4),
-		CountSBO:       readU32(p.localView, 0xA8),
-		LastCode:       readU32(p.localView, 0xAC),
+		CountAV:   readU32(p.localView, 0xA0),
+		CountSO:   readU32(p.localView, 0xA4),
+		CountSBO:  readU32(p.localView, 0xA8),
+		LastCode:  readU32(p.localView, 0xAC),
 	}
 	d.Frames = make([]uint64, CrashFrameCount)
 	for i := 0; i < CrashFrameCount; i++ {
@@ -1916,7 +2120,7 @@ func (p *Presenter) ReadSniffLog() (entries []SniffEntry, total uint32) {
 	// Iterate from oldest to newest
 	startSlot := int(head) - count
 	for i := 0; i < count; i++ {
-		slot := ((startSlot + i) % SniffNumEntries + SniffNumEntries) % SniffNumEntries
+		slot := ((startSlot+i)%SniffNumEntries + SniffNumEntries) % SniffNumEntries
 		entryOff := uintptr(OffSniffEntries + slot*SniffEntrySize)
 		size := readU32(p.localView, entryOff)
 		copyLen := int(size)
@@ -1955,9 +2159,341 @@ func (p *Presenter) SetKeyState(key byte, active bool) {
 	dst[1] = val
 }
 
+// PostKey asks rmod to post WM_KEYDOWN/WM_KEYUP from inside D2R using the
+// HWND captured during presenter init. This avoids host-side HID/input APIs.
+func (p *Presenter) PostKey(key byte) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	if !p.initialized || p.localView == nil {
+		return fmt.Errorf("presenter not initialized")
+	}
+
+	clearBytes(p.localView, uintptr(offPacketData), 1)
+	writeU8(p.localView, uintptr(offPacketData), key)
+	writeU32(p.localView, uintptr(offCommandType), CmdPostKey)
+	writeU32(p.localView, uintptr(offStatusFlag), StatusBusy)
+	writeU32(p.localView, uintptr(offCommandFlag), 1)
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		status := readU32(p.localView, uintptr(offStatusFlag))
+		if status == StatusDone {
+			return nil
+		}
+		if status == StatusError {
+			return fmt.Errorf("PostKey error 0x%X", readU32(p.localView, uintptr(offErrorCode)))
+		}
+		time.Sleep(100 * time.Microsecond)
+	}
+	return fmt.Errorf("PostKey timeout")
+}
+
+// PostClick asks rmod to post a mouse move + button down/up from inside D2R
+// using the HWND captured during presenter init. Coordinates are client-area
+// pixels relative to the D2R window.
+func (p *Presenter) PostClick(x, y int32, btn byte) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	if !p.initialized || p.localView == nil {
+		return fmt.Errorf("presenter not initialized")
+	}
+
+	clearBytes(p.localView, uintptr(offPacketData), 12)
+	writeU32(p.localView, uintptr(offPacketData+0), uint32(x))
+	writeU32(p.localView, uintptr(offPacketData+4), uint32(y))
+	writeU8(p.localView, uintptr(offPacketData+8), btn)
+	writeU32(p.localView, uintptr(offCommandType), CmdPostClick)
+	writeU32(p.localView, uintptr(offStatusFlag), StatusBusy)
+	writeU32(p.localView, uintptr(offCommandFlag), 1)
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		status := readU32(p.localView, uintptr(offStatusFlag))
+		if status == StatusDone {
+			return nil
+		}
+		if status == StatusError {
+			return fmt.Errorf("PostClick error 0x%X", readU32(p.localView, uintptr(offErrorCode)))
+		}
+		time.Sleep(100 * time.Microsecond)
+	}
+	return fmt.Errorf("PostClick timeout")
+}
+
+// PostMove asks rmod to post only the hover/mouse move sequence from inside
+// D2R. Coordinates are client-area pixels relative to the D2R window.
+func (p *Presenter) PostMove(x, y int32) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	if !p.initialized || p.localView == nil {
+		return fmt.Errorf("presenter not initialized")
+	}
+
+	clearBytes(p.localView, uintptr(offPacketData), 8)
+	writeU32(p.localView, uintptr(offPacketData+0), uint32(x))
+	writeU32(p.localView, uintptr(offPacketData+4), uint32(y))
+	writeU32(p.localView, uintptr(offCommandType), CmdPostMove)
+	writeU32(p.localView, uintptr(offStatusFlag), StatusBusy)
+	writeU32(p.localView, uintptr(offCommandFlag), 1)
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		status := readU32(p.localView, uintptr(offStatusFlag))
+		if status == StatusDone {
+			return nil
+		}
+		if status == StatusError {
+			return fmt.Errorf("PostMove error 0x%X", readU32(p.localView, uintptr(offErrorCode)))
+		}
+		time.Sleep(100 * time.Microsecond)
+	}
+	return fmt.Errorf("PostMove timeout")
+}
+
+// SetD2RCursor asks rmod to call D2R's native set_cursor_screen_xy helper.
+// This updates the game's own MouseXY globals and dirty flag without touching
+// the OS cursor or foreground window.
+func (p *Presenter) SetD2RCursor(x, y int32) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	if !p.initialized || p.localView == nil {
+		return fmt.Errorf("presenter not initialized")
+	}
+
+	clearBytes(p.localView, uintptr(offPacketData), 8)
+	writeU32(p.localView, uintptr(offPacketData+0), uint32(x))
+	writeU32(p.localView, uintptr(offPacketData+4), uint32(y))
+	writeU32(p.localView, uintptr(offCommandType), CmdSetD2RCursor)
+	writeU32(p.localView, uintptr(offStatusFlag), StatusBusy)
+	writeU32(p.localView, uintptr(offCommandFlag), 1)
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		status := readU32(p.localView, uintptr(offStatusFlag))
+		if status == StatusDone {
+			return nil
+		}
+		if status == StatusError {
+			return fmt.Errorf("SetD2RCursor error 0x%X", readU32(p.localView, uintptr(offErrorCode)))
+		}
+		time.Sleep(100 * time.Microsecond)
+	}
+	return fmt.Errorf("SetD2RCursor timeout")
+}
+
+// ResolveD2RHover asks rmod to set D2R MouseXY and run the native UI hover
+// resolver for those client coordinates.
+func (p *Presenter) ResolveD2RHover(x, y int32) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	if !p.initialized || p.localView == nil {
+		return fmt.Errorf("presenter not initialized")
+	}
+
+	clearBytes(p.localView, uintptr(offPacketData), 8)
+	writeU32(p.localView, uintptr(offPacketData+0), uint32(x))
+	writeU32(p.localView, uintptr(offPacketData+4), uint32(y))
+	writeU32(p.localView, uintptr(offCommandType), CmdResolveD2RHover)
+	writeU32(p.localView, uintptr(offStatusFlag), StatusBusy)
+	writeU32(p.localView, uintptr(offCommandFlag), 1)
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		status := readU32(p.localView, uintptr(offStatusFlag))
+		if status == StatusDone {
+			return nil
+		}
+		if status == StatusError {
+			return fmt.Errorf("ResolveD2RHover error 0x%X", readU32(p.localView, uintptr(offErrorCode)))
+		}
+		time.Sleep(100 * time.Microsecond)
+	}
+	return fmt.Errorf("ResolveD2RHover timeout")
+}
+
+type D2RCursorResult struct {
+	RequestedX int32  `json:"requested_x"`
+	RequestedY int32  `json:"requested_y"`
+	ReadbackX  int32  `json:"readback_x"`
+	ReadbackY  int32  `json:"readback_y"`
+	CursorFn   uint64 `json:"cursor_fn"`
+	MouseXY    uint64 `json:"mouse_xy"`
+	Dirty      uint32 `json:"dirty"`
+	NotifyFn   uint64 `json:"notify_fn"`
+	Selection  uint32 `json:"selection"`
+	HoverFlag  uint32 `json:"hover_flag"`
+	HoverType  uint32 `json:"hover_type"`
+	HoverGID   uint32 `json:"hover_gid"`
+	HoverPtr   uint64 `json:"hover_ptr"`
+	Stage      uint32 `json:"stage"`
+	UIResult   uint32 `json:"ui_result"`
+}
+
+type VendorNativePriceResult struct {
+	PriceA     uint32 `json:"price_a"`
+	PriceB     uint32 `json:"price_b"`
+	Value      int32  `json:"value"`
+	RateA      uint32 `json:"rate_a"`
+	RateB      uint32 `json:"rate_b"`
+	ModeValue  int32  `json:"mode_value"`
+	Stat5B     int32  `json:"stat_5b"`
+	TxtID      uint32 `json:"txt_id"`
+	Difficulty uint32 `json:"difficulty"`
+	Record     uint64 `json:"record"`
+	Context    uint64 `json:"context"`
+	ContextID  int32  `json:"context_id"`
+	NativeCost uint32 `json:"native_cost"`
+	Player     uint64 `json:"player"`
+	Mode       int32  `json:"mode"`
+	CostDiff   int32  `json:"cost_diff"`
+	CostCtx    uint64 `json:"cost_ctx"`
+	NPCTxtID   int32  `json:"npc_txt_id"`
+	NativeHigh uint32 `json:"native_high"`
+	CostFn     uint64 `json:"cost_fn"`
+}
+
+func (p *Presenter) ReadD2RCursorResult() D2RCursorResult {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	if !p.initialized || p.localView == nil {
+		return D2RCursorResult{}
+	}
+	return D2RCursorResult{
+		RequestedX: int32(readU32(p.localView, uintptr(offPacketData+0x00))),
+		RequestedY: int32(readU32(p.localView, uintptr(offPacketData+0x04))),
+		ReadbackX:  int32(readU32(p.localView, uintptr(offPacketData+0x08))),
+		ReadbackY:  int32(readU32(p.localView, uintptr(offPacketData+0x0C))),
+		CursorFn:   readU64(p.localView, uintptr(offPacketData+0x10)),
+		MouseXY:    readU64(p.localView, uintptr(offPacketData+0x18)),
+		Dirty:      readU32(p.localView, uintptr(offPacketData+0x20)),
+		NotifyFn:   readU64(p.localView, uintptr(offPacketData+0x28)),
+		Selection:  readU32(p.localView, uintptr(offPacketData+0x30)),
+		HoverFlag:  readU32(p.localView, uintptr(offPacketData+0x34)),
+		HoverType:  readU32(p.localView, uintptr(offPacketData+0x38)),
+		HoverGID:   readU32(p.localView, uintptr(offPacketData+0x3C)),
+		HoverPtr:   readU64(p.localView, uintptr(offPacketData+0x40)),
+		Stage:      readU32(p.localView, uintptr(offPacketData+0x48)),
+		UIResult:   readU32(p.localView, uintptr(offPacketData+0x4C)),
+	}
+}
+
+// VendorNativePrice computes vendor price components inside D2R using the same
+// native item-value helpers reached by the shop tooltip path.
+func (p *Presenter) VendorNativePrice(itemPtr, merchantPtr uintptr) (VendorNativePriceResult, error) {
+	return p.VendorNativePriceMode(itemPtr, merchantPtr, 0, -1, 0, -1, 0)
+}
+
+// VendorNativePriceMode calls the in-process vendor-price probe. The legacy
+// fields are kept for comparison; NativeCost is D2R's item-cost resolver
+// return for the requested mode when the loaded rmod supports it.
+func (p *Presenter) VendorNativePriceMode(itemPtr, merchantPtr uintptr, mode int32, costDiff int32, costCtx uintptr, npcTxtID int32, playerPtr uintptr) (VendorNativePriceResult, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	if !p.initialized || p.localView == nil {
+		return VendorNativePriceResult{}, fmt.Errorf("presenter not initialized")
+	}
+	if readU32(p.localView, uintptr(offCapabilities))&CapVendorNativePrice == 0 {
+		return VendorNativePriceResult{}, fmt.Errorf("loaded rmod does not support native vendor price")
+	}
+
+	clearBytes(p.localView, uintptr(offPacketData), 0x70)
+	writeU64(p.localView, uintptr(offPacketData+0x00), uint64(itemPtr))
+	writeU64(p.localView, uintptr(offPacketData+0x08), uint64(merchantPtr))
+	writeU64(p.localView, uintptr(offPacketData+0x40), uint64(playerPtr))
+	writeU32(p.localView, uintptr(offPacketData+0x48), uint32(mode))
+	writeU32(p.localView, uintptr(offPacketData+0x4C), uint32(costDiff))
+	writeU64(p.localView, uintptr(offPacketData+0x50), uint64(costCtx))
+	writeU32(p.localView, uintptr(offPacketData+0x58), uint32(npcTxtID))
+	writeU32(p.localView, uintptr(offCommandType), CmdVendorPrice)
+	writeU32(p.localView, uintptr(offStatusFlag), StatusBusy)
+	writeU32(p.localView, uintptr(offCommandFlag), 1)
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		status := readU32(p.localView, uintptr(offStatusFlag))
+		if status == StatusDone {
+			return VendorNativePriceResult{
+				PriceA:     readU32(p.localView, uintptr(offPacketData+0x00)),
+				PriceB:     readU32(p.localView, uintptr(offPacketData+0x04)),
+				Value:      int32(readU32(p.localView, uintptr(offPacketData+0x08))),
+				RateA:      readU32(p.localView, uintptr(offPacketData+0x0C)),
+				RateB:      readU32(p.localView, uintptr(offPacketData+0x10)),
+				ModeValue:  int32(readU32(p.localView, uintptr(offPacketData+0x14))),
+				Stat5B:     int32(readU32(p.localView, uintptr(offPacketData+0x18))),
+				TxtID:      readU32(p.localView, uintptr(offPacketData+0x1C)),
+				Difficulty: readU32(p.localView, uintptr(offPacketData+0x20)),
+				Record:     readU64(p.localView, uintptr(offPacketData+0x28)),
+				Context:    readU64(p.localView, uintptr(offPacketData+0x30)),
+				ContextID:  int32(readU32(p.localView, uintptr(offPacketData+0x38))),
+				NativeCost: readU32(p.localView, uintptr(offPacketData+0x3C)),
+				Player:     readU64(p.localView, uintptr(offPacketData+0x40)),
+				Mode:       int32(readU32(p.localView, uintptr(offPacketData+0x48))),
+				CostDiff:   int32(readU32(p.localView, uintptr(offPacketData+0x4C))),
+				CostCtx:    readU64(p.localView, uintptr(offPacketData+0x50)),
+				NPCTxtID:   int32(readU32(p.localView, uintptr(offPacketData+0x58))),
+				NativeHigh: readU32(p.localView, uintptr(offPacketData+0x5C)),
+				CostFn:     readU64(p.localView, uintptr(offPacketData+0x60)),
+			}, nil
+		}
+		if status == StatusError {
+			return VendorNativePriceResult{}, fmt.Errorf("VendorNativePrice error 0x%X", readU32(p.localView, uintptr(offErrorCode)))
+		}
+		time.Sleep(100 * time.Microsecond)
+	}
+	return VendorNativePriceResult{}, fmt.Errorf("VendorNativePrice timeout")
+}
+
+// NativeClick asks rmod to call D2R's real_click_worker from the game-tick
+// hook. Coordinates are client-area pixels relative to the D2R window.
+func (p *Presenter) NativeClick(x, y int32, btn byte) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	if !p.initialized || p.localView == nil {
+		return fmt.Errorf("presenter not initialized")
+	}
+
+	clearBytes(p.localView, uintptr(offPacketData), 12)
+	writeU32(p.localView, uintptr(offPacketData+0), uint32(x))
+	writeU32(p.localView, uintptr(offPacketData+4), uint32(y))
+	writeU8(p.localView, uintptr(offPacketData+8), btn)
+	writeU32(p.localView, uintptr(offCommandType), CmdNativeClick)
+	writeU32(p.localView, uintptr(offStatusFlag), StatusBusy)
+	writeU32(p.localView, uintptr(offCommandFlag), 1)
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		status := readU32(p.localView, uintptr(offStatusFlag))
+		if status == StatusDone {
+			return nil
+		}
+		if status == StatusError {
+			return fmt.Errorf("NativeClick error 0x%X", readU32(p.localView, uintptr(offErrorCode)))
+		}
+		time.Sleep(100 * time.Microsecond)
+	}
+	return fmt.Errorf("NativeClick timeout")
+}
+
 // IsReady returns true if the DLL has installed the Present hook.
 func (p *Presenter) IsReady() bool {
 	return p.initialized
+}
+
+func (p *Presenter) HasCapability(cap uint32) bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if !p.initialized || p.localView == nil {
+		return false
+	}
+	return readU32(p.localView, uintptr(offCapabilities))&cap != 0
 }
 
 // CursorBufAddr returns the cursor X/Y address in D2R's address space.
@@ -1990,11 +2526,15 @@ func (p *Presenter) KeyDataBufAddr() uintptr {
 func (p *Presenter) Close() {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	p.closeLocked()
+}
+
+func (p *Presenter) closeLocked() {
 	if p.localView != nil {
 		_ = closeSharedMemory(p.hSection, p.localView)
-		p.localView = nil
-		p.hSection = 0
 	}
+	p.localView = nil
+	p.hSection = 0
 	p.initialized = false
 }
 

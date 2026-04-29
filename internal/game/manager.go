@@ -4,7 +4,9 @@ import (
 	"errors"
 	"fmt"
 	"math/rand"
+	"os"
 	"os/exec"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -12,14 +14,14 @@ import (
 	"unsafe"
 
 	"github.com/billgraziano/dpapi"
-	"local/internal/svc/internal/gamelib/data/difficulty"
-	"local/internal/svc/internal/config"
-	"local/internal/svc/internal/secrets"
-	"local/internal/svc/internal/utils"
-	"local/internal/svc/internal/utils/winproc"
 	"github.com/lxn/win"
 	"golang.org/x/sys/windows"
 	"golang.org/x/sys/windows/registry"
+	"local/internal/svc/internal/config"
+	"local/internal/svc/internal/gamelib/data/difficulty"
+	"local/internal/svc/internal/secrets"
+	"local/internal/svc/internal/utils"
+	"local/internal/svc/internal/utils/winproc"
 )
 
 // startGameMu serializes D2R launches across all supervisors.
@@ -30,11 +32,93 @@ var startGameMu sync.Mutex
 type Manager struct {
 	gr             *MemoryReader
 	hid            *HID
+	gi             *MemoryInjector
+	packetSender   *PacketSender
 	supervisorName string
 }
 
-func NewGameManager(gr *MemoryReader, hid *HID, sueprvisorName string) *Manager {
-	return &Manager{gr: gr, hid: hid, supervisorName: sueprvisorName}
+func NewGameManager(gr *MemoryReader, hid *HID, gi *MemoryInjector, packetSender *PacketSender, sueprvisorName string) *Manager {
+	return &Manager{gr: gr, hid: hid, gi: gi, packetSender: packetSender, supervisorName: sueprvisorName}
+}
+
+func (gm *Manager) postEscape() error {
+	if gm.hid != nil && gm.hid.IsDisabled() {
+		if gm.gr != nil && gm.gr.HWND != 0 {
+			PostWindowKey(gm.gr.HWND, byte(win.VK_ESCAPE))
+			return nil
+		}
+		if gm.packetSender != nil {
+			return gm.packetSender.PostKeyInProcess(byte(win.VK_ESCAPE))
+		}
+		return errors.New("HID disabled and no ESC route available")
+	}
+	gm.hid.PressKey(win.VK_ESCAPE)
+	return nil
+}
+
+func PostWindowKey(hwnd win.HWND, key byte) {
+	win.PostMessage(hwnd, win.WM_KEYDOWN, uintptr(key), keyLParam(key, true))
+	utils.Sleep(60)
+	win.PostMessage(hwnd, win.WM_KEYUP, uintptr(key), keyLParam(key, false))
+}
+
+func PostWindowKeySequence(hwnd win.HWND, keys ...byte) {
+	for _, key := range keys {
+		PostWindowKey(hwnd, key)
+		utils.Sleep(250)
+	}
+}
+
+func keyLParam(key byte, down bool) uintptr {
+	ret, _, _ := winproc.MapVirtualKey.Call(uintptr(key), 0)
+	scanCode := int(ret)
+	previousKeyState := 0
+	transitionState := 0
+	if !down {
+		previousKeyState = 1
+		transitionState = 1
+	}
+	return uintptr((1 & 0xFFFF) | (scanCode << 16) | (previousKeyState << 30) | (transitionState << 31))
+}
+
+func (gm *Manager) clickAt(x, y int) error {
+	if gm.hid != nil && gm.hid.IsDisabled() {
+		if gm.gr != nil && gm.gr.HWND != 0 {
+			postWindowClick(gm.gr, gm.gi, x, y, MouseLeft)
+			return nil
+		}
+		if gm.packetSender != nil {
+			return gm.packetSender.ClickAt(int32(x), int32(y), MouseLeft)
+		}
+		return errors.New("HID disabled and no click route available")
+	}
+	gm.hid.Click(LeftButton, x, y)
+	return nil
+}
+
+func postWindowClick(gr *MemoryReader, gi *MemoryInjector, x, y int, btn byte) {
+	gr.updateWindowPositionData()
+	if gi != nil {
+		_ = gi.CursorPos(gr.WindowLeftX+x, gr.WindowTopY+y)
+	}
+
+	screenLParam := calculateLparam(gr.WindowLeftX+x, gr.WindowTopY+y)
+	clientLParam := calculateLparam(x, y)
+	down := uint32(win.WM_LBUTTONDOWN)
+	up := uint32(win.WM_LBUTTONUP)
+	mk := uintptr(win.MK_LBUTTON)
+	if btn == MouseRight {
+		down = win.WM_RBUTTONDOWN
+		up = win.WM_RBUTTONUP
+		mk = uintptr(win.MK_RBUTTON)
+	}
+
+	win.SendMessage(gr.HWND, win.WM_NCHITTEST, 0, screenLParam)
+	win.SendMessage(gr.HWND, win.WM_SETCURSOR, 0x000105A8, 0x2010001)
+	win.PostMessage(gr.HWND, win.WM_MOUSEMOVE, 0, clientLParam)
+	win.SendMessage(gr.HWND, down, mk, clientLParam)
+	utils.Sleep(80)
+	win.SendMessage(gr.HWND, up, 0, clientLParam)
 }
 
 func (gm *Manager) ExitGame() error {
@@ -47,17 +131,19 @@ func (gm *Manager) ExitGame() error {
 
 		data := gm.gr.GetData()
 		if data.OpenMenus.QuitMenu {
-			fmt.Println("Quit menu detected, attempting to click exit button.")
-			// The click coordinates for the quit menu button are typically around the center, slightly above
-			gm.hid.Click(LeftButton, gm.gr.GameAreaSizeX/2, int(float64(gm.gr.GameAreaSizeY)/2.2))
-			utils.Sleep(100) // Give it time to process the click and transition out of game
-			if !gm.gr.InGame() {
+			fmt.Println("Quit menu detected, selecting Save and Exit.")
+			if err := gm.selectSaveAndExit(); err != nil {
+				return err
+			}
+			if gm.waitUntilOutOfGame(3 * time.Second) {
 				return nil
 			}
 		}
 
 		fmt.Printf("Attempt %d: Trying to open menu and exit game...\n", attempt+1)
-		gm.hid.PressKey(win.VK_ESCAPE)
+		if err := gm.postEscape(); err != nil {
+			return fmt.Errorf("open quit menu: %w", err)
+		}
 
 		if !gm.gr.InGame() {
 			return nil // Exited successfully just by pressing ESC (e.g., if already at main menu)
@@ -66,10 +152,11 @@ func (gm *Manager) ExitGame() error {
 		// Check again if the Quit Menu is now open after pressing ESC
 		data = gm.gr.GetData()
 		if data.OpenMenus.QuitMenu {
-			fmt.Println("Quit menu opened after ESC, attempting to click exit button.")
-			gm.hid.Click(LeftButton, gm.gr.GameAreaSizeX/2, int(float64(gm.gr.GameAreaSizeY)/2.2))
-			utils.Sleep(100) // Give it time to process the click and transition out of game
-			if !gm.gr.InGame() {
+			fmt.Println("Quit menu opened after ESC, selecting Save and Exit.")
+			if err := gm.selectSaveAndExit(); err != nil {
+				return err
+			}
+			if gm.waitUntilOutOfGame(3 * time.Second) {
 				return nil
 			}
 		}
@@ -78,6 +165,50 @@ func (gm *Manager) ExitGame() error {
 	}
 
 	return errors.New("error exiting game! Timeout after multiple attempts")
+}
+
+func (gm *Manager) selectSaveAndExit() error {
+	if gm.hid != nil && gm.hid.IsDisabled() {
+		if gm.gr != nil && gm.gr.HWND != 0 {
+			PostWindowKeySequence(gm.gr.HWND, byte(win.VK_UP), byte(win.VK_RETURN))
+			return nil
+		}
+		if gm.packetSender != nil {
+			if err := gm.packetSender.PostKeyInProcess(byte(win.VK_UP)); err != nil {
+				return fmt.Errorf("select save and exit via UP: %w", err)
+			}
+			utils.Sleep(250)
+			if err := gm.packetSender.PostKeyInProcess(byte(win.VK_RETURN)); err != nil {
+				return fmt.Errorf("select save and exit via ENTER: %w", err)
+			}
+			return nil
+		}
+		return errors.New("HID disabled and no Save and Exit key route available")
+	}
+	gm.hid.KeySequence(byte(win.VK_UP), byte(win.VK_RETURN))
+	return nil
+}
+
+func (gm *Manager) waitUntilOutOfGame(timeout time.Duration) bool {
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if !gm.gr.InGame() {
+			return true
+		}
+		utils.Sleep(100)
+	}
+	return !gm.gr.InGame()
+}
+
+func (gm *Manager) saveAndExitButtonY() int {
+	if gm.gr == nil || gm.gr.GameAreaSizeY <= 0 {
+		return 316
+	}
+	y := gm.gr.GameAreaSizeY/2 - 44
+	if y < 0 {
+		return gm.gr.GameAreaSizeY / 2
+	}
+	return y
 }
 
 func (gm *Manager) NewGame() error {
@@ -248,6 +379,16 @@ func (gm *Manager) InGame() bool {
 // It enumerates child windows to find the static text control containing the error message
 func isGPUErrorWindow(hwnd windows.HWND) bool {
 	var foundError bool
+	var titleBuf [512]uint16
+	winproc.GetWindowText.Call(
+		uintptr(hwnd),
+		uintptr(unsafe.Pointer(&titleBuf[0])),
+		uintptr(len(titleBuf)),
+	)
+	windowTitle := syscall.UTF16ToString(titleBuf[:])
+	if strings.EqualFold(strings.TrimSpace(windowTitle), "Error") {
+		return true
+	}
 
 	// Callback to enumerate child windows and check their text
 	cb := syscall.NewCallback(func(childHwnd windows.HWND, lParam uintptr) uintptr {
@@ -291,6 +432,7 @@ func isGPUErrorWindow(hwnd windows.HWND) bool {
 //     non-protected processes hold against this dead PID, so the kernel
 //     actually reaps the EPROCESS. NOT LSASS / SVCHOST per PPL limitation
 //     (see feedback_zombie_lsass_svchost_reboot.md).
+//
 // KillProcessAndReap forcibly terminates `pid` AND blocks until the kernel
 // reaps the EPROCESS. Returns true when the process is verifiably dead at
 // return time, false when termination was blocked (Arxan PROCESS_TERMINATE
@@ -371,7 +513,12 @@ func StartGame(username string, password string, authmethod string, authToken st
 	// gets a clear error and can reboot the VM. With closeWindowAndTerminate
 	// now blocking on actual reap + zombie sweep, 30 attempts × ~30 s cap
 	// = ~15 min worst case before surrender.
-	const maxGPURetries = 30
+	maxGPURetries := 30
+	if raw := os.Getenv("D2R_MAX_GPU_RETRIES"); raw != "" {
+		if parsed, parseErr := strconv.Atoi(raw); parseErr == nil && parsed > 0 {
+			maxGPURetries = parsed
+		}
+	}
 
 	// First check for other instances of the game and kill the handles, otherwise we will not be able to start the game
 	err := KillAllClientHandles()
@@ -555,10 +702,18 @@ func StartGame(username string, password string, authmethod string, authToken st
 			// sit at 30 s — any faster just wastes CPU on a genuinely
 			// starved GPU.
 			gpuRetryDelay := 3 * time.Second
-			if attempt >= 4 { gpuRetryDelay = 5 * time.Second }
-			if attempt >= 8 { gpuRetryDelay = 10 * time.Second }
-			if attempt >= 16 { gpuRetryDelay = 20 * time.Second }
-			if attempt >= 30 { gpuRetryDelay = 30 * time.Second }
+			if attempt >= 4 {
+				gpuRetryDelay = 5 * time.Second
+			}
+			if attempt >= 8 {
+				gpuRetryDelay = 10 * time.Second
+			}
+			if attempt >= 16 {
+				gpuRetryDelay = 20 * time.Second
+			}
+			if attempt >= 30 {
+				gpuRetryDelay = 30 * time.Second
+			}
 			fmt.Printf("GPU initialization error detected (attempt %d/%d), retrying in %v...\n", attempt+1, maxGPURetries, gpuRetryDelay)
 			if !closeWindowAndTerminateProcess(foundHwnd, uint32(cmd.Process.Pid)) {
 				consecutiveReapFail++

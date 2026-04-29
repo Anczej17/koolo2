@@ -16,21 +16,24 @@ package game
 
 import (
 	"bytes"
+	"context"
 	"crypto/rand"
 	"encoding/binary"
 	"errors"
 	"fmt"
 	"log/slog"
 	"math/big"
+	"os"
 	"strings"
 	"sync"
 	"syscall"
 	"time"
 	"unsafe"
 
+	"github.com/lxn/win"
+	"golang.org/x/sys/windows"
 	"local/internal/svc/internal/gamelib/memory"
 	"local/internal/svc/internal/presenter"
-	"golang.org/x/sys/windows"
 )
 
 const fullAccess = windows.PROCESS_VM_OPERATION | windows.PROCESS_VM_WRITE | windows.PROCESS_VM_READ
@@ -76,6 +79,13 @@ type MemoryInjector struct {
 	presenter *presenter.Presenter
 }
 
+func (i *MemoryInjector) log(level slog.Level, msg string, args ...any) {
+	if i == nil || i.logger == nil {
+		return
+	}
+	i.logger.Log(context.Background(), level, msg, args...)
+}
+
 func InjectorInit(logger *slog.Logger, pid uint32) (*MemoryInjector, error) {
 	i := &MemoryInjector{pid: pid, logger: logger}
 	pHandle, err := windows.OpenProcess(fullAccess, false, pid)
@@ -100,12 +110,33 @@ func (i *MemoryInjector) SetPresenter(p *presenter.Presenter) {
 	i.mu.Lock()
 	defer i.mu.Unlock()
 	i.presenter = p
+	i.log(slog.LevelInfo, "MemoryInjector: presenter reference updated",
+		slog.Bool("attached", p != nil),
+		slog.Bool("ready", p != nil && p.IsReady()),
+		slog.Bool("loaded", i.isLoaded))
 
 	if p == nil || !p.IsReady() || !i.isLoaded {
 		return
 	}
 
 	i.reapplyPresenterTrampolines()
+}
+
+// UninstallPresenter detaches the active Presenter from the injector and asks
+// rmod to restore the target process before the host tears down its own state.
+func (i *MemoryInjector) UninstallPresenter() error {
+	i.mu.Lock()
+	p := i.presenter
+	i.presenter = nil
+	i.mu.Unlock()
+	i.log(slog.LevelInfo, "MemoryInjector: presenter reference cleared",
+		slog.Bool("hadPresenter", p != nil))
+
+	if p == nil {
+		return nil
+	}
+
+	return p.UninstallDetour()
 }
 
 // reapplyPresenterTrampolines re-installs cursor and key trampolines
@@ -202,71 +233,114 @@ func appendAbsJmp(code []byte, target uintptr) []byte {
 
 func (i *MemoryInjector) Load() error {
 	if i.isLoaded {
+		i.log(slog.LevelDebug, "MemoryInjector: load skipped, already loaded",
+			slog.Uint64("pid", uint64(i.pid)))
+		return nil
+	}
+	i.log(slog.LevelInfo, "MemoryInjector: load start",
+		slog.Uint64("pid", uint64(i.pid)),
+		slog.Bool("presenterAttached", i.presenter != nil),
+		slog.Bool("presenterReady", i.presenter != nil && i.presenter.IsReady()))
+	if os.Getenv("DISABLE_MEMORY_INJECTOR") == "1" {
+		i.log(slog.LevelWarn, "MemoryInjector: bypassed via DISABLE_MEMORY_INJECTOR=1",
+			slog.Uint64("pid", uint64(i.pid)))
 		return nil
 	}
 
+	i.log(slog.LevelDebug, "MemoryInjector: enumerating process modules")
 	modules, err := memory.GetProcessModules(i.pid)
 	if err != nil {
-		return fmt.Errorf("error getting process modules: %w", err)
+		return fmt.Errorf("enumerate process modules: %w", err)
 	}
+	i.log(slog.LevelDebug, "MemoryInjector: modules enumerated",
+		slog.Uint64("pid", uint64(i.pid)),
+		slog.Int("count", len(modules)))
 
 	syscall.MustLoadDLL("USER32.dll")
+	i.log(slog.LevelDebug, "MemoryInjector: USER32 loaded locally")
 
 	for _, module := range modules {
 		if strings.Contains(strings.ToLower(module.ModuleName), "user32.dll") {
+			i.log(slog.LevelDebug, "MemoryInjector: found remote USER32 module",
+				slog.String("module", module.ModuleName),
+				slog.Uint64("base", uint64(module.ModuleBaseAddress)))
 			i.getCursorPosAddr, err = syscall.GetProcAddress(module.ModuleHandle, "GetCursorPos")
 			i.getKeyStateAddr, _ = syscall.GetProcAddress(module.ModuleHandle, "GetKeyState")
 			i.trackMouseEventAddr, _ = syscall.GetProcAddress(module.ModuleHandle, "TrackMouseEvent")
 			i.setCursorPosAddr, _ = syscall.GetProcAddress(module.ModuleHandle, "SetCursorPos")
 			i.sendMessageWAddr, _ = syscall.GetProcAddress(module.ModuleHandle, "SendMessageW")
 			i.postMessageWAddr, _ = syscall.GetProcAddress(module.ModuleHandle, "PostMessageW")
+			i.log(slog.LevelDebug, "MemoryInjector: resolved USER32 exports",
+				slog.Uint64("GetCursorPos", uint64(i.getCursorPosAddr)),
+				slog.Uint64("GetKeyState", uint64(i.getKeyStateAddr)),
+				slog.Uint64("TrackMouseEvent", uint64(i.trackMouseEventAddr)),
+				slog.Uint64("SetCursorPos", uint64(i.setCursorPosAddr)))
 
+			i.log(slog.LevelDebug, "MemoryInjector: capturing GetCursorPos bytes")
 			err = windows.ReadProcessMemory(i.handle, i.getCursorPosAddr, &i.getCursorPosOrigBytes[0], uintptr(len(i.getCursorPosOrigBytes)), nil)
 			if err != nil {
-				return fmt.Errorf("error reading memory: %w", err)
+				return fmt.Errorf("capture GetCursorPos bytes: %w", err)
 			}
+			i.log(slog.LevelDebug, "MemoryInjector: captured GetCursorPos bytes")
 
+			i.log(slog.LevelDebug, "MemoryInjector: disabling TrackMouseEvent leave hook")
 			err = i.stopTrackingMouseLeaveEvents()
 			if err != nil {
-				return err
+				return fmt.Errorf("disable TrackMouseEvent leave hook: %w", err)
 			}
+			i.log(slog.LevelDebug, "MemoryInjector: TrackMouseEvent neutralized")
 
+			i.log(slog.LevelDebug, "MemoryInjector: capturing SetCursorPos bytes")
 			err = windows.ReadProcessMemory(i.handle, i.setCursorPosAddr, &i.setCursorPosOrigBytes[0], uintptr(len(i.setCursorPosOrigBytes)), nil)
 			if err != nil {
-				return fmt.Errorf("error reading setcursor memory: %w", err)
+				return fmt.Errorf("capture SetCursorPos bytes: %w", err)
 			}
+			i.log(slog.LevelDebug, "MemoryInjector: captured SetCursorPos bytes")
 
+			i.log(slog.LevelDebug, "MemoryInjector: installing SetCursorPos override")
 			err = i.overrideSetCursorPosPolymorphic()
 			if err != nil {
-				return err
+				return fmt.Errorf("install SetCursorPos override: %w", err)
 			}
+			i.log(slog.LevelDebug, "MemoryInjector: SetCursorPos override installed")
 
+			i.log(slog.LevelDebug, "MemoryInjector: capturing GetKeyState bytes")
 			err = windows.ReadProcessMemory(i.handle, i.getKeyStateAddr, &i.getKeyStateOrigBytes[0], uintptr(len(i.getKeyStateOrigBytes)), nil)
 			if err != nil {
-				return fmt.Errorf("error reading memory: %w", err)
+				return fmt.Errorf("capture GetKeyState bytes: %w", err)
 			}
+			i.log(slog.LevelDebug, "MemoryInjector: captured GetKeyState bytes")
 		}
 	}
 	if i.getCursorPosAddr == 0 || i.getKeyStateAddr == 0 {
-		return errors.New("could not find target address")
+		return errors.New("could not resolve required USER32 exports in target process")
 	}
 
 	// Allocate remote data buffers for write-once architecture
+	i.log(slog.LevelDebug, "MemoryInjector: allocating remote cursor buffer")
 	i.cursorDataBuf, err = i.allocRemoteRW(16)
 	if err != nil {
 		return fmt.Errorf("alloc cursor buf: %w", err)
 	}
+	i.log(slog.LevelDebug, "MemoryInjector: cursor buffer allocated",
+		slog.Uint64("addr", uint64(i.cursorDataBuf)))
 
+	i.log(slog.LevelDebug, "MemoryInjector: installing GetCursorPos trampoline")
 	if err := i.installCursorPosTrampoline(); err != nil {
 		return fmt.Errorf("install cursor trampoline: %w", err)
 	}
+	i.log(slog.LevelDebug, "MemoryInjector: cursor trampoline installed")
 
 	i.isLoaded = true
 
 	// If presenter was set before Load(), re-install trampolines to use shared buffer.
-	if i.presenter != nil && i.presenter.IsReady() {
+	if i.presenter != nil && i.presenter.IsReady() && i.presenter.CursorBufAddr() != 0 {
+		i.log(slog.LevelInfo, "MemoryInjector: reapplying presenter-backed trampolines after load")
 		i.reapplyPresenterTrampolines()
 	}
+	i.log(slog.LevelInfo, "MemoryInjector: load complete",
+		slog.Uint64("pid", uint64(i.pid)),
+		slog.Bool("presenterReady", i.presenter != nil && i.presenter.IsReady()))
 
 	return nil
 }
@@ -299,9 +373,9 @@ func buildCursorPosTrampoline(dataBufAddr uintptr) []byte {
 		readY     []byte // mov eax, [reg+4]
 	}
 	regs := []regInfo{
-		{0x53, 0x5B, 0x48, 0xBB, []byte{0x8B, 0x03}, []byte{0x8B, 0x43, 0x04}},       // rbx
-		{0x56, 0x5E, 0x48, 0xBE, []byte{0x8B, 0x06}, []byte{0x8B, 0x46, 0x04}},       // rsi
-		{0x57, 0x5F, 0x48, 0xBF, []byte{0x8B, 0x07}, []byte{0x8B, 0x47, 0x04}},       // rdi
+		{0x53, 0x5B, 0x48, 0xBB, []byte{0x8B, 0x03}, []byte{0x8B, 0x43, 0x04}}, // rbx
+		{0x56, 0x5E, 0x48, 0xBE, []byte{0x8B, 0x06}, []byte{0x8B, 0x46, 0x04}}, // rsi
+		{0x57, 0x5F, 0x48, 0xBF, []byte{0x8B, 0x07}, []byte{0x8B, 0x47, 0x04}}, // rdi
 	}
 	r := regs[polyRandN(len(regs))]
 
@@ -353,8 +427,10 @@ func (i *MemoryInjector) CursorPos(x, y int) error {
 	i.lastCursorY = y
 	i.cursorOverrideActive = true
 
-	// Prefer presenter's mapped view — zero cross-process writes.
-	if i.presenter != nil && i.presenter.IsReady() {
+	// Prefer presenter's mapped view only when rmod exposed the remote mapping.
+	// In skip-Present sessions RemoteViewAddr is intentionally 0, so the
+	// existing GetCursorPos trampoline still points at cursorDataBuf.
+	if i.presenter != nil && i.presenter.IsReady() && i.presenter.CursorBufAddr() != 0 {
 		i.presenter.SetCursor(int32(x), int32(y))
 		return nil
 	}
@@ -367,6 +443,77 @@ func (i *MemoryInjector) CursorPos(x, y int) error {
 	return windows.WriteProcessMemory(i.handle, i.cursorDataBuf, &buf[0], 8, nil)
 }
 
+// MoveCursorInProcess updates D2R's internal cursor and posts the same hover
+// messages the click path uses, but without any button event. Tooltip builders
+// depend on WndProc hover tracking; updating only the cursor buffer is not
+// enough for vendor price panels.
+func (i *MemoryInjector) MoveCursorInProcess(hwnd uintptr, screenX, screenY, clientX, clientY int32) error {
+	if i == nil || !i.isLoaded {
+		return fmt.Errorf("memory injector not loaded")
+	}
+	if i.postMessageWAddr == 0 {
+		return fmt.Errorf("PostMessageW not resolved")
+	}
+	if i.presenter == nil || !i.presenter.IsReady() {
+		return fmt.Errorf("presenter not ready for in-process mouse move")
+	}
+	const (
+		wmNcHitTest uint32 = 0x0084
+		wmSetCursor uint32 = 0x0020
+		wmMouseMove uint32 = 0x0200
+	)
+	if err := i.CursorPos(int(screenX), int(screenY)); err != nil {
+		return fmt.Errorf("update cursor override buffer for in-process move: %w", err)
+	}
+
+	screenLParam := uintptr(uint32(uint16(screenY))<<16 | uint32(uint16(screenX)))
+	clientLParam := uintptr(uint32(uint16(clientY))<<16 | uint32(uint16(clientX)))
+	if _, err := i.presenter.CallFnGameThread(i.postMessageWAddr, hwnd, uintptr(wmNcHitTest), 0, screenLParam); err != nil {
+		return fmt.Errorf("PostMessageW WM_NCHITTEST: %w", err)
+	}
+	if _, err := i.presenter.CallFnGameThread(i.postMessageWAddr, hwnd, uintptr(wmSetCursor), hwnd, 0x2010001); err != nil {
+		return fmt.Errorf("PostMessageW WM_SETCURSOR: %w", err)
+	}
+	if _, err := i.presenter.CallFnGameThread(i.postMessageWAddr, hwnd, uintptr(wmMouseMove), 0, clientLParam); err != nil {
+		return fmt.Errorf("PostMessageW WM_MOUSEMOVE: %w", err)
+	}
+	return nil
+}
+
+// MoveCursorWindowMessages updates the cursor override and posts a nonblocking
+// hover sequence to D2R's window queue. It avoids rmod CmdCallFnGT, which can
+// be unavailable in skip-present runtime sessions.
+func (i *MemoryInjector) MoveCursorWindowMessages(hwnd uintptr, screenX, screenY, clientX, clientY int32) error {
+	if i == nil || !i.isLoaded {
+		return fmt.Errorf("memory injector not loaded")
+	}
+	if err := i.CursorPos(int(screenX), int(screenY)); err != nil {
+		return err
+	}
+	screenLParam := uintptr(uint32(uint16(screenY))<<16 | uint32(uint16(screenX)))
+	clientLParam := uintptr(uint32(uint16(clientY))<<16 | uint32(uint16(clientX)))
+	win.PostMessage(win.HWND(hwnd), win.WM_NCHITTEST, 0, screenLParam)
+	win.PostMessage(win.HWND(hwnd), win.WM_SETCURSOR, hwnd, 0x2010001)
+	win.PostMessage(win.HWND(hwnd), win.WM_MOUSEMOVE, 0, clientLParam)
+	return nil
+}
+
+// MoveCursorMessages mirrors the legacy HID hover primitive without
+// moving the Windows hardware cursor or foregrounding the D2R window.
+func (i *MemoryInjector) MoveCursorMessages(hwnd uintptr, screenX, screenY int32) error {
+	if i == nil || !i.isLoaded {
+		return fmt.Errorf("memory injector not loaded")
+	}
+	if err := i.CursorPos(int(screenX), int(screenY)); err != nil {
+		return err
+	}
+	screenLParam := uintptr(uint32(uint16(screenY))<<16 | uint32(uint16(screenX)))
+	win.SendMessage(win.HWND(hwnd), win.WM_NCHITTEST, 0, screenLParam)
+	win.SendMessage(win.HWND(hwnd), win.WM_SETCURSOR, 0x000105A8, 0x2010001)
+	win.PostMessage(win.HWND(hwnd), win.WM_MOUSEMOVE, 0, screenLParam)
+	return nil
+}
+
 // --------------------------------------------------------------------------
 // Write-once GetKeyState trampoline + data buffer
 // --------------------------------------------------------------------------
@@ -375,9 +522,10 @@ func (i *MemoryInjector) CursorPos(x, y int) error {
 // that reads key/active from the presenter's shared mapped view.
 //
 // Layout (allocated in remote RWX page):
-//   [check logic ~40 bytes]
-//   [saved original 18 bytes]
-//   [jmp back to GetKeyState+18, 14 bytes]
+//
+//	[check logic ~40 bytes]
+//	[saved original 18 bytes]
+//	[jmp back to GetKeyState+18, 14 bytes]
 //
 // At GetKeyState itself: 14-byte absolute jmp to this page.
 // Runtime: OverrideGetKeyState/RestoreGetKeyState only write to mapped view.
@@ -464,13 +612,25 @@ func (i *MemoryInjector) SendMessageInProcess(hwnd uintptr, msg uint32, wParam, 
 // (0x50 swap, 0x5C Cain identify, etc.) — see memory
 // project_weapon_swap_solved 2026-04-12 HID-SOLUTION block.
 // PostKeyInProcess posts WM_KEYDOWN + WM_KEYUP to D2R's window via
-// PostMessageW executed on D2R's OWN game thread (APC). PostMessage queues
-// into D2R's own message pump — indistinguishable from a user-keyboard event
-// pulled from the queue. This is the path memory project_weapon_swap_callfn_working
-// proved works for weapon swap with ZERO detection. Compare PressKeyInProcess
-// which uses SendMessageW — D2R 3.0.92198 appears to filter SendMessage out
-// before the keybind lookup runs.
+// PostMessageW from inside D2R. PostMessageW only queues a message to the
+// window thread, so it does not need the fragile game-thread CallFnGT path.
 func (i *MemoryInjector) PostKeyInProcess(hwnd uintptr, vk byte) error {
+	if i == nil || !i.isLoaded {
+		return fmt.Errorf("memory injector not loaded")
+	}
+	if i.postMessageWAddr == 0 {
+		return fmt.Errorf("PostMessageW not resolved")
+	}
+	if i.presenter == nil || !i.presenter.IsReady() {
+		return fmt.Errorf("presenter not ready for in-process key post")
+	}
+	if err := i.presenter.PostKey(vk); err != nil {
+		return fmt.Errorf("rmod PostKey vk=0x%02X: %w", vk, err)
+	}
+	return nil
+}
+
+func (i *MemoryInjector) postKeyInProcessViaCallFn(hwnd uintptr, vk byte) error {
 	if i == nil || !i.isLoaded {
 		return fmt.Errorf("memory injector not loaded")
 	}
@@ -485,12 +645,12 @@ func (i *MemoryInjector) PostKeyInProcess(hwnd uintptr, vk byte) error {
 		wmKeyUp   uint32 = 0x0101
 	)
 	lparamDown := uintptr(1)
-	if _, err := i.presenter.CallFnGameThread(i.postMessageWAddr, hwnd, uintptr(wmKeyDown), uintptr(vk), lparamDown); err != nil {
+	if _, err := i.presenter.CallFn(i.postMessageWAddr, hwnd, uintptr(wmKeyDown), uintptr(vk), lparamDown); err != nil {
 		return fmt.Errorf("PostMessageW WM_KEYDOWN vk=0x%02X: %w", vk, err)
 	}
 	time.Sleep(30 * time.Millisecond)
 	lparamUp := uintptr(1) | (1 << 30) | (1 << 31)
-	if _, err := i.presenter.CallFnGameThread(i.postMessageWAddr, hwnd, uintptr(wmKeyUp), uintptr(vk), lparamUp); err != nil {
+	if _, err := i.presenter.CallFn(i.postMessageWAddr, hwnd, uintptr(wmKeyUp), uintptr(vk), lparamUp); err != nil {
 		return fmt.Errorf("PostMessageW WM_KEYUP vk=0x%02X: %w", vk, err)
 	}
 	return nil
@@ -546,13 +706,10 @@ func (i *MemoryInjector) PostClickInProcess(hwnd uintptr, x, y int32, btn byte) 
 	default:
 		return fmt.Errorf("invalid click button %d (0=L,1=R,2=M)", btn)
 	}
-	// Sync D2R's internal cursor buffer via presenter (zero cross-process writes).
-	i.presenter.SetCursor(x, y)
-	i.mu.Lock()
-	i.lastCursorX = int(x)
-	i.lastCursorY = int(y)
-	i.cursorOverrideActive = true
-	i.mu.Unlock()
+	// Sync D2R's GetCursorPos override before posting the click sequence.
+	if err := i.CursorPos(int(x), int(y)); err != nil {
+		return fmt.Errorf("update cursor override buffer for click: %w", err)
+	}
 	// MAKELPARAM(x, y): low u16 = x, high u16 = y. Matches calculateLparam in mouse.go.
 	lparam := uintptr(uint32(uint16(y))<<16 | uint32(uint16(x)))
 	// WM_NCHITTEST + WM_SETCURSOR mirror the sequence in game/mouse.go MovePointer.
@@ -579,6 +736,96 @@ func (i *MemoryInjector) PostClickInProcess(hwnd uintptr, x, y int32, btn byte) 
 		return fmt.Errorf("PostMessageW WM_xBUTTONUP btn=%d: %w", btn, err)
 	}
 	return nil
+}
+
+// PostClickQueued posts a D2R-window click through rmod's queued command path
+// (same dispatcher family as PostKeyInProcess). x/y are client-area pixels.
+func (i *MemoryInjector) PostClickQueued(hwnd uintptr, x, y int32, btn byte) error {
+	if i == nil || !i.isLoaded {
+		return fmt.Errorf("memory injector not loaded")
+	}
+	if i.presenter == nil || !i.presenter.IsReady() {
+		return fmt.Errorf("presenter not ready for queued in-process click")
+	}
+	if !i.presenter.HasCapability(presenter.CapPostClickNoSetCursorPos) {
+		return fmt.Errorf("queued click disabled: loaded rmod does not advertise no-SetCursorPos support")
+	}
+	return i.presenter.PostClick(x, y, btn)
+}
+
+// PostMoveQueued posts a D2R-window hover move through rmod from inside D2R.
+// clientX/clientY are D2R client-area pixels. The GetCursorPos override must
+// still receive screen-space coordinates because D2R's WndProc follows the
+// Win32 contract and may convert GetCursorPos output back to client space.
+func (i *MemoryInjector) PostMoveQueued(hwnd uintptr, clientX, clientY, screenX, screenY int32) error {
+	if i == nil || !i.isLoaded {
+		return fmt.Errorf("memory injector not loaded")
+	}
+	if i.presenter == nil || !i.presenter.IsReady() {
+		return fmt.Errorf("presenter not ready for queued in-process move")
+	}
+	if !i.presenter.HasCapability(presenter.CapPostMoveNoSetCursorPos) {
+		return fmt.Errorf("queued move disabled: loaded rmod does not advertise no-SetCursorPos support")
+	}
+	if !i.CursorOverrideActive() {
+		if err := i.EnableCursorOverride(); err != nil {
+			return fmt.Errorf("enable cursor override for queued move: %w", err)
+		}
+	}
+	i.presenter.SetCursor(screenX, screenY)
+	if err := i.CursorPos(int(screenX), int(screenY)); err != nil {
+		return fmt.Errorf("update cursor override buffer for queued move: %w", err)
+	}
+	logicalX, logicalY := d2rLogicalCursorFromClient(win.HWND(hwnd), clientX, clientY)
+	if i.presenter.HasCapability(presenter.CapSetD2RCursor) {
+		if err := i.presenter.SetD2RCursor(logicalX, logicalY); err != nil {
+			return fmt.Errorf("native D2R cursor set failed: %w", err)
+		}
+	}
+	i.mu.Lock()
+	i.lastCursorX = int(screenX)
+	i.lastCursorY = int(screenY)
+	i.cursorOverrideActive = true
+	i.mu.Unlock()
+	return i.presenter.PostMove(logicalX, logicalY)
+}
+
+func d2rLogicalCursorFromClient(hwnd win.HWND, clientX, clientY int32) (int32, int32) {
+	var rect win.RECT
+	if !win.GetClientRect(hwnd, &rect) {
+		return clampInt32(clientX, 0, 799), clampInt32(clientY, 0, 599)
+	}
+	width := int32(rect.Right - rect.Left)
+	height := int32(rect.Bottom - rect.Top)
+	if width <= 0 || height <= 0 {
+		return clampInt32(clientX, 0, 799), clampInt32(clientY, 0, 599)
+	}
+	renderW := width
+	renderH := width * 3 / 4
+	offX := int32(0)
+	offY := (height - renderH) / 2
+	if renderH > height {
+		renderH = height
+		renderW = height * 4 / 3
+		offX = (width - renderW) / 2
+		offY = 0
+	}
+	if renderW <= 0 || renderH <= 0 {
+		return clampInt32(clientX, 0, 799), clampInt32(clientY, 0, 599)
+	}
+	x := ((clientX - offX) * 800) / renderW
+	y := ((clientY - offY) * 600) / renderH
+	return clampInt32(x, 0, 799), clampInt32(y, 0, 599)
+}
+
+func clampInt32(v, lo, hi int32) int32 {
+	if v < lo {
+		return lo
+	}
+	if v > hi {
+		return hi
+	}
+	return v
 }
 
 func (i *MemoryInjector) PressKeyInProcess(hwnd uintptr, vk byte) error {
@@ -731,7 +978,12 @@ func (i *MemoryInjector) EnableCursorOverride() error {
 	if err := i.overrideSetCursorPosPolymorphic(); err != nil {
 		return err
 	}
-	// Re-install write-once trampoline and update data buffer
+	if i.presenter != nil && i.presenter.IsReady() && i.presenter.CursorBufAddr() != 0 {
+		i.reapplyPresenterTrampolines()
+		i.cursorOverrideActive = true
+		return nil
+	}
+	// Re-install write-once trampoline and update data buffer.
 	if err := i.installCursorPosTrampoline(); err != nil {
 		return err
 	}

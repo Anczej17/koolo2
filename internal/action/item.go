@@ -3,48 +3,36 @@ package action
 import (
 	"fmt"
 
+	"local/internal/svc/internal/action/step"
+	"local/internal/svc/internal/context"
+	"local/internal/svc/internal/game"
 	"local/internal/svc/internal/gamelib/data"
 	"local/internal/svc/internal/gamelib/data/item"
 	"local/internal/svc/internal/gamelib/data/stat"
 	"local/internal/svc/internal/gamelib/nip"
-	"local/internal/svc/internal/action/step"
-	"local/internal/svc/internal/context"
-	"local/internal/svc/internal/game"
+	"local/internal/svc/internal/packet/amb"
 	"local/internal/svc/internal/ui"
 	"local/internal/svc/internal/utils"
 )
 
 // WeaponSwapGIDs returns the four weapon GIDs needed by PacketSender.SwapWeapon
-// based on which weapon slot is currently active.
-// Equipped items have LocationType="equipped" with BodyLocation set to the slot.
-func WeaponSwapGIDs(d *game.Data) (fromL, fromR, toL, toR data.UnitID) {
+// regardless of which slot is currently active.
+//
+// LocLeftArm / LocRightArm always map to slot 0; LocLeftArmSecondary /
+// LocRightArmSecondary always map to slot 1. A hand with no equipped item
+// returns GID 0, which the 0x50 builder accepts as "empty slot".
+func WeaponSwapGIDs(d *game.Data) (slot0L, slot0R, slot1L, slot1R data.UnitID) {
 	equipped := d.Inventory.ByLocation(item.LocationEquipped)
 	for _, itm := range equipped {
 		switch itm.Location.BodyLocation {
 		case item.LocLeftArm:
-			if d.ActiveWeaponSlot == 0 {
-				fromL = itm.UnitID
-			} else {
-				toL = itm.UnitID
-			}
+			slot0L = itm.UnitID
 		case item.LocRightArm:
-			if d.ActiveWeaponSlot == 0 {
-				fromR = itm.UnitID
-			} else {
-				toR = itm.UnitID
-			}
+			slot0R = itm.UnitID
 		case item.LocLeftArmSecondary:
-			if d.ActiveWeaponSlot == 0 {
-				toL = itm.UnitID
-			} else {
-				fromL = itm.UnitID
-			}
+			slot1L = itm.UnitID
 		case item.LocRightArmSecondary:
-			if d.ActiveWeaponSlot == 0 {
-				toR = itm.UnitID
-			} else {
-				fromR = itm.UnitID
-			}
+			slot1R = itm.UnitID
 		}
 	}
 	return
@@ -111,6 +99,31 @@ func DropAndRecoverCursorItem() {
 
 	droppedItem := cursorItems[0]
 	droppedUnitID := droppedItem.UnitID
+
+	if ctx.PacketSender != nil {
+		if x, y, ok := findFreeInventorySlotForCursorItem(ctx, droppedItem); ok {
+			ctx.Logger.Debug("Placing cursor item into inventory via AMB 0x18",
+				"item", droppedItem.Name, "unitID", droppedUnitID, "x", x, "y", y)
+			if err := ctx.PacketSender.PutItemToInventory(uint32(droppedUnitID), uint32(x), uint32(y), uint32(amb.ContainerInventory)); err != nil {
+				ctx.Logger.Warn("Cursor item AMB 0x18 inventory placement failed", "item", droppedItem.Name, "unitID", droppedUnitID, "err", err)
+				return
+			}
+			for attempt := 1; attempt <= 10; attempt++ {
+				utils.Sleep(150)
+				ctx.RefreshGameData()
+				if len(ctx.Data.Inventory.ByLocation(item.LocationCursor)) == 0 {
+					ctx.Logger.Debug("Cursor item placed into inventory via packet", "item", droppedItem.Name, "unitID", droppedUnitID)
+					return
+				}
+			}
+			ctx.Logger.Warn("Cursor item still present after AMB 0x18 inventory placement", "item", droppedItem.Name, "unitID", droppedUnitID)
+			return
+		}
+		ctx.Logger.Warn("Cursor item recovery has no free inventory slot; refusing HID drop fallback",
+			"item", droppedItem.Name, "unitID", droppedUnitID)
+		return
+	}
+
 	ctx.Logger.Debug("Dropping cursor item for recovery", "item", droppedItem.Name, "unitID", droppedUnitID)
 
 	// Drop the item
@@ -182,6 +195,36 @@ func DropAndRecoverCursorItem() {
 	}
 
 	ctx.Logger.Warn("Failed to recover cursor item after max attempts", "item", droppedItem.Name)
+}
+
+func findFreeInventorySlotForCursorItem(ctx *context.Status, itm data.Item) (int, int, bool) {
+	inv := NewInventoryMask(10, 4)
+	if len(ctx.CharacterCfg.Inventory.InventoryLock) > 0 {
+		for y := 0; y < len(ctx.CharacterCfg.Inventory.InventoryLock) && y < inv.Height; y++ {
+			for x := 0; x < len(ctx.CharacterCfg.Inventory.InventoryLock[y]) && x < inv.Width; x++ {
+				if ctx.CharacterCfg.Inventory.InventoryLock[y][x] == 0 {
+					inv.Place(x, y, 1, 1)
+				}
+			}
+		}
+	}
+	for _, invItem := range ctx.Data.Inventory.ByLocation(item.LocationInventory) {
+		w, h := invItem.Desc().InventoryWidth, invItem.Desc().InventoryHeight
+		x, y := invItem.Position.X, invItem.Position.Y
+		if x < 0 || y < 0 || x+w > inv.Width || y+h > inv.Height {
+			continue
+		}
+		inv.Place(x, y, w, h)
+	}
+	w, h := itm.Desc().InventoryWidth, itm.Desc().InventoryHeight
+	for y := 0; y <= inv.Height-h; y++ {
+		for x := 0; x <= inv.Width-w; x++ {
+			if inv.CanPlace(x, y, w, h) {
+				return x, y, true
+			}
+		}
+	}
+	return 0, 0, false
 }
 
 func DropInventoryItem(i data.Item) error {
@@ -339,8 +382,11 @@ func tryUnequip(ctx *context.Status, itm data.Item) (data.Item, bool, error) {
 		ctx.Logger.Debug("Swapping weapon slot to unequip item", "item", itm.Name, "fromSlot", originalSlot, "toSlot", targetSlot)
 		// Full-packet bot: always emit 0x50; no HID fallback (user 2026-04-19).
 		if ctx.PacketSender != nil {
-			fL, fR, tL, tR := WeaponSwapGIDs(ctx.Data)
-			if err := ctx.PacketSender.SwapWeapon(fL, fR, tL, tR, uint8(ctx.Data.ActiveWeaponSlot)); err != nil {
+			s0L, s0R, s1L, s1R := WeaponSwapGIDs(ctx.Data)
+			target := uint8(ctx.Data.ActiveWeaponSlot) ^ 1
+			lSk := uint16(ctx.Data.PlayerUnit.LeftSkill)
+			rSk := uint16(ctx.Data.PlayerUnit.RightSkill)
+			if err := ctx.PacketSender.SwapWeapon(s0L, s0R, s1L, s1R, lSk, rSk, target); err != nil {
 				ctx.Logger.Warn("item.go SwapWeapon (target) packet failed", "err", err)
 			}
 		}
@@ -356,8 +402,11 @@ func tryUnequip(ctx *context.Status, itm data.Item) (data.Item, bool, error) {
 		defer func() {
 			// Restore original slot via packet — no HID fallback.
 			if ctx.PacketSender != nil {
-				fL, fR, tL, tR := WeaponSwapGIDs(ctx.Data)
-				if err := ctx.PacketSender.SwapWeapon(fL, fR, tL, tR, uint8(ctx.Data.ActiveWeaponSlot)); err != nil {
+				s0L, s0R, s1L, s1R := WeaponSwapGIDs(ctx.Data)
+				target := uint8(ctx.Data.ActiveWeaponSlot) ^ 1
+				lSk := uint16(ctx.Data.PlayerUnit.LeftSkill)
+				rSk := uint16(ctx.Data.PlayerUnit.RightSkill)
+				if err := ctx.PacketSender.SwapWeapon(s0L, s0R, s1L, s1R, lSk, rSk, target); err != nil {
 					ctx.Logger.Warn("item.go SwapWeapon (restore) packet failed", "err", err)
 				}
 			}

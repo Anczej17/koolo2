@@ -41,6 +41,12 @@ set "GOTMPDIR=%STATIC_BUILD_DIR%"
 call :print_info "Using static build folder: %STATIC_BUILD_DIR%"
 
 call :print_header "Starting Application Build Process"
+set "LAB_TOOLS=0"
+if /i "%2"=="--lab-tools" set "LAB_TOOLS=1"
+if /i "%1"=="--lab-tools" (
+    set "LAB_TOOLS=1"
+    set "VERSION=dev"
+)
 
 :: Check for Go installation
 call :check_go_installation
@@ -48,6 +54,10 @@ if !errorlevel! neq 0 call :pause_and_exit !errorlevel!
 
 :: Check for Garble installation
 call :check_garble_installation
+if !errorlevel! neq 0 call :pause_and_exit !errorlevel!
+
+:: Check for Rust/Cargo installation (required for rmod.dll)
+call :check_cargo_installation
 if !errorlevel! neq 0 call :pause_and_exit !errorlevel!
 
 :: Main script execution
@@ -175,14 +185,39 @@ if %errorlevel% neq 0 (
 )
 goto :eof
 
+:check_cargo_installation
+call :print_info "Checking if Cargo is installed"
+where cargo >nul 2>&1
+if %errorlevel% neq 0 (
+    call :print_error "Cargo is not installed or not in the system PATH."
+    call :print_info "Install Rust from https://rustup.rs/ and run this script again."
+    exit /b 1
+)
+cargo --version >nul 2>&1
+if !errorlevel! neq 0 (
+    call :print_error "Cargo exists but failed to run"
+    exit /b 1
+)
+call :print_success "Cargo is installed."
+goto :eof
+
 :main
 :: Initial validation checks
 call :validate_environment
 if !errorlevel! neq 0 call :pause_and_exit !errorlevel!
 
+call :clean_release_artifacts
+if !errorlevel! neq 0 call :pause_and_exit !errorlevel!
+if not exist "%STATIC_BUILD_DIR%" mkdir "%STATIC_BUILD_DIR%"
+if not exist "%GOCACHE%" mkdir "%GOCACHE%"
+
+call :build_native_tools
+if !errorlevel! neq 0 call :pause_and_exit !errorlevel!
+
 :: Build application binary with Garble
 call :print_header "Building Application Binary"
 if "%1"=="" (set VERSION=dev) else (set VERSION=%1)
+if /i "%1"=="--lab-tools" set VERSION=dev
 call :print_info "Building %VERSION%"
 :: Generate unique build identifiers
 for /f "delims=" %%a in ('powershell -Command "[guid]::NewGuid().ToString()"') do set "BUILD_ID=%%a"
@@ -234,26 +269,14 @@ if exist "%OUTPUT_EXE%" (
     call :pause_and_exit 1
 )
 
-:: Handle tools folder first
-call :print_header "Handling Tools"
-if exist build\tools (
-    call :print_step "Removing existing tools folder"
-    rmdir /s /q build\tools
-    if exist build\tools (
-        call :print_error "Failed to delete tools folder"
-        call :check_folder_permissions "build\tools"
-        call :pause_and_exit 1
-    )
-)
-call :print_step "Copying tools folder"
-xcopy /q /E /I /y /EXCLUDE:tools\xcopy_exclude.txt tools build\tools > nul
-if !errorlevel! neq 0 (
-    call :print_error "Failed to copy tools folder"
-    call :check_folder_permissions "tools"
-    call :check_folder_permissions "build"
-    call :pause_and_exit 1
-)
-call :print_success "Tools folder successfully copied"
+call :audit_obfuscated_binary "%OUTPUT_EXE%"
+if !errorlevel! neq 0 call :pause_and_exit !errorlevel!
+
+call :copy_runtime_tools
+if !errorlevel! neq 0 call :pause_and_exit !errorlevel!
+
+call :validate_release_tools
+if !errorlevel! neq 0 call :pause_and_exit !errorlevel!
 
 :: Handle Settings.json
 call :print_header "Handling Configuration Files"
@@ -312,6 +335,178 @@ call :print_success "Template folder successfully copied"
 
 call :print_header "Build Process Completed"
 call :print_success "Artifacts are in the build directory"
+goto :eof
+
+:clean_release_artifacts
+call :print_header "Cleaning Release Artifacts"
+if not exist build mkdir build
+
+for %%d in (
+    "build\build"
+    "build\dumps"
+    "build\ghidra_projects"
+    "build\lab_tools"
+    "build\logs"
+    "build\screenshots"
+    "build\tmp"
+    "build\uber_dumps"
+    "build\d2txt"
+    "build\d2rb_resources"
+) do (
+    if exist %%~d (
+        call :print_step "Removing stale folder %%~d"
+        rmdir /s /q %%~d
+        if exist %%~d (
+            call :print_error "Failed to delete stale folder %%~d"
+            exit /b 1
+        )
+    )
+)
+
+for %%f in (
+    "build\*.exe"
+    "build\*.log"
+    "build\*.json"
+    "build\*.go"
+    "build\*.bin"
+    "build\*.pdb"
+) do (
+    if exist %%~f (
+        call :print_step "Removing stale files %%~f"
+        del /q %%~f >nul 2>&1
+        if exist %%~f (
+            call :print_warning "Some stale files matching %%~f could not be removed. Close running binaries if this is a release build."
+        )
+    )
+)
+
+call :print_success "Release artifact cleanup completed"
+goto :eof
+
+:build_native_tools
+call :print_header "Building Native Tools"
+
+call :print_step "Building rmod.dll"
+pushd tools\rmod
+cargo build --release
+if !errorlevel! neq 0 (
+    popd
+    call :print_error "cargo build --release failed for rmod.dll"
+    exit /b 1
+)
+popd
+copy /y tools\rmod\target\release\rmod.dll tools\rmod.dll >nul
+if !errorlevel! neq 0 (
+    call :print_error "Failed to copy tools\rmod.dll"
+    exit /b 1
+)
+if "%LAB_TOOLS%"=="1" (
+    call :print_step "Building lab-only rmod_sniffer.dll"
+    pushd tools\rmod
+    cargo build --release --features sniffer
+    if !errorlevel! neq 0 (
+        popd
+        call :print_error "cargo build --release --features sniffer failed"
+        exit /b 1
+    )
+    popd
+    copy /y tools\rmod\target\release\rmod.dll tools\rmod_sniffer.dll >nul
+    if !errorlevel! neq 0 (
+        call :print_error "Failed to copy tools\rmod_sniffer.dll"
+        exit /b 1
+    )
+
+    call :print_step "Building lab-only offset_resolver.exe"
+    go build -trimpath -ldflags "-s -w" -o tools\offset_resolver.exe ./tools/offset_resolver
+    if !errorlevel! neq 0 (
+        call :print_error "Failed to build tools\offset_resolver.exe"
+        exit /b 1
+    )
+)
+
+call :print_success "Native tools built"
+goto :eof
+
+:copy_runtime_tools
+call :print_header "Handling Runtime Tools"
+if exist build\tools (
+    call :print_step "Removing existing runtime tools folder"
+    rmdir /s /q build\tools
+    if exist build\tools (
+        call :print_error "Failed to delete build\tools"
+        call :check_folder_permissions "build\tools"
+        exit /b 1
+    )
+)
+mkdir build\tools
+
+for %%f in (
+    "handle64.exe"
+    "mapsvc.exe"
+    "rmod.dll"
+) do (
+    call :print_step "Copying runtime tool %%~f"
+    copy /y "tools\%%~f" "build\tools\%%~f" >nul
+    if !errorlevel! neq 0 (
+        call :print_error "Failed to copy tools\%%~f"
+        exit /b 1
+    )
+)
+
+if "%LAB_TOOLS%"=="1" (
+    call :print_step "Creating separate lab_tools folder"
+    mkdir build\lab_tools
+    for %%f in (
+        "rmod_sniffer.dll"
+        "offset_resolver.exe"
+    ) do (
+        copy /y "tools\%%~f" "build\lab_tools\%%~f" >nul
+        if !errorlevel! neq 0 (
+            call :print_error "Failed to copy lab tool tools\%%~f"
+            exit /b 1
+        )
+    )
+)
+
+call :print_success "Runtime tools copied"
+goto :eof
+
+:audit_obfuscated_binary
+call :print_header "Auditing Obfuscated Binary"
+where python >nul 2>&1
+if !errorlevel! neq 0 (
+    call :print_warning "Python is not in PATH; skipping audit_binary_leaks.py"
+    exit /b 0
+)
+python tools\audit_binary_leaks.py %~1
+if !errorlevel! neq 0 (
+    call :print_error "Binary leak audit failed for %~1"
+    exit /b 1
+)
+call :print_success "Binary leak audit passed"
+goto :eof
+
+:validate_release_tools
+call :print_header "Validating Release Tools"
+for %%f in (
+    "build\tools\handle64.exe"
+    "build\tools\mapsvc.exe"
+    "build\tools\rmod.dll"
+) do (
+    if not exist %%~f (
+        call :print_error "Missing required release tool %%~f"
+        exit /b 1
+    )
+)
+if exist build\tools\rmod_sniffer.dll (
+    call :print_error "Production runtime tools contain rmod_sniffer.dll"
+    exit /b 1
+)
+if exist build\tools\offset_resolver.exe (
+    call :print_error "Production runtime tools contain offset_resolver.exe"
+    exit /b 1
+)
+call :print_success "Release tools validated"
 goto :eof
 
 :: Function to pause and exit with error code

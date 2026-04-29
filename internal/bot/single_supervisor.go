@@ -8,25 +8,33 @@ import (
 	"math/rand"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
+	"syscall"
 	"time"
 
-	"local/internal/svc/internal/gamelib/data"
-	"local/internal/svc/internal/gamelib/data/difficulty"
-	"local/internal/svc/internal/gamelib/data/item"
-	"local/internal/svc/internal/gamelib/data/skill"
-	"local/internal/svc/internal/gamelib/data/stat"
-	"local/internal/svc/internal/gamelib/memory"
 	"local/internal/svc/internal/action"
 	"local/internal/svc/internal/config"
 	ct "local/internal/svc/internal/context"
 	"local/internal/svc/internal/drop"
 	"local/internal/svc/internal/event"
 	"local/internal/svc/internal/game"
+	"local/internal/svc/internal/gamelib/data"
+	"local/internal/svc/internal/gamelib/data/difficulty"
+	"local/internal/svc/internal/gamelib/data/item"
+	"local/internal/svc/internal/gamelib/data/skill"
+	"local/internal/svc/internal/gamelib/data/stat"
+	"local/internal/svc/internal/gamelib/memory"
 	"local/internal/svc/internal/health"
 	"local/internal/svc/internal/presenter"
 	"local/internal/svc/internal/run"
 	"local/internal/svc/internal/utils"
+)
+
+var (
+	user32DLL                  = syscall.NewLazyDLL("user32.dll")
+	isHungAppWindowFn          = user32DLL.NewProc("IsHungAppWindow")
+	getWindowThreadProcessIdFn = user32DLL.NewProc("GetWindowThreadProcessId")
 )
 
 // Define a constant for the timeout on menu operations
@@ -63,6 +71,97 @@ func NewSinglePlayerSupervisor(name string, bot *Bot, statsHandler *StatsHandler
 }
 
 var ErrUnrecoverableClientState = errors.New("unrecoverable client state, forcing restart")
+
+func summarizeOpenMenus(m data.OpenMenus) string {
+	flags := make([]string, 0, 10)
+	if m.LoadingScreen {
+		flags = append(flags, "loading")
+	}
+	if m.Inventory {
+		flags = append(flags, "inventory")
+	}
+	if m.Character {
+		flags = append(flags, "character")
+	}
+	if m.SkillTree {
+		flags = append(flags, "skilltree")
+	}
+	if m.Waypoint {
+		flags = append(flags, "waypoint")
+	}
+	if m.Stash {
+		flags = append(flags, "stash")
+	}
+	if m.QuitMenu {
+		flags = append(flags, "quit")
+	}
+	if m.ChatOpen {
+		flags = append(flags, "chat")
+	}
+	if m.Cinematic {
+		flags = append(flags, "cinematic")
+	}
+	if m.MapShown {
+		flags = append(flags, "map")
+	}
+	if len(flags) == 0 {
+		return "-"
+	}
+	return strings.Join(flags, ",")
+}
+
+func (s *SinglePlayerSupervisor) startupDebugSnapshot() string {
+	ctx := s.bot.ctx
+	if ctx == nil || ctx.GameReader == nil || ctx.GameReader.Process == nil {
+		return "startup-state unavailable"
+	}
+
+	running, exitCode, statusErr := ctx.GameReader.Process.ProcessStatus()
+	statusPart := fmt.Sprintf("running=%t", running)
+	if statusErr != nil {
+		statusPart = fmt.Sprintf("running=? statusErr=%v", statusErr)
+	} else if !running {
+		statusPart = fmt.Sprintf("running=false exitCode=%#x", exitCode)
+	}
+
+	panels := ctx.GameReader.ReadAllPanels()
+	visibleRoots := make([]string, 0, 8)
+	for name, panel := range panels {
+		if panel.PanelEnabled && panel.PanelVisible {
+			visibleRoots = append(visibleRoots, name)
+		}
+	}
+	sort.Strings(visibleRoots)
+	if len(visibleRoots) > 8 {
+		visibleRoots = visibleRoots[:8]
+	}
+
+	return fmt.Sprintf(
+		"%s rawInGame=%t uiInGame=%t managerInGame=%t charSelect=%t lobby=%t online=%t blocking=%t selected=%q playerID=%d area=%d pos=(%d,%d) menus=%s visibleRoots=%s",
+		statusPart,
+		ctx.GameReader.InGame(),
+		ctx.Data.IsIngame,
+		ctx.Manager.InGame(),
+		ctx.GameReader.IsInCharacterSelectionScreen(),
+		ctx.GameReader.IsInLobby(),
+		ctx.GameReader.IsOnline(),
+		ctx.GameReader.IsBlocking(),
+		ctx.GameReader.GetSelectedCharacterName(),
+		ctx.Data.PlayerUnit.ID,
+		ctx.Data.PlayerUnit.Area,
+		ctx.Data.PlayerUnit.Position.X,
+		ctx.Data.PlayerUnit.Position.Y,
+		summarizeOpenMenus(ctx.Data.OpenMenus),
+		strings.Join(visibleRoots, "|"),
+	)
+}
+
+func (s *SinglePlayerSupervisor) logStartupState(label string) {
+	if s.bot.ctx == nil || s.bot.ctx.Logger == nil {
+		return
+	}
+	s.bot.ctx.Logger.Info(label, slog.String("state", s.startupDebugSnapshot()))
+}
 
 func (s *SinglePlayerSupervisor) orderRuns(runs []string) []string {
 
@@ -173,18 +272,26 @@ func (s *SinglePlayerSupervisor) Start() error {
 					slog.Any("panic", r))
 			}
 		}()
-		s.bot.ctx.Logger.Info("breadcrumb: calling RefreshGameData")
-		func() {
-			defer func() {
-				if r := recover(); r != nil {
-					s.bot.ctx.Logger.Error("RefreshGameData panic during Claude attach",
-						slog.Any("panic", r))
+		if s.bot.ctx.ClaudeAttachExisting {
+			s.bot.ctx.Logger.Info("Claude mode: attached to existing client; initializing presenter without pre-game probes")
+			s.initClaudePresenter()
+			s.bot.ctx.SwitchPriority(ct.PriorityPause)
+			event.Send(event.GamePaused(event.Text(s.name, "Claude mode active"), true))
+			s.bot.ctx.Logger.Info("Claude mode: READY — use /debug/* endpoints")
+			for {
+				select {
+				case <-ctx.Done():
+					return nil
+				default:
+					utils.Sleep(1000)
 				}
-			}()
+			}
+		}
+		s.bot.ctx.Logger.Info("Claude mode: fresh client start; skipping early InGame memory read")
+		if false && s.bot.ctx.Manager.InGame() {
 			s.bot.ctx.RefreshGameData()
-		}()
-		s.bot.ctx.Logger.Info("breadcrumb: RefreshGameData returned, checking InGame")
-		if s.bot.ctx.Manager.InGame() && s.bot.ctx.Data.PlayerUnit.Area != 0 {
+		}
+		if false && s.bot.ctx.Manager.InGame() && s.bot.ctx.Data.PlayerUnit.Area != 0 {
 			s.bot.ctx.Logger.Info("Claude mode: already in game, skipping entry...")
 			s.initClaudePresenter()
 			s.bot.ctx.SwitchPriority(ct.PriorityPause)
@@ -230,17 +337,19 @@ func (s *SinglePlayerSupervisor) Start() error {
 			utils.Sleep(1500)
 			s.bot.ctx.HID.PressKey(0x0D)
 			utils.Sleep(4000)
-			s.bot.ctx.RefreshGameData()
 			if s.bot.ctx.Manager.InGame() {
+				s.bot.ctx.RefreshGameData()
 				break
 			}
 		}
 
 		// Wait until in-game
 		for i := 0; i < 50; i++ {
-			s.bot.ctx.RefreshGameData()
-			if s.bot.ctx.Manager.InGame() && s.bot.ctx.Data.PlayerUnit.Area != 0 {
-				break
+			if s.bot.ctx.Manager.InGame() {
+				s.bot.ctx.RefreshGameData()
+				if s.bot.ctx.Data.PlayerUnit.Area != 0 {
+					break
+				}
 			}
 			utils.Sleep(200)
 		}
@@ -250,13 +359,15 @@ func (s *SinglePlayerSupervisor) Start() error {
 			return fmt.Errorf("claude mode: failed to enter game after retries")
 		}
 
-		s.bot.ctx.Logger.Info("Claude mode: IN GAME — switching to legacy mode...")
+		s.bot.ctx.Logger.Info("Claude mode: IN GAME — packet diagnostics only")
 		utils.Sleep(1000)
-		s.bot.ctx.HID.PressKey(0x47) // VK_G = toggle legacy graphics
-		utils.Sleep(500)
 
-		s.bot.ctx.Logger.Info("Claude mode: injecting presenter...")
-		s.initClaudePresenter()
+		if os.Getenv("DISABLE_CLAUDE_PRESENTER") == "1" {
+			s.bot.ctx.Logger.Warn("Claude mode: presenter disabled via DISABLE_CLAUDE_PRESENTER=1")
+		} else {
+			s.bot.ctx.Logger.Info("Claude mode: injecting presenter...")
+			s.initClaudePresenter()
+		}
 
 		s.bot.ctx.SwitchPriority(ct.PriorityPause)
 		event.Send(event.GamePaused(event.Text(s.name, "Claude mode active"), true))
@@ -406,8 +517,29 @@ func (s *SinglePlayerSupervisor) Start() error {
 			}
 		}
 
-		// In-game logic
+		// In-game logic. A transient/stale InGame() read is not enough here:
+		// wait until player data is populated and the loading screen cleared
+		// before we announce a new game or enter the run loop.
+		if err := s.bot.ctx.WaitForStableInGame(10 * time.Second); err != nil {
+			s.bot.ctx.Logger.Error("Post-menu game-entry validation failed",
+				slog.Any("error", err),
+				slog.Uint64("pid", uint64(s.bot.ctx.GameReader.Process.GetPID())),
+				slog.Bool("managerInGame", s.bot.ctx.Manager.InGame()),
+				slog.Int("playerID", int(s.bot.ctx.Data.PlayerUnit.ID)),
+				slog.Int("area", int(s.bot.ctx.Data.PlayerUnit.Area)))
+			if errors.Is(err, ct.ErrGameProcessExited) {
+				return ErrUnrecoverableClientState
+			}
+			timeSpentNotInGameStart = time.Now()
+			utils.Sleep(500)
+			continue
+		}
+
 		timeSpentNotInGameStart = time.Now()
+		if s.bot.ctx.HID != nil {
+			s.bot.ctx.HID.Disable("post-game-load full-packet run")
+			s.bot.ctx.Logger.Info("Game loaded; HID disabled for full-packet run")
+		}
 
 		stringRuns := make([]string, len(s.bot.ctx.CharacterCfg.Game.Runs))
 		for i, r := range s.bot.ctx.CharacterCfg.Game.Runs {
@@ -417,6 +549,7 @@ func (s *SinglePlayerSupervisor) Start() error {
 		if orderedRuns == nil {
 			return nil
 		}
+		developmentOnly := len(orderedRuns) == 1 && orderedRuns[0] == string(config.DevelopmentRun)
 
 		runs := run.BuildRuns(s.bot.ctx.CharacterCfg, orderedRuns)
 		gameStart := time.Now()
@@ -431,7 +564,7 @@ func (s *SinglePlayerSupervisor) Start() error {
 		// empty == empty and trigger "rejoin" → 0 runs remain → ExitGame loop
 		// observed 2026-04-20. Require a non-empty gameID to enable rejoin
 		// detection; offline play is treated as a fresh game every time.
-		currentGameID := s.bot.ctx.GameReader.LastGameName()
+		currentGameID := s.bot.ctx.Data.Game.LastGameName
 		if currentGameID != "" && s.bot.ctx.CompletedGameID == currentGameID {
 			completed := s.bot.ctx.GetCompletedRuns()
 			if len(completed) > 0 {
@@ -483,7 +616,7 @@ func (s *SinglePlayerSupervisor) Start() error {
 			s.bot.ctx.ResetCompletedRuns(currentGameID)
 		}
 
-		event.Send(event.GameCreated(event.Text(s.name, "New game created"), s.bot.ctx.GameReader.LastGameName(), s.bot.ctx.GameReader.LastGamePass()))
+		event.Send(event.GameCreated(event.Text(s.name, "New game created"), s.bot.ctx.Data.Game.LastGameName, s.bot.ctx.Data.Game.LastGamePassword))
 		s.bot.ctx.FailedToCreateGameAttempts = 0
 		s.bot.ctx.LastBuffAt = time.Time{}
 		s.bot.ctx.WeaponCacheReady = false // Force re-probe of weapon sets each new game
@@ -494,7 +627,7 @@ func (s *SinglePlayerSupervisor) Start() error {
 		partyRegistryEnabled := s.bot.ctx.CharacterCfg.Companion.Enabled &&
 			(s.bot.ctx.CharacterCfg.Companion.WaitForParty || s.bot.ctx.CharacterCfg.Companion.LeaderPriorityRuns)
 		if partyRegistryEnabled {
-			gameID := s.bot.ctx.GameReader.LastGameName()
+			gameID := s.bot.ctx.Data.Game.LastGameName
 			GetPartyRegistry().RegisterMember(s.name, gameID)
 			runNames := make([]string, len(s.bot.ctx.CharacterCfg.Game.Runs))
 			for i, r := range s.bot.ctx.CharacterCfg.Game.Runs {
@@ -512,8 +645,7 @@ func (s *SinglePlayerSupervisor) Start() error {
 			for attempt := 0; attempt < 3 && s.bot.ctx.Data.ActiveWeaponSlot != 0; attempt++ {
 				// Full-packet bot: always emit 0x50; no HID fallback (user 2026-04-19).
 				if s.bot.ctx.PacketSender != nil {
-					fL, fR, tL, tR := action.WeaponSwapGIDs(s.bot.ctx.Data)
-					if err := s.bot.ctx.PacketSender.SwapWeapon(fL, fR, tL, tR, uint8(s.bot.ctx.Data.ActiveWeaponSlot)); err != nil {
+					if err := s.bot.ctx.PacketSender.SwapWeaponFromData(s.bot.ctx.Data); err != nil {
 						s.bot.ctx.Logger.Warn("supervisor SwapWeapon packet failed", "err", err)
 					}
 				}
@@ -525,16 +657,16 @@ func (s *SinglePlayerSupervisor) Start() error {
 			}
 		}
 
-		// Dual-only presenter (rmod GTC64 IAT + TimerQueue, no Present detour).
-		// Required for action.pressSwapWeapons in-process WM_KEYDOWN via
-		// CallFnGameThread. Gated via ENABLE_DUAL_PRESENTER=1 because loading
-		// rmod during char-select flow breaks HID navigation — presenter must
-		// come up only once we're past the pre-game HID phase. Current solution
-		// is manual: user sets env var, bot loads presenter early, char select
-		// is already past when game loop reaches here on re-runs.
-		if os.Getenv("ENABLE_DUAL_PRESENTER") == "1" && firstRun {
-			s.bot.ctx.Logger.Info("Normal mode: activating dual-only presenter (ENABLE_DUAL_PRESENTER=1)")
-			s.initPresenterDualOnly()
+		// Normal-mode presenter is injected only after successful game entry.
+		// Injecting during title/char-select breaks menu navigation. Post-game
+		// timing matches the external full-packet bot model: game is stable,
+		// then the same presenter wiring used by Claude-mode packet tests is
+		// attached before production flow starts.
+		if os.Getenv("DISABLE_CLAUDE_PRESENTER") != "1" &&
+			os.Getenv("DISABLE_NORMAL_PRESENTER") != "1" &&
+			(s.bot.ctx.MemoryInjector == nil || s.bot.ctx.MemoryInjector.GetPresenter() == nil) {
+			s.bot.ctx.Logger.Info("Normal mode: activating Claude-equivalent presenter after game entry")
+			s.initClaudePresenter()
 		}
 
 		if s.bot.ctx.CharacterCfg.Companion.Enabled && s.bot.ctx.CharacterCfg.Companion.Leader {
@@ -638,108 +770,140 @@ func (s *SinglePlayerSupervisor) Start() error {
 			}()
 		}
 
-		// In-Game Activity Monitor
-		go func() {
-			ticker := time.NewTicker(activityCheckInterval)
-			defer ticker.Stop()
-			var lastPosition data.Position
-			var stuckSince time.Time
-			var droppedMouseItem bool // Track if we've already tried dropping mouse item
+		// In-Game Activity Monitor. Development mode intentionally keeps the
+		// character idle while HTTP/debug tooling drives experiments.
+		if !developmentOnly {
+			go func() {
+				ticker := time.NewTicker(activityCheckInterval)
+				defer ticker.Stop()
+				var lastPosition data.Position
+				var stuckSince time.Time
+				var droppedMouseItem bool // Track if we've already tried dropping mouse item
 
-			// Initial position check
-			if s.bot.ctx.GameReader.InGame() && s.bot.ctx.Data.PlayerUnit.ID > 0 {
-				lastPosition = s.bot.ctx.Data.PlayerUnit.Position
-			}
+				// Initial position check
+				if s.bot.ctx.GameReader.InGame() && s.bot.ctx.Data.PlayerUnit.ID > 0 {
+					lastPosition = s.bot.ctx.Data.PlayerUnit.Position
+				}
 
-			for {
-				select {
-				case <-runCtx.Done(): // Exit when the run is over (either completed, errored, or timed out)
-					return
-				case <-ticker.C:
-					if s.bot.ctx.GetPriority() == ct.PriorityPause {
-						continue
-					}
-
-					if !s.bot.ctx.GameReader.InGame() || s.bot.ctx.Data.PlayerUnit.ID == 0 {
-						continue
-					}
-
-					// Skip stuck detection while waiting for party members
-					if s.bot.ctx.WaitingForParty.Load() {
-						stuckSince = time.Time{}
-						droppedMouseItem = false
-						lastPosition = s.bot.ctx.Data.PlayerUnit.Position
-						continue
-					}
-
-					// Check for sustained high ping
-					if pingMonitor.CheckPing(s.bot.ctx.Data.Game.Ping) {
-						s.bot.ctx.Logger.Error("Ping monitor triggered game exit.")
+				for {
+					select {
+					case <-runCtx.Done(): // Exit when the run is over (either completed, errored, or timed out)
 						return
-					}
-
-					currentPos := s.bot.ctx.Data.PlayerUnit.Position
-					lastAction := s.bot.ctx.ContextDebug[s.bot.ctx.GetPriority()].LastAction
-					isAllocating := lastAction == "AutoRespecIfNeeded" ||
-						lastAction == "EnsureStatPoints" ||
-						lastAction == "EnsureSkillPoints" ||
-						lastAction == "EnsureSkillBindings" ||
-						lastAction == "AllocateStatPointPacket" ||
-						lastAction == "LearnSkillPacket"
-					if isAllocating && (s.bot.ctx.Data.OpenMenus.Character || s.bot.ctx.Data.OpenMenus.SkillTree || s.bot.ctx.Data.OpenMenus.Inventory) {
-						stuckSince = time.Time{}
-						droppedMouseItem = false
-						lastPosition = currentPos
-						continue
-					}
-					if currentPos.X == lastPosition.X && currentPos.Y == lastPosition.Y {
-						if stuckSince.IsZero() {
-							stuckSince = time.Now()
-							droppedMouseItem = false // Reset flag when first detecting stuck
+					case <-ticker.C:
+						if s.bot.ctx.GetPriority() == ct.PriorityPause {
+							continue
 						}
 
-						stuckDuration := time.Since(stuckSince)
+						if !s.bot.ctx.GameReader.InGame() || s.bot.ctx.Data.PlayerUnit.ID == 0 {
+							continue
+						}
 
-						// After 90 seconds stuck, try dropping mouse item
-						if stuckDuration > 90*time.Second {
-							if len(s.bot.ctx.Data.Inventory.ByLocation(item.LocationCursor)) > 0 && !droppedMouseItem {
-								s.bot.ctx.Logger.Warn("Player stuck for 90 seconds - Clicking to drop mouse item - Continuing to monitor for movement...")
-								s.bot.ctx.HID.Click(game.LeftButton, 500, 500)
-								droppedMouseItem = true
-							} else if s.bot.ctx.IsAllocatingStatsOrSkills.Load() {
-								// We don't want a false positive on being stuck when the character is respeccing
-								s.bot.ctx.Logger.Debug("Player stuck for 90 seconds - Currently respeccing - letting it continue.")
+						// Skip stuck detection while waiting for party members
+						if s.bot.ctx.WaitingForParty.Load() {
+							stuckSince = time.Time{}
+							droppedMouseItem = false
+							lastPosition = s.bot.ctx.Data.PlayerUnit.Position
+							continue
+						}
+
+						// Check for sustained high ping
+						if pingMonitor.CheckPing(s.bot.ctx.Data.Game.Ping) {
+							s.bot.ctx.Logger.Error("Ping monitor triggered game exit.")
+							return
+						}
+
+						currentPos := s.bot.ctx.Data.PlayerUnit.Position
+						lastAction := s.bot.ctx.ContextDebug[s.bot.ctx.GetPriority()].LastAction
+						isAllocating := lastAction == "AutoRespecIfNeeded" ||
+							lastAction == "EnsureStatPoints" ||
+							lastAction == "EnsureSkillPoints" ||
+							lastAction == "EnsureSkillBindings" ||
+							lastAction == "AllocateStatPointPacket" ||
+							lastAction == "LearnSkillPacket"
+						if isAllocating && (s.bot.ctx.Data.OpenMenus.Character || s.bot.ctx.Data.OpenMenus.SkillTree || s.bot.ctx.Data.OpenMenus.Inventory) {
+							stuckSince = time.Time{}
+							droppedMouseItem = false
+							lastPosition = currentPos
+							continue
+						}
+						if currentPos.X == lastPosition.X && currentPos.Y == lastPosition.Y {
+							if stuckSince.IsZero() {
 								stuckSince = time.Now()
-							} else if droppedMouseItem {
-								s.bot.ctx.Logger.Warn("Player still stuck after dropping the item - Forcing client restart.")
+								droppedMouseItem = false // Reset flag when first detecting stuck
+							}
+
+							stuckDuration := time.Since(stuckSince)
+
+							// After 90 seconds stuck, try dropping mouse item
+							if stuckDuration > 90*time.Second {
+								if len(s.bot.ctx.Data.Inventory.ByLocation(item.LocationCursor)) > 0 && !droppedMouseItem {
+									s.bot.ctx.Logger.Warn("Player stuck for 90 seconds - dropping mouse item without HID - Continuing to monitor for movement...")
+									if s.bot.ctx.HID != nil && s.bot.ctx.HID.IsDisabled() && s.bot.ctx.PacketSender != nil {
+										if err := s.bot.ctx.PacketSender.ClickAt(500, 500, game.MouseLeft); err != nil {
+											s.bot.ctx.Logger.Warn("Failed to drop mouse item through packet click", slog.Any("error", err))
+										}
+									} else {
+										s.bot.ctx.HID.Click(game.LeftButton, 500, 500)
+									}
+									droppedMouseItem = true
+								} else if s.bot.ctx.IsAllocatingStatsOrSkills.Load() {
+									// We don't want a false positive on being stuck when the character is respeccing
+									s.bot.ctx.Logger.Debug("Player stuck for 90 seconds - Currently respeccing - letting it continue.")
+									stuckSince = time.Now()
+								} else if droppedMouseItem {
+									s.bot.ctx.Logger.Warn("Player still stuck after dropping the item - Forcing client restart.")
+									if err := s.KillClient(); err != nil {
+										s.bot.ctx.Logger.Error(fmt.Sprintf("Activity monitor failed to kill client: %v", err))
+									}
+									runCancel()
+									return
+								}
+							}
+
+							// After 3 minutes stuck, force restart
+							if stuckDuration > maxStuckDuration {
+								s.bot.ctx.Logger.Error(fmt.Sprintf("In-game activity monitor: Player has been stuck for over %s. Forcing client restart.", maxStuckDuration))
 								if err := s.KillClient(); err != nil {
 									s.bot.ctx.Logger.Error(fmt.Sprintf("Activity monitor failed to kill client: %v", err))
 								}
-								runCancel()
+								runCancel() // Also cancel the context to stop bot.Run gracefully
 								return
 							}
+						} else {
+							stuckSince = time.Time{} // Reset timer if the player has moved
+							droppedMouseItem = false // Reset flag if player moved
 						}
-
-						// After 3 minutes stuck, force restart
-						if stuckDuration > maxStuckDuration {
-							s.bot.ctx.Logger.Error(fmt.Sprintf("In-game activity monitor: Player has been stuck for over %s. Forcing client restart.", maxStuckDuration))
-							if err := s.KillClient(); err != nil {
-								s.bot.ctx.Logger.Error(fmt.Sprintf("Activity monitor failed to kill client: %v", err))
-							}
-							runCancel() // Also cancel the context to stop bot.Run gracefully
-							return
-						}
-					} else {
-						stuckSince = time.Time{} // Reset timer if the player has moved
-						droppedMouseItem = false // Reset flag if player moved
+						lastPosition = currentPos
 					}
-					lastPosition = currentPos
+				}
+			}()
+		}
+
+		if os.Getenv("CODEX_PAUSE_BEFORE_BOT_RUN") == "1" {
+			s.bot.ctx.Logger.Warn("Debug pause before bot.Run requested; town/native capture can be performed now")
+			s.bot.ctx.SwitchPriority(ct.PriorityPause)
+			event.Send(event.GamePaused(event.Text(s.name, "Debug pause before bot.Run"), true))
+			for s.bot.ctx.GetPriority() == ct.PriorityPause {
+				select {
+				case <-runCtx.Done():
+					return runCtx.Err()
+				default:
+					utils.Sleep(500)
 				}
 			}
-		}()
+			s.bot.ctx.Logger.Info("Debug pause before bot.Run resumed")
+		}
 
 		err = s.bot.Run(runCtx, firstRun, runs)
 		firstRun = false
+		if s.bot.ctx.HID != nil && s.bot.ctx.HID.BlockedCount() > 0 {
+			blocked := s.bot.ctx.HID.BlockedCount()
+			s.bot.ctx.Logger.Error("Full-packet HID guard violation; run is invalid",
+				slog.Uint64("blockedHIDActions", blocked))
+			if err == nil {
+				err = fmt.Errorf("full-packet HID guard violation: %d blocked HID actions after game load", blocked)
+			}
+		}
 
 		if err != nil {
 			// Track the failed run so rejoin skips it (prevents infinite retry loops)
@@ -1335,8 +1499,27 @@ func (s *SinglePlayerSupervisor) callManagerWithTimeout(fn func() error) error {
 	case err := <-errChan:
 		return err
 	case <-time.After(menuActionTimeout):
+		if s.isGameWindowHung() {
+			s.bot.ctx.Logger.Error("[Menu Flow]: manager action timed out and D2R window is hung; killing client",
+				slog.Duration("timeout", menuActionTimeout),
+				slog.Uint64("pid", uint64(s.bot.ctx.GameReader.Process.GetPID())))
+			if killErr := s.KillClient(); killErr != nil {
+				s.bot.ctx.Logger.Error("[Menu Flow]: failed to kill hung client after manager timeout",
+					slog.Any("error", killErr))
+			}
+			return ErrUnrecoverableClientState
+		}
 		return fmt.Errorf("menu action timed out after %s", menuActionTimeout)
 	}
+}
+
+func (s *SinglePlayerSupervisor) isGameWindowHung() bool {
+	if s == nil || s.bot == nil || s.bot.ctx == nil || s.bot.ctx.GameReader == nil || s.bot.ctx.GameReader.HWND == 0 {
+		return false
+	}
+
+	ret, _, _ := isHungAppWindowFn.Call(uintptr(s.bot.ctx.GameReader.HWND))
+	return ret != 0
 }
 
 func (s *SinglePlayerSupervisor) HandleMenuFlow() error {
@@ -1345,6 +1528,12 @@ func (s *SinglePlayerSupervisor) HandleMenuFlow() error {
 	if s.bot.ctx.Data.OpenMenus.LoadingScreen {
 		utils.Sleep(500)
 		return fmt.Errorf("loading screen")
+	}
+
+	if !s.bot.ctx.Manager.InGame() && s.bot.ctx.HID != nil && s.bot.ctx.HID.IsDisabled() {
+		s.disablePacketRuntimeForMenu()
+		s.bot.ctx.Logger.Info("Menu flow reached; HID re-enabled before next game load")
+		s.bot.ctx.HID.Enable("menu flow before game load")
 	}
 
 	s.bot.ctx.Logger.Debug("[Menu Flow]: Starting menu flow ...")
@@ -1391,6 +1580,40 @@ func (s *SinglePlayerSupervisor) HandleMenuFlow() error {
 	}
 
 	return s.HandleStandardMenuFlow()
+}
+
+func (s *SinglePlayerSupervisor) disablePacketRuntimeForMenu() {
+	if s == nil || s.bot == nil || s.bot.ctx == nil {
+		return
+	}
+	ctx := s.bot.ctx
+	var presReady bool
+	if ctx.MemoryInjector != nil {
+		if pres := ctx.MemoryInjector.GetPresenter(); pres != nil && pres.IsReady() {
+			presReady = true
+		}
+	}
+	if ctx.GameReader != nil && ctx.GameReader.Process != nil && !presReady {
+		ctx.GameReader.Process.SetExternalDualSender(nil)
+		ctx.GameReader.Process.SetExternalClick(nil)
+		ctx.GameReader.Process.SetExternalForceClick(nil)
+		ctx.GameReader.Process.SetExternalPostKey(nil)
+		ctx.GameReader.Process.SetPreferredPacketThreadID(0)
+	}
+	if ctx.MemoryInjector == nil {
+		return
+	}
+	hadPresenter := ctx.MemoryInjector.GetPresenter() != nil
+	if hadPresenter {
+		ctx.Logger.Info("Menu flow: presenter retained for next in-game packet run")
+	}
+	if ctx.MemoryInjector.CursorOverrideActive() {
+		if err := ctx.MemoryInjector.DisableCursorOverride(); err != nil {
+			ctx.Logger.Warn("Menu flow: cursor override cleanup failed", slog.Any("error", err))
+		} else {
+			ctx.Logger.Info("Menu flow: cursor override disabled before menu input")
+		}
+	}
 }
 
 func (s *SinglePlayerSupervisor) HandleStandardMenuFlow() error {
@@ -1621,6 +1844,7 @@ func (s *SinglePlayerSupervisor) initPresenterDualOnly() {
 		return
 	}
 
+	s.bot.ctx.Logger.Info("Normal mode: dual-only presenter bootstrap start (post-game timing)")
 	gr := s.bot.ctx.GameReader
 	gi := s.bot.ctx.MemoryInjector
 	pid := gr.GetPID()
@@ -1657,12 +1881,22 @@ func (s *SinglePlayerSupervisor) initPresenterDualOnly() {
 	// SKIP Present hook — only GetTickCount64 IAT + TimerQueue worker. Avoids
 	// render thread slowdown that breaks HID clicks in normal mode (test35/36).
 	pres.SetSkipPresentHook(true)
+	s.bot.ctx.Logger.Info("Normal mode: dual-only presenter init attempt",
+		slog.String("path", presenterDLLPath),
+		slog.Uint64("pid", uint64(pid)))
 	if initErr := pres.Init(fnSendPacket, uiNetManAddr, realClickFn, uintptr(hwnd), mirrorBufAddr, dualSendWrapAddr); initErr != nil {
 		s.bot.ctx.Logger.Error("dual-only presenter init FAILED", slog.Any("error", initErr))
 		return
 	}
 
 	gi.SetPresenter(pres)
+	if tid, _, _ := getWindowThreadProcessIdFn.Call(uintptr(hwnd), 0); tid != 0 {
+		pres.SetGameThreadID(uint32(tid))
+		gr.Process.SetPreferredPacketThreadID(uint32(tid))
+		s.bot.ctx.Logger.Info("Normal mode: D2R window thread recorded; packet APC sender pinned to window/game thread",
+			slog.Uint64("tid", uint64(tid)),
+			slog.Uint64("hwnd", uint64(uintptr(hwnd))))
+	}
 	// NOTE 2026-04-20 test40: tried SendDualPacketGT — D2R crashes 0xC0000005
 	// because dual_send_wrap's Arxan tamper byte-rotates caller return address.
 	// When called from GTC64 thunk (our allocated page), rotation corrupts our
@@ -1670,6 +1904,19 @@ func (s *SinglePlayerSupervisor) initPresenterDualOnly() {
 	// gadgets from D2R.text (Arxan tamper harmless self-mod of D2R code).
 	// Reverted to SendDualPacket (render-thread) — same limitation but D2R survives.
 	gr.Process.SetExternalDualSender(pres.SendDualPacket)
+	gr.Process.SetExternalPostKey(func(vk byte) error {
+		return gi.PostKeyInProcess(uintptr(hwnd), vk)
+	})
+	gr.Process.SetExternalCallFn(pres.CallFn)
+	gr.Process.SetExternalCallFnGameThread(pres.CallFnGameThread)
+	if realClickFn != 0 {
+		gr.Process.SetExternalClick(func(x, y int32, btn byte) error {
+			return pres.NativeClick(x, y, btn)
+		})
+		gr.Process.SetExternalForceClick(func(x, y int32) error {
+			return pres.ForceClick(x, y)
+		})
+	}
 	forceMoveAddr := gr.Process.GetModuleBase() + 0x19D25B4 + 0x49C + 4
 	pres.SetForceMoveAddr(forceMoveAddr)
 	s.bot.ctx.Logger.Info("Normal mode: dual-only presenter initialized — dual-buffer packets routed via rmod")
@@ -1692,23 +1939,16 @@ func (s *SinglePlayerSupervisor) initClaudePresenter() {
 		return
 	}
 
-	// In Claude mode, prefer the sniffer-enabled DLL (in-process buf0/buf1
-	// polling). Falls back to rmod.dll if rmod_sniffer.dll is missing.
-	presenterDLLName := "rmod.dll"
-	if os.Getenv("CLAUDE_MODE") == "1" {
-		if _, err := os.Stat(filepath.Join("tools", "rmod_sniffer.dll")); err == nil {
-			presenterDLLName = "rmod_sniffer.dll"
-			s.bot.ctx.Logger.Info("Claude mode: using sniffer-enabled DLL (initClaudePresenter)")
-		}
-	}
-	presenterDLLPath := filepath.Join("tools", presenterDLLName)
-	if absPath, err := filepath.Abs(presenterDLLPath); err == nil {
-		presenterDLLPath = absPath
-	}
-	if _, statErr := os.Stat(presenterDLLPath); statErr != nil {
-		s.bot.ctx.Logger.Error("presenter DLL not found", slog.String("path", presenterDLLPath))
+	s.bot.ctx.Logger.Info("Claude mode: presenter bootstrap start")
+	presenterDLLName, presenterDLLPath, presenterDLLReason, dllErr := resolvePresenterDLL(true)
+	if dllErr != nil {
+		s.bot.ctx.Logger.Error("presenter DLL resolution failed", slog.Any("error", dllErr))
 		return
 	}
+	s.bot.ctx.Logger.Info("Claude mode: presenter DLL resolved",
+		slog.String("dll", presenterDLLName),
+		slog.String("path", presenterDLLPath),
+		slog.String("reason", presenterDLLReason))
 
 	gr := s.bot.ctx.GameReader
 	gi := s.bot.ctx.MemoryInjector
@@ -1736,13 +1976,34 @@ func (s *SinglePlayerSupervisor) initClaudePresenter() {
 	}
 
 	pres := presenter.New(pid, presenterDLLPath)
+	if os.Getenv("CLAUDE_USE_PRESENT_HOOK") != "1" {
+		pres.SetSkipPresentHook(true)
+	}
+	s.bot.ctx.Logger.Info("Claude mode: presenter init attempt",
+		slog.String("dll", presenterDLLName),
+		slog.String("path", presenterDLLPath),
+		slog.Bool("skipPresentHook", os.Getenv("CLAUDE_USE_PRESENT_HOOK") != "1"),
+		slog.Uint64("pid", uint64(pid)))
 	if initErr := pres.Init(fnSendPacket, uiNetManAddr, realClickFn, uintptr(hwnd), mirrorBufAddr, dualSendWrapAddr); initErr != nil {
 		s.bot.ctx.Logger.Error("presenter init FAILED", slog.Any("error", initErr))
 		return
 	}
 
+	if loadErr := gi.Load(); loadErr != nil {
+		s.bot.ctx.Logger.Error("Claude mode: MemoryInjector.Load after presenter init FAILED", slog.Any("error", loadErr))
+		return
+	}
+
 	gi.SetPresenter(pres)
+	if tid, _, _ := getWindowThreadProcessIdFn.Call(uintptr(hwnd), 0); tid != 0 {
+		pres.SetGameThreadID(uint32(tid))
+		gr.Process.SetPreferredPacketThreadID(uint32(tid))
+		s.bot.ctx.Logger.Info("Claude mode: D2R window thread recorded; packet APC sender pinned to window/game thread",
+			slog.Uint64("tid", uint64(tid)),
+			slog.Uint64("hwnd", uint64(uintptr(hwnd))))
+	}
 	gr.Process.SetExternalCallFn(pres.CallFn)
+	gr.Process.SetExternalCallFnGameThread(pres.CallFnGameThread)
 	gr.Process.SetExternalWriteMem(pres.WriteMem)
 	// GID-6 ROP read wiring. The hook itself is always registered; whether
 	// reads actually route through it depends on (a) the ROP_READ env var
@@ -1811,6 +2072,17 @@ func (s *SinglePlayerSupervisor) initClaudePresenter() {
 	// gr.Process.SetExternalSender(pres.SendPacket)
 	// gr.Process.SetExternalUISender(pres.SendUIPacket) // DISABLED: render thread crash
 	gr.Process.SetExternalDualSender(pres.SendDualPacket)
+	gr.Process.SetExternalPostKey(func(vk byte) error {
+		return gi.PostKeyInProcess(uintptr(hwnd), vk)
+	})
+	if realClickFn != 0 {
+		gr.Process.SetExternalClick(func(x, y int32, btn byte) error {
+			return pres.ClickAt(x, y, presenter.ClickButton(btn))
+		})
+		gr.Process.SetExternalForceClick(func(x, y int32) error {
+			return pres.ForceClick(x, y)
+		})
+	}
 	forceMoveAddr := gr.Process.GetModuleBase() + 0x19D25B4 + 0x49C + 4
 	pres.SetForceMoveAddr(forceMoveAddr)
 	s.bot.ctx.Logger.Info("Claude mode: presenter initialized (rmod.dll injected, all send paths)")

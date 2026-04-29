@@ -23,11 +23,14 @@
 package main
 
 import (
+	"encoding/binary"
 	"encoding/hex"
 	"flag"
 	"fmt"
 	"os"
 	"os/signal"
+	"strconv"
+	"strings"
 	"sync/atomic"
 	"syscall"
 	"time"
@@ -64,16 +67,16 @@ const (
 	outputDebugStringEvent  = 8
 	ripEvent                = 9
 
-	excBreakpoint  = 0x80000003
-	excSingleStep  = 0x80000004
+	excBreakpoint = 0x80000003
+	excSingleStep = 0x80000004
 
-	contextAmd64           = 0x00100000
-	contextControl         = contextAmd64 | 0x1
-	contextInteger         = contextAmd64 | 0x2
-	contextFloat           = contextAmd64 | 0x8
-	contextDebugRegisters  = contextAmd64 | 0x10
-	contextFullPlusDebug   = contextControl | contextInteger | contextFloat | contextDebugRegisters
-	contextDebugRegsOnly   = contextDebugRegisters
+	contextAmd64          = 0x00100000
+	contextControl        = contextAmd64 | 0x1
+	contextInteger        = contextAmd64 | 0x2
+	contextFloat          = contextAmd64 | 0x8
+	contextDebugRegisters = contextAmd64 | 0x10
+	contextFullPlusDebug  = contextControl | contextInteger | contextFloat | contextDebugRegisters
+	contextDebugRegsOnly  = contextDebugRegisters
 
 	// AMD64 CONTEXT field offsets (Windows ABI). Verified against winnt.h.
 	ctxBufSize   = 1232
@@ -134,6 +137,121 @@ const (
 	maxPacketBytes = 64
 )
 
+var npcOpcodeFilter = map[byte]bool{
+	0x03: true, // RunToLocation, useful to verify close-range NPC setup
+	0x2F: true, // NPCInit
+	0x30: true, // NPCCancel
+	0x32: true, // NPCBuy
+	0x33: true, // NPCSell
+	0x34: true, // NPCIdentify/cube-context path
+	0x38: true, // NPCAction / dialog option
+	0x40: true, // UnitInteract
+	0x41: true, // InteractEx / UseWaypoint/TP
+	0x4D: true, // PreInteract
+}
+
+func parseOpcodeFilter(raw string, includeNPC bool) (map[byte]bool, error) {
+	var filter map[byte]bool
+	if includeNPC {
+		filter = make(map[byte]bool, len(npcOpcodeFilter))
+		for op := range npcOpcodeFilter {
+			filter[op] = true
+		}
+	}
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return filter, nil
+	}
+	if filter == nil {
+		filter = make(map[byte]bool)
+	}
+	for _, part := range strings.Split(raw, ",") {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+		part = strings.TrimPrefix(strings.ToLower(part), "0x")
+		v, err := strconv.ParseUint(part, 16, 8)
+		if err != nil {
+			return nil, fmt.Errorf("%q: %w", part, err)
+		}
+		filter[byte(v)] = true
+	}
+	return filter, nil
+}
+
+func annotatePacket(p []byte) string {
+	if len(p) == 0 {
+		return ""
+	}
+	switch p[0] {
+	case 0x03:
+		if len(p) >= 9 {
+			x := binary.LittleEndian.Uint16(p[1:3])
+			y := binary.LittleEndian.Uint16(p[3:5])
+			return fmt.Sprintf("RunToLocation x=%d y=%d", x, y)
+		}
+	case 0x2F:
+		if len(p) >= 5 {
+			return fmt.Sprintf("NPCInit npc=0x%X", binary.LittleEndian.Uint32(p[1:5]))
+		}
+	case 0x30:
+		if len(p) >= 5 {
+			return fmt.Sprintf("NPCCancel npc=0x%X", binary.LittleEndian.Uint32(p[1:5]))
+		}
+	case 0x32:
+		if len(p) >= 22 {
+			price := binary.LittleEndian.Uint32(p[1:5])
+			item := binary.LittleEndian.Uint32(p[5:9])
+			npc := binary.LittleEndian.Uint32(p[9:13])
+			return fmt.Sprintf("NPCBuy item=0x%X npc=0x%X price=%d", item, npc, price)
+		}
+	case 0x33:
+		if len(p) >= 22 {
+			price := binary.LittleEndian.Uint32(p[1:5])
+			item := binary.LittleEndian.Uint32(p[5:9])
+			npc := binary.LittleEndian.Uint32(p[9:13])
+			return fmt.Sprintf("NPCSell item=0x%X npc=0x%X price=%d", item, npc, price)
+		}
+	case 0x34:
+		if len(p) >= 21 {
+			item := binary.LittleEndian.Uint32(p[1:5])
+			npc := binary.LittleEndian.Uint32(p[5:9])
+			return fmt.Sprintf("NPCIdentify item=0x%X npc=0x%X", item, npc)
+		}
+	case 0x38:
+		if len(p) >= 9 {
+			action := binary.LittleEndian.Uint32(p[1:5])
+			npc := binary.LittleEndian.Uint32(p[5:9])
+			return fmt.Sprintf("NPCAction9 action=%d npc=0x%X", action, npc)
+		}
+		if len(p) >= 6 {
+			action := binary.LittleEndian.Uint32(p[1:5])
+			return fmt.Sprintf("NPCAction6 action=%d term=0x%02X", action, p[5])
+		}
+	case 0x40:
+		if len(p) >= 13 {
+			unitType := binary.LittleEndian.Uint32(p[1:5])
+			gid := binary.LittleEndian.Uint32(p[5:9])
+			return fmt.Sprintf("UnitInteract type=%d gid=0x%X", unitType, gid)
+		}
+		if len(p) >= 5 {
+			return fmt.Sprintf("UnitInteract gid=0x%X", binary.LittleEndian.Uint32(p[1:5]))
+		}
+	case 0x41:
+		if len(p) >= 13 {
+			gid := binary.LittleEndian.Uint32(p[1:5])
+			action := binary.LittleEndian.Uint32(p[5:9])
+			return fmt.Sprintf("InteractEx/UseObject gid=0x%X action=%d", gid, action)
+		}
+	case 0x4D:
+		if len(p) >= 5 {
+			return fmt.Sprintf("PreInteract unit=0x%X", binary.LittleEndian.Uint32(p[1:5]))
+		}
+	}
+	return ""
+}
+
 // DEBUG_EVENT layout on x64. The union starts at offset 16 and the largest
 // member is EXCEPTION_DEBUG_INFO (~156 bytes). We use a fixed buffer and
 // pull fields out by offset, same approach as the rmod CONTEXT handling.
@@ -149,11 +267,12 @@ func (e *debugEvent) unionPtr() unsafe.Pointer {
 }
 
 // EXCEPTION_DEBUG_INFO at union+0:
-//   ExceptionRecord (EXCEPTION_RECORD64):
-//     +0  ExceptionCode      u32
-//     +4  ExceptionFlags     u32
-//     +8  ExceptionRecord    u64
-//     +16 ExceptionAddress   u64
+//
+//	ExceptionRecord (EXCEPTION_RECORD64):
+//	  +0  ExceptionCode      u32
+//	  +4  ExceptionFlags     u32
+//	  +8  ExceptionRecord    u64
+//	  +16 ExceptionAddress   u64
 func (e *debugEvent) excCode() uint32 {
 	return *(*uint32)(unsafe.Pointer(&e[16]))
 }
@@ -162,18 +281,20 @@ func (e *debugEvent) excAddress() uint64 {
 }
 
 // CREATE_THREAD_DEBUG_INFO at union+0:
-//   +0 hThread        uintptr
-//   +8 ThreadLocalBase uintptr
-//   +16 StartAddress  uintptr
+//
+//	+0 hThread        uintptr
+//	+8 ThreadLocalBase uintptr
+//	+16 StartAddress  uintptr
 func (e *debugEvent) createThreadHandle() uintptr {
 	return *(*uintptr)(unsafe.Pointer(&e[16]))
 }
 
 // CREATE_PROCESS_DEBUG_INFO at union+0:
-//   +0  hFile             uintptr
-//   +8  hProcess          uintptr
-//   +16 hThread           uintptr
-//   +24 BaseOfImage       uintptr
+//
+//	+0  hFile             uintptr
+//	+8  hProcess          uintptr
+//	+16 hThread           uintptr
+//	+24 BaseOfImage       uintptr
 func (e *debugEvent) createProcessHandle() uintptr {
 	return *(*uintptr)(unsafe.Pointer(&e[16+8]))
 }
@@ -254,9 +375,9 @@ func installBothHwbpOnHandle(hThread uintptr, sendFn, uiSendFn uint64) error {
 // intermediate result fails sanity checks. ALL THREE indirections must
 // produce values in the expected memory regions:
 //
-//   ui_netman_instance = *(base + uiRVA)            ; must be HEAP (not 0, not in code)
-//   vtable             = *(ui_netman_instance + 0)  ; MUST be in CODE/RDATA range
-//   ui_send_fn         = *(vtable + 0x28)           ; MUST be in CODE range
+//	ui_netman_instance = *(base + uiRVA)            ; must be HEAP (not 0, not in code)
+//	vtable             = *(ui_netman_instance + 0)  ; MUST be in CODE/RDATA range
+//	ui_send_fn         = *(vtable + 0x28)           ; MUST be in CODE range
 //
 // If the vtable pointer is not in code range, the chain is wrong (probably
 // the global RVA shifted between D2R patches) — return 0 and let the caller
@@ -325,9 +446,9 @@ func resolveUISendFn(hProc windows.Handle, base uint64, uiRVA uint64) (uint64, s
 // PEB address is found via NtQueryInformationProcess(ProcessBasicInformation).
 
 var (
-	ntdll                          = windows.NewLazySystemDLL("ntdll.dll")
-	procNtQueryInformationProcess  = ntdll.NewProc("NtQueryInformationProcess")
-	procWriteProcessMemory         = kernel32.NewProc("WriteProcessMemory")
+	ntdll                         = windows.NewLazySystemDLL("ntdll.dll")
+	procNtQueryInformationProcess = ntdll.NewProc("NtQueryInformationProcess")
+	procWriteProcessMemory        = kernel32.NewProc("WriteProcessMemory")
 )
 
 type processBasicInformation struct {
@@ -388,12 +509,14 @@ func patchPEBAntiDebug(hProc windows.Handle, _ uint32) error {
 // ------------- main -------------
 
 var (
-	flagPid     = flag.Int("pid", 0, "PID of D2R.exe to attach to")
-	flagOut     = flag.String("out", "", "Optional file to mirror packet log into")
-	flagMax     = flag.Int("max", 0, "Stop after capturing N packets (0 = unlimited)")
-	flagDryRun  = flag.Bool("dry-run", false, "Attach as debugger only — no DR0 install, no context modification")
-	flagNoBP    = flag.Bool("no-bp", false, "Install DR0 but on BP fire just log RCX/RDX, don't read packet, don't modify ctx")
-	flagProbe   = flag.Bool("probe", false, "Install DR0 only on initial thread (not on subsequent CREATE_THREAD events)")
+	flagPid      = flag.Int("pid", 0, "PID of D2R.exe to attach to")
+	flagOut      = flag.String("out", "", "Optional file to mirror packet log into")
+	flagMax      = flag.Int("max", 0, "Stop after capturing N packets (0 = unlimited)")
+	flagOps      = flag.String("op", "", "Comma-separated opcode filter, e.g. 0x2f,0x38,0x30")
+	flagNPC      = flag.Bool("npc", false, "Only print NPC-related outgoing packets")
+	flagDryRun   = flag.Bool("dry-run", false, "Attach as debugger only — no DR0 install, no context modification")
+	flagNoBP     = flag.Bool("no-bp", false, "Install DR0 but on BP fire just log RCX/RDX, don't read packet, don't modify ctx")
+	flagProbe    = flag.Bool("probe", false, "Install DR0 only on initial thread (not on subsequent CREATE_THREAD events)")
 	flagPatchPEB = flag.Bool("patch-peb", false, "Before attach, clear PEB.BeingDebugged & NtGlobalFlag in D2R via WPM")
 	flagDuration = flag.Int("duration", 60, "Auto-detach after N seconds (safety net)")
 	flagUI       = flag.Bool("ui", false, "Also install DR1 HWBP on UI NetMan vtable[5] (sell/buy/identify/etc.). OFF by default — needs verified RVA per D2R version.")
@@ -403,7 +526,12 @@ var (
 func main() {
 	flag.Parse()
 	if *flagPid == 0 {
-		fmt.Fprintln(os.Stderr, "usage: sniffer --pid <D2R pid> [--out file] [--max N]")
+		fmt.Fprintln(os.Stderr, "usage: sniffer --pid <D2R pid> [--out file] [--max N] [--npc|--op 0x2f,0x38]")
+		os.Exit(2)
+	}
+	opFilter, err := parseOpcodeFilter(*flagOps, *flagNPC)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "parse --op: %v\n", err)
 		os.Exit(2)
 	}
 
@@ -704,14 +832,24 @@ func main() {
 				}
 				windows.CloseHandle(hThread)
 
-				n := atomic.AddUint32(&packetCount, 1)
 				op := byte(0)
 				if len(captured) > 0 {
 					op = captured[0]
 				}
+				if opFilter != nil && !opFilter[op] {
+					continueStatus = dbgContinue
+					continue
+				}
+				n := atomic.AddUint32(&packetCount, 1)
 				ts := time.Since(startTime).Truncate(time.Millisecond)
-				emit(fmt.Sprintf("[%d] t+%s [%s] tid=%d ptr=0x%x size=%d op=0x%02X hex=%s",
-					n, ts, pathTag, tid, pktAddr, actualSize, op, hex.EncodeToString(captured)))
+				note := annotatePacket(captured)
+				if note != "" {
+					emit(fmt.Sprintf("[%d] t+%s [%s] tid=%d ptr=0x%x size=%d op=0x%02X note=%q hex=%s",
+						n, ts, pathTag, tid, pktAddr, actualSize, op, note, hex.EncodeToString(captured)))
+				} else {
+					emit(fmt.Sprintf("[%d] t+%s [%s] tid=%d ptr=0x%x size=%d op=0x%02X hex=%s",
+						n, ts, pathTag, tid, pktAddr, actualSize, op, hex.EncodeToString(captured)))
+				}
 
 				if *flagMax > 0 && int(n) >= *flagMax {
 					emit(fmt.Sprintf("# reached max=%d, detaching", *flagMax))

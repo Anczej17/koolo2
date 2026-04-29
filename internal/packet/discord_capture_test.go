@@ -20,14 +20,13 @@ import (
 // live-unverified; they should be re-checked during Phase 5 live test pass.
 
 // TestRepairAll_FormatStructure verifies the 16-byte layout: opcode + subcmd
-// + pad + npcGID + cost + sentinel. Cost left to server (bytes 8..12 zero).
+// + pad + npcGID + live UI cost + sentinel.
 func TestRepairAll_FormatStructure(t *testing.T) {
-	p := NewRepairAll(2)
+	p := NewRepairAll(2, 0x115B)
 	if len(p) != 16 {
 		t.Fatalf("expected 16 bytes, got %d", len(p))
 	}
-	// Expected layout bytes (cost left at 0):
-	want, _ := hex.DecodeString("350400000200000000000000FFFFFFFF")
+	want, _ := hex.DecodeString("35040000020000005B110000FFFFFFFF")
 	if !bytes.Equal(p, want) {
 		t.Errorf("layout mismatch:\n got: %s\nwant: %s",
 			hex.EncodeToString(p), hex.EncodeToString(want))

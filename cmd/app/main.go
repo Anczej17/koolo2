@@ -10,12 +10,15 @@ import (
 	"net"
 	// pprof removed - exposes debug endpoints and goroutine stacks
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime/debug"
 	"syscall"
 	"time"
 	"unsafe"
 
+	"github.com/inkeliz/gowebview"
+	"golang.org/x/sync/errgroup"
 	sloggger "local/internal/svc/cmd/app/log"
 	"local/internal/svc/internal/bot"
 	"local/internal/svc/internal/config"
@@ -31,8 +34,6 @@ import (
 	"local/internal/svc/internal/server"
 	"local/internal/svc/internal/utils"
 	"local/internal/svc/internal/utils/winproc"
-	"github.com/inkeliz/gowebview"
-	"golang.org/x/sync/errgroup"
 )
 
 var (
@@ -89,6 +90,38 @@ func findFreePort() (int, error) {
 	return port, nil
 }
 
+func waitForLocalPort(ctx context.Context, port int, timeout time.Duration) error {
+	deadline := time.Now().Add(timeout)
+	addr := fmt.Sprintf("127.0.0.1:%d", port)
+	var lastErr error
+	for time.Now().Before(deadline) {
+		var d net.Dialer
+		conn, err := d.DialContext(ctx, "tcp", addr)
+		if err == nil {
+			_ = conn.Close()
+			return nil
+		}
+		lastErr = err
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(100 * time.Millisecond):
+		}
+	}
+	if lastErr != nil {
+		return fmt.Errorf("timeout waiting for local HTTP port %d: %w", port, lastErr)
+	}
+	return fmt.Errorf("timeout waiting for local HTTP port %d", port)
+}
+
+func openDashboardInBrowser(logger *slog.Logger, url string) {
+	if err := exec.Command("rundll32", "url.dll,FileProtocolHandler", url).Start(); err != nil {
+		logger.Warn("failed to open dashboard in default browser", slog.String("url", url), slog.Any("error", err))
+		return
+	}
+	logger.Info("dashboard opened in default browser", slog.String("url", url))
+}
+
 // wrapWithRecover wraps a function with panic recovery logic
 func wrapWithRecover(logger *slog.Logger, f func() error) func() error {
 	return func() error {
@@ -102,6 +135,23 @@ func wrapWithRecover(logger *slog.Logger, f func() error) func() error {
 		}()
 		return f()
 	}
+}
+
+func preferExecutableConfigWorkingDir() {
+	exe, err := os.Executable()
+	if err != nil {
+		return
+	}
+	exeDir := filepath.Dir(exe)
+	settingsPath := filepath.Join(exeDir, "config", "settings.yaml")
+	if _, err := os.Stat(settingsPath); err != nil {
+		return
+	}
+	if err := os.Chdir(exeDir); err != nil {
+		fmt.Fprintf(os.Stderr, "warning: failed to switch working directory to exe config dir %s: %v\n", exeDir, err)
+		return
+	}
+	fmt.Fprintf(os.Stderr, "working directory set to exe config dir: %s\n", exeDir)
 }
 
 func main() {
@@ -126,6 +176,7 @@ func main() {
 			fmt.Fprintf(f, "\n=== dev_test start %s ===\n", time.Now().Format(time.RFC3339))
 		}
 	}
+	preferExecutableConfigWorkingDir()
 
 	// Init indirect syscalls, start anti-debug
 	if ntErr := ntapi.Init(); ntErr != nil {
@@ -253,11 +304,16 @@ func main() {
 	eventListener.Register(dropWriter.Handle)
 	manager := bot.NewSupervisorManager(logger, eventListener)
 	scheduler := bot.NewScheduler(manager, logger)
-	go scheduler.Start()
+	if os.Getenv("DISABLE_SCHEDULER") == "1" {
+		logger.Warn("Scheduler disabled via DISABLE_SCHEDULER=1")
+	} else {
+		go scheduler.Start()
+	}
 	srv, err := server.New(logger, manager, scheduler)
 	if err != nil {
 		log.Fatalf("Error starting local server: %s", err.Error())
 	}
+	dashboardURL := fmt.Sprintf("http://localhost:%d", serverPort)
 	eventListener.Register(srv.HandleRunewordHistory)
 	var ngrokTunnel *ngrokremote.Tunnel
 	if config.App.Ngrok.Enabled {
@@ -265,7 +321,7 @@ func main() {
 			logger.Warn("ngrok enabled but no authtoken set; skipping tunnel start")
 		} else {
 			opts := ngrokremote.Options{
-				LocalAddr:     fmt.Sprintf("http://localhost:%d", serverPort),
+				LocalAddr:     dashboardURL,
 				Authtoken:     config.App.Ngrok.Authtoken,
 				Region:        config.App.Ngrok.Region,
 				Domain:        config.App.Ngrok.Domain,
@@ -287,13 +343,20 @@ func main() {
 
 	g.Go(wrapWithRecover(logger, func() error {
 		defer cancel()
+		return srv.Listen(serverPort)
+	}))
 
+	g.Go(wrapWithRecover(logger, func() error {
 		// Headless mode: skip webview, keep HTTP server alive for Claude mode.
 		if os.Getenv("HEADLESS") == "1" {
 			logger.Info("Headless mode — webview disabled, HTTP server active",
 				slog.Int("port", serverPort))
 			<-ctx.Done()
 			return nil
+		}
+
+		if err := waitForLocalPort(ctx, serverPort, 10*time.Second); err != nil {
+			return fmt.Errorf("local HTTP server did not become ready before GUI start: %w", err)
 		}
 
 		displayScale := config.GetCurrentDisplayScale()
@@ -308,7 +371,7 @@ func main() {
 			height = 720
 		}
 
-		w, err := gowebview.New(&gowebview.Config{URL: fmt.Sprintf("http://localhost:%d", serverPort), WindowConfig: &gowebview.WindowConfig{
+		w, err := gowebview.New(&gowebview.Config{URL: dashboardURL, WindowConfig: &gowebview.WindowConfig{
 			Title: "Settings",
 			Size: &gowebview.Point{
 				X: int64(float64(width) * displayScale),
@@ -319,7 +382,10 @@ func main() {
 			if w != nil {
 				w.Destroy()
 			}
-			return fmt.Errorf("error creating webview: %w", err)
+			logger.Error("embedded GUI failed to start; keeping HTTP server alive and opening browser fallback", slog.Any("error", err), slog.String("url", dashboardURL))
+			openDashboardInBrowser(logger, dashboardURL)
+			<-ctx.Done()
+			return nil
 		}
 
 		// 2. Set HintNone to allow mouse resizing
@@ -404,9 +470,21 @@ func main() {
 			}(handle)
 		}
 
+		startedAt := time.Now()
+		logger.Info("embedded GUI started", slog.String("url", dashboardURL), slog.Int("port", serverPort))
 		defer w.Destroy()
 		w.Run()
 
+		if time.Since(startedAt) < 15*time.Second {
+			logger.Warn("embedded GUI closed immediately; keeping HTTP server alive and opening browser fallback",
+				slog.Duration("runtime", time.Since(startedAt)),
+				slog.String("url", dashboardURL))
+			openDashboardInBrowser(logger, dashboardURL)
+			<-ctx.Done()
+			return nil
+		}
+
+		cancel()
 		return nil
 	}))
 
@@ -447,11 +525,6 @@ func main() {
 			return telegramBot.Start(ctx)
 		}))
 	}
-
-	g.Go(wrapWithRecover(logger, func() error {
-		defer cancel()
-		return srv.Listen(serverPort)
-	}))
 
 	g.Go(wrapWithRecover(logger, func() error {
 		defer cancel()

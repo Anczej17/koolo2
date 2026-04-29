@@ -13,35 +13,43 @@ package packet
 
 const (
 	// === Movement ===
-	// 0x01 (walk) and 0x03 (run) are NOT sendable via packet.
-	// Proven impossible by AUDIT_C_playerunit_diff + AUDIT_D_input_poll +
-	// MOVEMENT_INPROCESS_SPEC: send_fn only carries opcodes >= 0x67, and
-	// sending 0x01/0x03 through it results in the client ignoring the
-	// packet entirely (no PlayerUnit state change). Use real_click_worker
-	// @ RVA 0xBA95D0 via CmdCallFn instead.
+	// AMB authoritative (2026-04-21): 0x01/0x02/0x03/0x04 ARE sendable via
+	// the D2GS_SendPacket APC path, but REQUIRE 201 bytes of zero-padding
+	// after the opcode-specific header. Without the padding the server
+	// rejects silently. See packet/amb/{walk,run}_to_{location,unit}.go
+	// and PacketSender.WalkToLocation/RunToLocation/WalkToUnit/RunToUnit.
+	//
+	// Earlier audit (AUDIT_C_playerunit_diff) concluded "not sendable"
+	// because those tests emitted the 9 / 13-byte headers without padding
+	// and saw no server reaction. The padding is the fix.
+	OpWalkToLocation = 0x01 // 210 B  (9 data + 201 pad)
+	OpWalkToUnit     = 0x02 // 214 B  (13 data + 201 pad)
+	OpRunToLocation  = 0x03 // 210 B  (9 data + 201 pad)
+	OpRunToUnit      = 0x04 // 214 B  (13 data + 201 pad) — same opcode as
+	//                         legacy MoveToEntity below; AMB's layout wins.
 
 	// === Skills ===
-	OpCastSkillLeftLoc      = 0x05 // verified — [05][X:u16][Y:u16]
-	OpCastSkillLeftEntity   = 0x06 // verified — [06][01000000][gid:u32]
-	OpCastSkillRightLoc     = 0x0C // verified — [0C][X:u16][Y:u16]
-	OpCastSkillRightEntity  = 0x0D // verified — [0D][01000000][gid:u32]
+	OpCastSkillLeftLoc     = 0x05 // verified — [05][X:u16][Y:u16]
+	OpCastSkillLeftEntity  = 0x06 // verified — [06][01000000][gid:u32]
+	OpCastSkillRightLoc    = 0x0C // verified — [0C][X:u16][Y:u16]
+	OpCastSkillRightEntity = 0x0D // verified — [0D][01000000][gid:u32]
 
 	// === Entity / world interaction ===
-	OpEntityInteract     = 0x13 // verified — [13][type:u32][gid:u32]
-	OpMoveToEntity       = 0x04 // sniffed  — [04][type:u32][gid:u32](+coords?)
-	OpEntranceInteract     = 0x40 // verified — [40][gid:u32]
-	OpTpInteract           = 0x41 // verified — [41][gid:u32][FFFFFFFF] (13B)
-	OpTpConfirmTravel      = 0x43 // verified 04-18 (13B) — [43][01000000][01000000][00000000]; was wrongly 9B in pre-buf=1 audit
-	OpWaypointTravel       = 0x49 // verified — [49][wp_gid:u32][dest:u8][000000]
-	OpTpDestinationSelect  = 0x4B // verified 04-18 (13B) — [4B][dest:u32][action=02:u32][FFFFFFFF]; was wrongly 5B in pre-buf=1 audit
+	OpEntityInteract      = 0x13 // verified — [13][type:u32][gid:u32]
+	OpMoveToEntity        = 0x04 // sniffed  — [04][type:u32][gid:u32](+coords?)
+	OpEntranceInteract    = 0x40 // verified — [40][gid:u32]
+	OpTpInteract          = 0x41 // verified — [41][gid:u32][FFFFFFFF] (13B)
+	OpTpConfirmTravel     = 0x43 // verified 04-18 (13B) — [43][01000000][01000000][00000000]; was wrongly 9B in pre-buf=1 audit
+	OpWaypointTravel      = 0x49 // verified — [49][wp_gid:u32][dest:u8][000000]
+	OpTpDestinationSelect = 0x4B // verified 04-18 (13B) — [4B][dest:u32][action=02:u32][FFFFFFFF]; was wrongly 5B in pre-buf=1 audit
 
 	// === Inventory / items ===
-	OpPickupItem    = 0x16 // verified — [16][gid:u32]
-	OpItemDrop      = 0x17 // sniffed  — drop on ground
-	OpItemMoveTo    = 0x18 // sniffed  — buffer→inv (cube/stash/inv)
-	OpItemMoveFrom  = 0x19 // CORRECTED 2026-04-15 (Discord plaintext) — [19][itemGID:u32][source:u32][gridPos:u32][pad:u32] = 17B; pickup to cursor buffer (precedes sell/stash move)
+	OpPickupItem          = 0x16 // verified — [16][gid:u32]
+	OpItemDrop            = 0x17 // sniffed  — drop on ground
+	OpItemMoveTo          = 0x18 // sniffed  — buffer→inv (cube/stash/inv)
+	OpItemMoveFrom        = 0x19 // CORRECTED 2026-04-15 (Discord plaintext) — [19][itemGID:u32][source:u32][gridPos:u32][pad:u32] = 17B; pickup to cursor buffer (precedes sell/stash move)
 	OpCubeTransmuteLegacy = 0x20 // D2 LOD format — DO NOT USE in D2R
-	OpCubeTransmute      = 0x54 // D2R verified — [54][cubeGID:u32][const fields][footer]
+	OpCubeTransmute       = 0x54 // D2R verified — [54][cubeGID:u32][const fields][footer]
 
 	// === Item right-click actions ===
 	OpIdentifyTome       = 0x26 // D2R verified — [26][00][tomeGID:u32][00ff][const][0207][footer]
@@ -57,10 +65,10 @@ const (
 	// 0x32 shares layout with 0x33 for the NPC-buy subform. Potion/gamble
 	// subforms use different sizes and trailing flags — see NewUsePotion /
 	// NewGambleBuy for those specific encodings.
-	// RE-VERIFIED 2026-04-20: NPC buy constant bytes 13-16 are `09 00 08 00`
-	// (same as 0x33 NPCSell), NOT `09 00 06 00` as stale code comment claimed.
-	OpInteractDispatch = 0x32 // live 08_npc_with_trade.json entry#44 — NPC buy: [32][price:u32][itemGID:u32][npcGID:u32][09 00 08 00][slot:u16][seq:u16][term:u8] (22B)
-	OpNPCSellItem      = 0x33 // live 2026-04-14 — [33][price:u32][itemGID:u32][npcGID:u32][09000000][slot:u16][seq:u16][term:u8][00] (22B, dual)
+	// RE-VERIFIED 2026-04-26: NPC sell is the 24B AMB/live layout and sells
+	// successfully through D2GS main-thread APC. UI NetMan is a no-op.
+	OpInteractDispatch = 0x32 // NPC buy dispatcher; legacy 22B and AMB/live 24B forms exist
+	OpNPCSellItem      = 0x33 // [33][price:u32][itemGID:u32][npcGID:u32][toX:u16][toY:u16][itemX:u16][itemY:u16][tail3] (24B)
 
 	// === NPC services ===
 	OpNPCMenuClose       = 0x34 // sniffed — [34][02] (menu close ack, not same as 0x30)
@@ -70,26 +78,26 @@ const (
 	OpEntityActionResult = 0x4D // CORRECTED 2026-04-15 (Discord plaintext capture) — [4D][npcGID:u32] = 5B (was wrongly 24B)
 	OpHireMerc           = 0x52 // sniffed — [52][type:u32][merc_gid:u32][cost:u32][...]
 	// OpCubeOpB was 0x54 — now consolidated into OpCubeTransmute above
-	OpCainIdentifyItem   = 0x5C // sniffed/conflict (per-item, vs existing 0x34 all) — [5C][item_gid:u32][FFFFFFFF]
+	OpCainIdentifyItem = 0x5C // sniffed/conflict (per-item, vs existing 0x34 all) — [5C][item_gid:u32][FFFFFFFF]
 
 	// === Character ===
-	OpAllocateStat = 0x3A // verified — [3A][stat_id:u16][0000]
-	OpLearnSkill   = 0x3B // verified — [3B][skill_id:u16][0000]
-	OpSelectSkill  = 0x3C // verified — [3C][skill_id:u16][00][btn:u8][FFFFFFFF]
+	OpAllocateStat     = 0x3A // verified — [3A][stat_id:u16][0000]
+	OpLearnSkill       = 0x3B // verified — [3B][skill_id:u16][0000]
+	OpSelectSkill      = 0x3C // verified — [3C][skill_id:u16][00][btn:u8][FFFFFFFF]
 	OpWeaponSwapLegacy = 0x60 // D2 LOD format — CRASHES D2R, DO NOT USE
 	OpWeaponSwap       = 0x50 // D2R verified — [50][fromL:u32][fromR:u32][toL:u32][toR:u32][FF*8][00*3]
 )
 
 // UnitType values used by 0x32 dispatcher (and related opcodes).
 const (
-	UnitTypePlayer        = 0x00
+	UnitTypePlayer         = 0x00
 	UnitTypeMonsterHostile = 0x01
-	UnitTypeObject        = 0x02
-	UnitTypeMissile       = 0x03
-	UnitTypeItem          = 0x04
-	UnitTypeTile          = 0x05
-	UnitTypeGambledItem   = 0x06 // used by 0x32 gamble subform (NewGambleBuy)
-	UnitTypeBeltPotion    = 0x4E // used by 0x32 belt-potion subform (NewUsePotion)
+	UnitTypeObject         = 0x02
+	UnitTypeMissile        = 0x03
+	UnitTypeItem           = 0x04
+	UnitTypeTile           = 0x05
+	UnitTypeGambledItem    = 0x06 // used by 0x32 gamble subform (NewGambleBuy)
+	UnitTypeBeltPotion     = 0x4E // used by 0x32 belt-potion subform (NewUsePotion)
 	// Note: 0x32 NPC buy subform does NOT use a unit-type byte at +9. The
 	// bufpoll 2026-04-14 capture shows that offset is the merchant's GID.
 )

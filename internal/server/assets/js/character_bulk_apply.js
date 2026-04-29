@@ -57,7 +57,6 @@ document.addEventListener('DOMContentLoaded', function () {
         health: '',
         merc: '',
         runs: '',
-        packet: '',
         cube: '',
         general: '',
         client: '',
@@ -68,7 +67,6 @@ document.addEventListener('DOMContentLoaded', function () {
         health: false,
         merc: false,
         runs: false,
-        packet: false,
         cube: false,
         general: false,
         client: false,
@@ -89,7 +87,6 @@ document.addEventListener('DOMContentLoaded', function () {
         'sectionHealth',
         'sectionMerc',
         'sectionRuns',
-        'sectionPacketCasting',
         'sectionCubeRecipes',
         'sectionRunewordMaker',
         'sectionGeneral',
@@ -211,28 +208,6 @@ document.addEventListener('DOMContentLoaded', function () {
         return runsInput ? (runsInput.value || '') : '';
     }
 
-    function snapshotPacketState() {
-        const state = {
-            useForItemPickup: !!document.querySelector('input[name="packetCastingUseForItemPickup"]')?.checked,
-            useForTpInteraction: !!document.querySelector('input[name="packetCastingUseForTpInteraction"]')?.checked,
-            useForEntranceInteraction: !!document.querySelector('input[name="packetCastingUseForEntranceInteraction"]')?.checked,
-            useForTeleport: !!document.querySelector('input[name="packetCastingUseForTeleport"]')?.checked,
-            useForEntitySkills: !!document.querySelector('input[name="packetCastingUseForEntitySkills"]')?.checked,
-            useForNPCInteraction: !!document.querySelector('input[name="packetCastingUseForNPCInteraction"]')?.checked,
-            useForWeaponSwap: !!document.querySelector('input[name="packetCastingUseForWeaponSwap"]')?.checked,
-            useForMovement: !!document.querySelector('input[name="packetCastingUseForMovement"]')?.checked,
-            useForBuySell: !!document.querySelector('input[name="packetCastingUseForBuySell"]')?.checked,
-            useForCubeTransmute: !!document.querySelector('input[name="packetCastingUseForCubeTransmute"]')?.checked,
-            useForGamble: !!document.querySelector('input[name="packetCastingUseForGamble"]')?.checked,
-            useForRepair: !!document.querySelector('input[name="packetCastingUseForRepair"]')?.checked,
-            useForIdentify: !!document.querySelector('input[name="packetCastingUseForIdentify"]')?.checked,
-            useForPotionUse: !!document.querySelector('input[name="packetCastingUseForPotionUse"]')?.checked,
-            useForStashManagement: !!document.querySelector('input[name="packetCastingUseForStashManagement"]')?.checked,
-            useForInventoryManagement: !!document.querySelector('input[name="packetCastingUseForInventoryManagement"]')?.checked,
-        };
-        return JSON.stringify(state);
-    }
-
     function snapshotCubeState() {
         const enabled = !!document.querySelector('input[name="enableCubeRecipes"]')?.checked;
         const skipPerfectAmethysts = !!document.querySelector('input[name="skipPerfectAmethysts"]')?.checked;
@@ -324,7 +299,6 @@ document.addEventListener('DOMContentLoaded', function () {
         const healthCheckbox = document.getElementById('sectionHealth');
         const mercCheckbox = document.getElementById('sectionMerc');
         const runCheckbox = document.getElementById('sectionRuns');
-        const packetCheckbox = document.getElementById('sectionPacketCasting');
         const cubeCheckbox = document.getElementById('sectionCubeRecipes');
         const generalCheckbox = document.getElementById('sectionGeneral');
         const clientCheckbox = document.getElementById('sectionClient');
@@ -334,7 +308,6 @@ document.addEventListener('DOMContentLoaded', function () {
         const healthLabelSpan = healthCheckbox && healthCheckbox.nextElementSibling;
         const mercLabelSpan = mercCheckbox && mercCheckbox.nextElementSibling;
         const runLabelSpan = runCheckbox && runCheckbox.nextElementSibling;
-        const packetLabelSpan = packetCheckbox && packetCheckbox.nextElementSibling;
         const cubeLabelSpan = cubeCheckbox && cubeCheckbox.nextElementSibling;
         const generalLabelSpan = generalCheckbox && generalCheckbox.nextElementSibling;
         const clientLabelSpan = clientCheckbox && clientCheckbox.nextElementSibling;
@@ -359,13 +332,6 @@ document.addEventListener('DOMContentLoaded', function () {
                 mercLabelSpan.classList.add('section-dirty');
             } else {
                 mercLabelSpan.classList.remove('section-dirty');
-            }
-        }
-        if (packetLabelSpan) {
-            if (sectionDirty.packet) {
-                packetLabelSpan.classList.add('section-dirty');
-            } else {
-                packetLabelSpan.classList.remove('section-dirty');
             }
         }
         if (cubeLabelSpan) {
@@ -422,12 +388,6 @@ document.addEventListener('DOMContentLoaded', function () {
         refreshSectionDirtyIndicators();
     }
 
-    function updatePacketDirty() {
-        const current = snapshotPacketState();
-        sectionDirty.packet = current !== initialSectionState.packet;
-        refreshSectionDirtyIndicators();
-    }
-
     function updateCubeDirty() {
         const current = snapshotCubeState();
         sectionDirty.cube = current !== initialSectionState.cube;
@@ -455,7 +415,6 @@ document.addEventListener('DOMContentLoaded', function () {
     // Initialize snapshots
     initialSectionState.health = snapshotHealthState();
     initialSectionState.merc = snapshotMercState();
-    initialSectionState.packet = snapshotPacketState();
     initialSectionState.cube = snapshotCubeState();
     initialSectionState.general = snapshotGeneralState();
     initialSectionState.client = snapshotClientState();
@@ -516,10 +475,6 @@ document.addEventListener('DOMContentLoaded', function () {
             + '  <label>'
             + '    <input type="checkbox" id="sectionRuns">'
             + '    <span>Run settings</span>'
-            + '  </label>'
-            + '  <label>'
-            + '    <input type="checkbox" id="sectionPacketCasting">'
-            + '    <span>Using Packets</span>'
             + '  </label>'
             + '  <label>'
             + '    <input type="checkbox" id="sectionCubeRecipes">'
@@ -841,11 +796,6 @@ document.addEventListener('DOMContentLoaded', function () {
             return;
         }
 
-        if (target.name && target.name.startsWith('packetCastingUseFor')) {
-            updatePacketDirty();
-            return;
-        }
-
         if (CUBE_FIELD_NAMES.has(target.name)) {
             updateCubeDirty();
             return;
@@ -902,7 +852,6 @@ document.addEventListener('DOMContentLoaded', function () {
         const healthCheckbox = document.getElementById('sectionHealth');
         const mercCheckbox = document.getElementById('sectionMerc');
         const runsCheckbox = document.getElementById('sectionRuns');
-        const packetCheckbox = document.getElementById('sectionPacketCasting');
         const cubeCheckbox = document.getElementById('sectionCubeRecipes');
         const runewordCheckbox = document.getElementById('sectionRunewordMaker');
         const generalCheckbox = document.getElementById('sectionGeneral');
@@ -915,7 +864,6 @@ document.addEventListener('DOMContentLoaded', function () {
             health: !!(healthCheckbox && healthCheckbox.checked),
             merc: !!(mercCheckbox && mercCheckbox.checked),
             runs: !!(runsCheckbox && runsCheckbox.checked),
-            packetCasting: !!(packetCheckbox && packetCheckbox.checked),
             cubeRecipes: !!(cubeCheckbox && cubeCheckbox.checked),
             runewordMaker: !!(runewordCheckbox && runewordCheckbox.checked),
             general: !!(generalCheckbox && generalCheckbox.checked),

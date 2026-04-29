@@ -4,14 +4,14 @@ import (
 	"log/slog"
 	"time"
 
+	"local/internal/svc/internal/action/step"
+	"local/internal/svc/internal/context"
+	"local/internal/svc/internal/game"
 	"local/internal/svc/internal/gamelib/data"
 	"local/internal/svc/internal/gamelib/data/item"
 	"local/internal/svc/internal/gamelib/data/skill"
 	"local/internal/svc/internal/gamelib/data/stat"
 	"local/internal/svc/internal/gamelib/data/state"
-	"local/internal/svc/internal/action/step"
-	"local/internal/svc/internal/context"
-	"local/internal/svc/internal/game"
 	"local/internal/svc/internal/utils"
 )
 
@@ -85,6 +85,11 @@ func BuffIfRequired() {
 func Buff() {
 	ctx := context.Get()
 	ctx.SetLastAction("Buff")
+	ctx.RefreshGameData()
+
+	if ctx.Data.PlayerUnit.Area.IsTown() || ctx.Data.OpenMenus.NPCShop || ctx.Data.OpenMenus.NPCInteract || ctx.Data.OpenMenus.Stash || ctx.Data.OpenMenus.Cube || ctx.Data.OpenMenus.Inventory {
+		return
+	}
 
 	// Prevent re-entry - if already buffing, skip (per-character check)
 	if ctx.BuffInProgress {
@@ -268,32 +273,14 @@ func castCTAWarcries() {
 	ctx := context.Get()
 	ctx.Logger.Debug("Casting CTA warcries (non-Barbarian)")
 
-	// Swap to CTA (secondary) FIRST - BC/BO keybinds may only be reported
-	// by the game when the CTA weapon is the active slot
-	swapToSecondary()
+	castBuffOnWeaponSlot(skill.BattleCommand, state.Battlecommand, 1)
+	castBuffOnWeaponSlot(skill.BattleOrders, state.Battleorders, 1)
+}
 
-	// Check if we have keybinds (after swap, so game reports correct skills)
-	_, hasBC := ctx.Data.KeyBindings.KeyBindingForSkill(skill.BattleCommand)
-	_, hasBO := ctx.Data.KeyBindings.KeyBindingForSkill(skill.BattleOrders)
-
-	if !hasBC && !hasBO {
-		ctx.Logger.Debug("CTA found but no BO/BC keybinds, skipping")
-		ensurePrimaryWeapon()
-		return
-	}
-
-	// Cast BC with state verification
-	if _, found := ctx.Data.KeyBindings.KeyBindingForSkill(skill.BattleCommand); found {
-		castBuffWithRetry(skill.BattleCommand, state.Battlecommand)
-	}
-
-	// Cast BO with state verification
-	if _, found := ctx.Data.KeyBindings.KeyBindingForSkill(skill.BattleOrders); found {
-		castBuffWithRetry(skill.BattleOrders, state.Battleorders)
-	}
-
-	// Always return to main weapon after CTA sequence
-	ensurePrimaryWeapon()
+func castBuffOnWeaponSlot(buffSkill skill.ID, expectedState state.State, slot int) {
+	ensureWeaponSlot(slot)
+	castBuffWithRetry(buffSkill, expectedState)
+	ensureWeaponSlot(0)
 }
 
 func castPostCTABuffs(isBarbarian bool) {
@@ -559,34 +546,18 @@ func castBuffWithRetry(buffSkill skill.ID, expectedState state.State) {
 			slog.Int("attempt", attempt))
 	}
 
-	// Packet 0x0C right-cast path exhausted. Try an in-process right-click
-	// via real_click_worker (APC → D2R's own click dispatcher, same path as
-	// Phase 9 ClickAt). This is NOT HID — no SendInput, no WM_RBUTTONDOWN,
-	// no OS input queue. D2R's own WndProc handles the RMB from the
-	// internal dispatcher and correctly applies self-buffs.
-	if ctx.PacketSender != nil {
-		ctx.Logger.Warn("Buff 0x0C exhausted — real_click_worker RMB fallback", slog.String("skill", skillName))
-		centerX := ctx.GameReader.GameAreaSizeX / 2
-		centerY := ctx.GameReader.GameAreaSizeY / 2
-		if err := ctx.PacketSender.ClickAt(int32(centerX), int32(centerY), game.MouseRight); err == nil {
-			utils.Sleep(postCastBaseDelay)
-			if waitForState(expectedState) {
-				ctx.Logger.Debug("Buff applied via real_click_worker fallback", slog.String("skill", skillName))
-				return
-			}
-		}
-	}
-	ctx.Logger.Warn("Buff failed after max retries (0x0C + real_click_worker)", slog.String("skill", skillName))
+	ctx.Logger.Warn("Buff failed after max retries (0x0C)", slog.String("skill", skillName))
 }
 
-// doCast casts whatever skill is on the right mouse button via packet.
+// doCast casts whatever skill is currently on the right mouse button at a
+// location just next to the player. 5-byte 0x0C per AMB — [0C][X:u16][Y:u16].
+//
 // For self-buffs (BattleCommand/BattleOrders/FrozenArmor/etc.) D2R treats
 // right-click ON the exact player tile as a no-op — the original koolo HID
 // path right-clicked at screen center (640, 340) which lands a couple cells
 // away from the player sprite, which is what triggers the area-self pulse.
-// Mirror that with a small +5 world-cell offset so the cast lands "near" the
-// player rather than ON them. Live-verified 04-19 21:00 that the no-offset
-// version fired the packet but never lit the buff state.
+// A small +5 world-cell offset keeps that behavior. Live-verified 04-19 21:00
+// that the no-offset version fired the packet but never lit the buff state.
 func doCast() {
 	ctx := context.Get()
 	utils.Sleep(100)
@@ -595,7 +566,7 @@ func doCast() {
 	}
 	playerPos := ctx.Data.PlayerUnit.Position
 	target := data.Position{X: playerPos.X + 5, Y: playerPos.Y + 5}
-	if err := ctx.PacketSender.CastSkillAtLocation(target, playerPos); err != nil {
+	if err := ctx.PacketSender.CastRightSkillAMB(uint16(target.X), uint16(target.Y)); err != nil {
 		ctx.Logger.Warn("doCast packet failed", slog.String("error", err.Error()))
 	}
 	utils.Sleep(postCastBaseDelay)
@@ -647,47 +618,30 @@ func restoreRightSkill(sk skill.ID) {
 // INTERNAL: WEAPON SLOT CONTROL (DETERMINISTIC SWAP)
 // ============================================================================
 
-// pressSwapWeapons toggles between primary/secondary weapon sets.
-//
-// Primary path: in-process WM_KEYDOWN via SendMessageW executed on D2R's
-// own game thread (APC). Per memory project_weapon_swap_solved 2026-04-12
-// "Detection: ZERO" — message originates in D2R's process, WndProc sees
-// identical flow to a user key press, triggers D2R's full swap chain
-// (widget flip + item-pointer swap + stat recalc + 0x50 packet via
-// dual_send_wrap). No OS-HID surface: no SendInput, no keybd_event, no
-// SetWindowsHookEx.
-//
-// Raw 0x50 emit is proven-impossible (memory feedback_never_send_swap_raw):
-// packet lands on server but client widget/items/stats aren't updated,
-// server desyncs, D2R AVs within ~2s. Fallback is therefore purely
-// defensive — if the in-process path is unavailable we try 0x50 once, log
-// the state-desync risk, and let the next buff cycle retry.
+// pressSwapWeapons toggles between primary/secondary weapon sets. In
+// full-packet mode HID is disabled after game load, so weapon swap must go
+// through the packet sender and must not fall through to key simulation.
 func pressSwapWeapons() {
 	ctx := context.Get()
-	if ctx.MemoryInjector != nil {
-		vk := byte(ctx.Data.KeyBindings.SwapWeapons.Key1[0])
-		if vk == 0 {
-			vk = 0x57 // default VK_W
+
+	if ctx.PacketSender != nil {
+		ctx.RefreshGameData()
+		if err := ctx.PacketSender.SwapWeaponFromData(ctx.Data); err != nil {
+			ctx.Logger.Warn("pressSwapWeapons: packet swap failed", slog.Any("error", err))
 		}
-		hwnd := uintptr(ctx.GameReader.HWND)
-		if err := ctx.MemoryInjector.PressKeyInProcess(hwnd, vk); err == nil {
-			return
-		} else {
-			ctx.Logger.Debug("pressSwapWeapons: in-process keypress unavailable, trying 0x50 packet",
-				slog.String("error", err.Error()))
-		}
-	}
-	if ctx.PacketSender == nil {
 		return
 	}
-	fL, fR, tL, tR := WeaponSwapGIDs(ctx.Data)
-	if fL == 0 && fR == 0 && tL == 0 && tR == 0 {
-		ctx.Logger.Warn("pressSwapWeapons: no equipped weapons resolved — skipping swap")
+
+	if ctx.HID == nil {
+		ctx.Logger.Warn("pressSwapWeapons: no HID and no packet sender - skipping swap")
 		return
 	}
-	if err := ctx.PacketSender.SwapWeapon(fL, fR, tL, tR, uint8(ctx.Data.ActiveWeaponSlot)); err != nil {
-		ctx.Logger.Warn("pressSwapWeapons 0x50 packet fallback failed", slog.String("error", err.Error()))
+	if ctx.HID.IsDisabled() {
+		ctx.Logger.Warn("pressSwapWeapons: HID disabled and no packet sender - skipping swap")
+		return
 	}
+
+	ctx.HID.PressKeyBinding(ctx.Data.KeyBindings.SwapWeapons)
 }
 
 // waitForWeaponSlot waits until the desired weapon slot is reported by game data.

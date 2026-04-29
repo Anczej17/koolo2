@@ -1,9 +1,9 @@
 package ui
 
 import (
+	"local/internal/svc/internal/context"
 	"local/internal/svc/internal/gamelib/data"
 	"local/internal/svc/internal/gamelib/data/item"
-	"local/internal/svc/internal/context"
 )
 
 var (
@@ -53,6 +53,30 @@ func GetScreenCoordsForItem(itm data.Item) data.Position {
 	}
 
 	return getScreenCoordsForItem(itm)
+}
+
+func GetScreenCoordCandidatesForItem(itm data.Item) []data.Position {
+	primary := GetScreenCoordsForItem(itm)
+	candidates := []data.Position{primary}
+
+	alt := getScreenCoordsForItem(itm)
+	if primary != alt {
+		candidates = append(candidates, alt)
+	}
+	alt = getScreenCoordsForItemClassic(itm)
+	if primary != alt {
+		duplicate := false
+		for _, c := range candidates {
+			if c == alt {
+				duplicate = true
+				break
+			}
+		}
+		if !duplicate {
+			candidates = append(candidates, alt)
+		}
+	}
+	return candidates
 }
 
 func GetScreenCoordsForInventoryPosition(pos data.Position, loc item.LocationType) data.Position {

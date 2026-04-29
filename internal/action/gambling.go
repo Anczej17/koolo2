@@ -5,13 +5,13 @@ import (
 	"log/slog"
 	"strings"
 
+	"local/internal/svc/internal/action/step"
+	"local/internal/svc/internal/context"
+	"local/internal/svc/internal/game"
 	"local/internal/svc/internal/gamelib/data"
 	"local/internal/svc/internal/gamelib/data/item"
 	"local/internal/svc/internal/gamelib/data/npc"
 	"local/internal/svc/internal/gamelib/nip"
-	"local/internal/svc/internal/action/step"
-	"local/internal/svc/internal/context"
-	"local/internal/svc/internal/game"
 	"local/internal/svc/internal/town"
 	"local/internal/svc/internal/ui"
 	"local/internal/svc/internal/utils"
@@ -135,19 +135,7 @@ func GambleSingleItem(items []string, desiredQuality item.Quality) error {
 				slog.Any("items", items),
 				slog.Int("attempt", refreshAttempts))
 
-			gX, gY := ui.GambleRefreshButtonX, ui.GambleRefreshButtonY
-			if ctx.Data.LegacyGraphics {
-				gX, gY = ui.GambleRefreshButtonXClassic, ui.GambleRefreshButtonYClassic
-			}
-			clicked := false
-			if ctx.CharacterCfg.PacketCasting.UseForGamble && ctx.PacketSender != nil {
-				if err := ctx.PacketSender.ClickAt(int32(gX), int32(gY), game.MouseLeft); err == nil {
-					clicked = true
-				}
-			}
-			if !clicked {
-				ctx.HID.Click(game.LeftButton, gX, gY)
-			}
+			RefreshGamblingWindow(ctx)
 
 			utils.Sleep(500)
 		} else {
@@ -294,10 +282,11 @@ func RefreshGamblingWindow(ctx *context.Status) {
 	if ctx.Data.LegacyGraphics {
 		gX, gY = ui.GambleRefreshButtonXClassic, ui.GambleRefreshButtonYClassic
 	}
-	if ctx.CharacterCfg.PacketCasting.UseForGamble && ctx.PacketSender != nil {
-		if err := ctx.PacketSender.ClickAt(int32(gX), int32(gY), game.MouseLeft); err == nil {
-			return
+	if ctx.PacketSender != nil {
+		if err := ctx.PacketSender.ClickAt(int32(gX), int32(gY), game.MouseLeft); err != nil {
+			ctx.Logger.Warn("Gambling refresh packet failed, skipping HID fallback", slog.Any("error", err))
 		}
+		return
 	}
 	ctx.HID.Click(game.LeftButton, gX, gY)
 }

@@ -26,17 +26,14 @@ import (
 // fields (playerGID, 0x00020804 constant, trailing 0x12). Current format
 // matches what D2R actually sends on the wire.
 //
-// NOTE: The signature takes `playerGID` as param name for API stability,
-// but the field now stores the NPC's GID per the correct format.
-func NewRepairAll(npcGID data.UnitID) []byte {
+func NewRepairAll(npcGID data.UnitID, repairCost uint32) []byte {
 	buf := make([]byte, 16)
 	buf[0] = OpRepairAll
 	buf[1] = 0x04 // subcmd: repair-all
 	// bytes 2,3 pad (0x00 0x00)
 	binary.LittleEndian.PutUint32(buf[4:8], uint32(npcGID))
-	// bytes 8-11 cost — UI computes actual cost; sending 0 signals server to
-	// use its own calculation (observed in live capture).
-	binary.LittleEndian.PutUint32(buf[8:12], 0)
+	// bytes 8-11 must be the live repair-all cost from the vendor UI.
+	binary.LittleEndian.PutUint32(buf[8:12], repairCost)
 	binary.LittleEndian.PutUint32(buf[12:16], 0xFFFFFFFF)
 	return buf
 }

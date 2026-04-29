@@ -8,20 +8,20 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/lxn/win"
+	"local/internal/svc/internal/action/step"
+	"local/internal/svc/internal/context"
+	"local/internal/svc/internal/event"
+	"local/internal/svc/internal/game"
 	"local/internal/svc/internal/gamelib/data"
 	"local/internal/svc/internal/gamelib/data/area"
 	"local/internal/svc/internal/gamelib/data/item"
 	"local/internal/svc/internal/gamelib/data/object"
 	"local/internal/svc/internal/gamelib/data/stat"
 	"local/internal/svc/internal/gamelib/nip"
-	"local/internal/svc/internal/action/step"
-	"local/internal/svc/internal/context"
-	"local/internal/svc/internal/event"
-	"local/internal/svc/internal/game"
-	"local/internal/svc/internal/packet"
+	"local/internal/svc/internal/packet/amb"
 	"local/internal/svc/internal/ui"
 	"local/internal/svc/internal/utils"
-	"github.com/lxn/win"
 )
 
 const (
@@ -68,11 +68,15 @@ func Stash(forceStash bool) error {
 		ctx.Logger.Warn("Bank object not found in current area, skipping stash")
 		return nil
 	}
-	InteractObject(bank,
+	if err := InteractObject(bank,
 		func() bool {
 			return ctx.Data.OpenMenus.Stash
 		},
-	)
+	); err != nil {
+		return err
+	}
+	ctx.RefreshGameData()
+	markStashOpened(ctx)
 	// Clear messages like TZ change or public game spam. Prevent bot from clicking on messages
 	ClearMessages()
 	stashGold()
@@ -511,26 +515,35 @@ func stashItemAction(i data.Item, rule string, ruleFile string, skipLogging bool
 	ctx.SetLastAction("stashItemAction")
 	displayName := formatItemName(i)
 
-	screenPos := ui.GetScreenCoordsForItem(i)
-	ctx.HID.MovePointer(screenPos.X, screenPos.Y)
-	utils.PingSleep(utils.Medium, 170)        // Medium operation: Move pointer to item
 	screenshot := ctx.GameReader.Screenshot() // Take screenshot *before* attempting stash
 	utils.PingSleep(utils.Medium, 150)        // Medium operation: Wait for screenshot
-	// Ctrl+click via HID.ClickWithModifier — but HID.Click itself now
-	// dispatches via IN-PROCESS SendMessageW (APC into D2R's own thread).
-	// So "HID" here means Windows message routing, not SendInput — WndProc
-	// fires from D2R's legitimate stack and routes Ctrl+click to the
-	// stash-move dispatcher with correct session state. No cross-process
-	// OS message queue, no bot-detectable HID footprint.
-	ctx.HID.ClickWithModifier(game.LeftButton, screenPos.X, screenPos.Y, game.CtrlKey)
-	utils.PingSleep(utils.Medium, 500)
 
-	// Verify if the item is no longer in inventory
-	ctx.RefreshGameData() // Crucial: Refresh data to see if item moved
-	for _, it := range ctx.Data.Inventory.ByLocation(item.LocationInventory) {
-		if it.UnitID == i.UnitID {
-			ctx.Logger.Debug(fmt.Sprintf("Failed to stash item %s (UnitID: %d), still in inventory.", i.Name, i.UnitID))
-			return false // Item is still in inventory, stash failed
+	if fullPacketHIDDisabled(ctx) {
+		if !stashItemActionPacket(ctx, i, displayName) {
+			return false
+		}
+	} else {
+		screenPos := ui.GetScreenCoordsForItem(i)
+		ctx.HID.MovePointer(screenPos.X, screenPos.Y)
+		utils.PingSleep(utils.Medium, 170)       // Medium operation: Move pointer to item
+		screenshot = ctx.GameReader.Screenshot() // Take screenshot *before* attempting stash
+		utils.PingSleep(utils.Medium, 150)       // Medium operation: Wait for screenshot
+		// Ctrl+click via HID.ClickWithModifier — but HID.Click itself now
+		// dispatches via IN-PROCESS SendMessageW (APC into D2R's own thread).
+		// So "HID" here means Windows message routing, not SendInput — WndProc
+		// fires from D2R's legitimate stack and routes Ctrl+click to the
+		// stash-move dispatcher with correct session state. No cross-process
+		// OS message queue, no bot-detectable HID footprint.
+		ctx.HID.ClickWithModifier(game.LeftButton, screenPos.X, screenPos.Y, game.CtrlKey)
+		utils.PingSleep(utils.Medium, 500)
+
+		// Verify if the item is no longer in inventory
+		ctx.RefreshGameData() // Crucial: Refresh data to see if item moved
+		for _, it := range ctx.Data.Inventory.ByLocation(item.LocationInventory) {
+			if it.UnitID == i.UnitID {
+				ctx.Logger.Debug(fmt.Sprintf("Failed to stash item %s (UnitID: %d), still in inventory.", i.Name, i.UnitID))
+				return false // Item is still in inventory, stash failed
+			}
 		}
 	}
 
@@ -560,6 +573,212 @@ func stashItemAction(i data.Item, rule string, ruleFile string, skipLogging bool
 	}
 
 	return true // Item successfully stashed
+}
+
+func stashItemActionPacket(ctx *context.Status, i data.Item, displayName string) bool {
+	if ctx.PacketSender == nil {
+		return false
+	}
+
+	tab := ctx.CurrentGame.CurrentStashTab
+	if tab == 0 {
+		tab = 1
+		ctx.CurrentGame.CurrentStashTab = 1
+	}
+	if tab >= StashTabGems {
+		ctx.Logger.Warn("Packet stash move for DLC stash tabs is not wired; refusing HID fallback",
+			slog.String("item", displayName),
+			slog.Int("tab", tab))
+		return false
+	}
+
+	col, row, ok := findFreeStashSlot(ctx, i)
+	if !ok {
+		ctx.Logger.Debug("No free packet stash slot on current tab",
+			slog.String("item", displayName),
+			slog.Int("tab", tab))
+		return false
+	}
+
+	var err error
+	if tab == 1 {
+		ctx.Logger.Debug("Stashing via AMB cursor packet move 0x19 -> 0x18",
+			slog.String("item", displayName),
+			slog.Int("itemGID", int(i.UnitID)),
+			slog.Int("tab", tab),
+			slog.Int("toX", int(col)),
+			slog.Int("toY", int(row)))
+		return stashItemActionAMBCursorMove(ctx, i, displayName, col, row, tab)
+	} else {
+		ownerID, ok := sharedStashOwnerID(ctx, tab)
+		if !ok {
+			ctx.Logger.Warn("Packet shared stash move missing phantom tab unit ID; refusing HID fallback",
+				slog.String("item", displayName),
+				slog.Int("tab", tab),
+				slog.Int("stashTabUnitIDs", len(ctx.Data.Inventory.StashTabUnitIDs)))
+			return false
+		}
+		ctx.Logger.Debug("Stashing via AMB 0x55 PutItemToSharedStash",
+			slog.String("item", displayName),
+			slog.Int("itemGID", int(i.UnitID)),
+			slog.Int("tab", tab),
+			slog.Uint64("stashTabOwnerID", uint64(ownerID)),
+			slog.Int("toX", int(col)),
+			slog.Int("toY", int(row)))
+		err = ctx.PacketSender.PutItemToSharedStash(i, ownerID, uint16(col), uint16(row))
+	}
+	if err != nil {
+		ctx.Logger.Warn("Packet stash move failed; refusing HID fallback",
+			slog.String("item", displayName),
+			slog.Int("tab", tab),
+			slog.Any("error", err))
+		return false
+	}
+
+	utils.PingSleep(utils.Medium, 500)
+	ctx.RefreshGameData()
+	for _, it := range ctx.Data.Inventory.ByLocation(item.LocationInventory) {
+		if it.UnitID == i.UnitID {
+			ctx.Logger.Debug(fmt.Sprintf("Failed to stash item %s (UnitID: %d), still in inventory.", i.Name, i.UnitID))
+			return false
+		}
+	}
+	return true
+}
+
+func sharedStashOwnerID(ctx *context.Status, tab int) (uint32, bool) {
+	if ctx == nil || tab < 2 {
+		return 0, false
+	}
+	ownerIndex := tab - 1
+	if ownerIndex <= 0 || ownerIndex >= len(ctx.Data.Inventory.StashTabUnitIDs) {
+		return 0, false
+	}
+	ownerID := ctx.Data.Inventory.StashTabUnitIDs[ownerIndex]
+	if ownerID == 0 {
+		return 0, false
+	}
+	return uint32(ownerID), true
+}
+
+func stashItemActionAMBCursorMove(ctx *context.Status, i data.Item, displayName string, col, row uint8, tab int) bool {
+	if ctx == nil || ctx.PacketSender == nil {
+		return false
+	}
+
+	ctx.Logger.Debug("Stashing via AMB cursor move 0x19 -> 0x18",
+		slog.String("item", displayName),
+		slog.Int("itemGID", int(i.UnitID)),
+		slog.Int("tab", tab),
+		slog.Int("fromX", i.Position.X),
+		slog.Int("fromY", i.Position.Y),
+		slog.Int("toX", int(col)),
+		slog.Int("toY", int(row)))
+
+	if err := ctx.PacketSender.PickItemFromContainer(i.UnitID, i.Position.X, i.Position.Y, amb.ContainerInventory); err != nil {
+		ctx.Logger.Warn("AMB cursor stash pick failed",
+			slog.String("item", displayName),
+			slog.Any("error", err))
+		return false
+	}
+	utils.PingSleep(utils.Light, 150)
+
+	if err := ctx.PacketSender.PutItemToInventory(uint32(i.UnitID), uint32(col), uint32(row), uint32(amb.ContainerStash)); err != nil {
+		ctx.Logger.Warn("AMB cursor stash put failed",
+			slog.String("item", displayName),
+			slog.Any("error", err))
+		return false
+	}
+
+	utils.PingSleep(utils.Medium, 500)
+	ctx.RefreshGameData()
+	for _, it := range ctx.Data.Inventory.ByLocation(item.LocationInventory) {
+		if it.UnitID == i.UnitID {
+			ctx.Logger.Debug("AMB cursor stash move left item in inventory",
+				slog.String("item", displayName),
+				slog.Int("itemGID", int(i.UnitID)))
+			return false
+		}
+	}
+	return true
+}
+
+func stashItemActionUIPacketMove(ctx *context.Status, i data.Item, displayName string, col, row uint8, tab int) bool {
+	if ctx == nil || ctx.PacketSender == nil {
+		return false
+	}
+
+	ctx.Logger.Warn("AMB stash packet had no effect; trying packet 0x19 UI move",
+		slog.String("item", displayName),
+		slog.Int("itemGID", int(i.UnitID)),
+		slog.Int("tab", tab),
+		slog.Int("toX", int(col)),
+		slog.Int("toY", int(row)))
+	if err := ctx.PacketSender.ItemToStash(i.UnitID, col, row); err != nil {
+		ctx.Logger.Warn("Packet 0x19 UI stash move failed",
+			slog.String("item", displayName),
+			slog.Any("error", err))
+		return false
+	}
+
+	utils.PingSleep(utils.Medium, 500)
+	ctx.RefreshGameData()
+	for _, it := range ctx.Data.Inventory.ByLocation(item.LocationInventory) {
+		if it.UnitID == i.UnitID {
+			ctx.Logger.Debug("Packet 0x19 UI stash move left item in inventory",
+				slog.String("item", displayName),
+				slog.Int("itemGID", int(i.UnitID)))
+			return false
+		}
+	}
+	return true
+}
+
+func stashItemActionNativeQueuedCtrlClick(ctx *context.Status, i data.Item, displayName string) bool {
+	if ctx == nil || ctx.PacketSender == nil || ctx.MemoryInjector == nil || ctx.GameReader == nil {
+		return false
+	}
+
+	screenPos := ui.GetScreenCoordsForItem(i)
+	ctx.Logger.Warn("AMB stash packet had no effect; trying D2R real-click ctrl handler",
+		slog.String("item", displayName),
+		slog.Int("itemGID", int(i.UnitID)),
+		slog.Int("clientX", screenPos.X),
+		slog.Int("clientY", screenPos.Y))
+
+	if err := ctx.MemoryInjector.OverrideGetKeyState(byte(game.CtrlKey)); err != nil {
+		ctx.Logger.Warn("Native stash ctrl-click failed to arm Ctrl key state",
+			slog.String("item", displayName),
+			slog.Any("error", err))
+		return false
+	}
+	defer func() {
+		if err := ctx.MemoryInjector.RestoreGetKeyState(); err != nil {
+			ctx.Logger.Warn("Native stash ctrl-click failed to restore key state",
+				slog.String("item", displayName),
+				slog.Any("error", err))
+		}
+	}()
+
+	_ = ctx.MemoryInjector.CursorPos(ctx.GameReader.WindowLeftX+screenPos.X, ctx.GameReader.WindowTopY+screenPos.Y)
+	if err := ctx.PacketSender.ClickAt(int32(screenPos.X), int32(screenPos.Y), game.MouseLeft); err != nil {
+		ctx.Logger.Warn("Native stash ctrl-click failed",
+			slog.String("item", displayName),
+			slog.Any("error", err))
+		return false
+	}
+
+	utils.PingSleep(utils.Medium, 500)
+	ctx.RefreshGameData()
+	for _, it := range ctx.Data.Inventory.ByLocation(item.LocationInventory) {
+		if it.UnitID == i.UnitID {
+			ctx.Logger.Debug("Native stash ctrl-click left item in inventory",
+				slog.String("item", displayName),
+				slog.Int("itemGID", int(i.UnitID)))
+			return false
+		}
+	}
+	return true
 }
 
 func formatItemName(i data.Item) string {
@@ -618,6 +837,35 @@ func blacklistItem(i data.Item) {
 func DropItem(i data.Item) {
 	ctx := context.Get()
 	ctx.SetLastAction("DropItem")
+	if fullPacketHIDDisabled(ctx) {
+		if ctx.PacketSender == nil {
+			ctx.Logger.Warn("DropItem requested in full-packet mode without PacketSender; refusing HID fallback",
+				slog.String("item", formatItemName(i)),
+				slog.Int("itemGID", int(i.UnitID)))
+			return
+		}
+		ctx.Logger.Debug("Dropping item via AMB 0x5C QuickItemDrop",
+			slog.String("item", formatItemName(i)),
+			slog.Int("itemGID", int(i.UnitID)))
+		if err := ctx.PacketSender.QuickItemDropAMB(i); err != nil {
+			ctx.Logger.Warn("Packet item drop failed; refusing HID fallback",
+				slog.String("item", formatItemName(i)),
+				slog.Int("itemGID", int(i.UnitID)),
+				slog.Any("error", err))
+			return
+		}
+		utils.PingSleep(utils.Medium, 500)
+		ctx.RefreshGameData()
+		for _, it := range ctx.Data.Inventory.ByLocation(item.LocationInventory) {
+			if it.UnitID == i.UnitID {
+				ctx.Logger.Warn(fmt.Sprintf("Failed to drop item %s (UnitID: %d), still in inventory.", i.Name, i.UnitID))
+				return
+			}
+		}
+		ctx.Logger.Debug(fmt.Sprintf("Successfully dropped item %s (UnitID: %d).", i.Name, i.UnitID))
+		return
+	}
+
 	utils.PingSleep(utils.Medium, 170) // Medium operation: Prepare for drop
 	step.CloseAllMenus()
 	utils.PingSleep(utils.Medium, 170) // Medium operation: Wait for menus to close
@@ -672,23 +920,40 @@ func shouldNotifyAboutStashing(i data.Item) bool {
 	return true
 }
 
+func fullPacketHIDDisabled(ctx *context.Status) bool {
+	return ctx != nil && ctx.PacketSender != nil && ctx.HID != nil && ctx.HID.IsDisabled()
+}
+
+func markStashOpened(ctx *context.Status) {
+	if ctx == nil || ctx.CurrentGame == nil {
+		return
+	}
+	if !ctx.CurrentGame.HasOpenedStash || ctx.CurrentGame.CurrentStashTab == 0 {
+		ctx.CurrentGame.CurrentStashTab = 1
+	}
+	ctx.CurrentGame.HasOpenedStash = true
+}
+
 func clickStashGoldBtn() {
 	ctx := context.Get()
 	ctx.SetLastStep("clickStashGoldBtn")
 
 	utils.PingSleep(utils.Medium, 170) // Medium operation: Prepare for gold button click
 
-	if ctx.CharacterCfg.PacketCasting.UseForStashManagement && ctx.PacketSender != nil {
+	if ctx.PacketSender != nil {
 		goldStat, _ := ctx.Data.PlayerUnit.FindStat(stat.Gold, 0)
 		invGold := uint32(goldStat.Value)
 		if invGold > 0 {
-			if err := ctx.PacketSender.GoldTransfer(packet.GoldTransferDeposit, 0, invGold); err == nil {
+			// AMB 0x27 DepositGoldToStash — transfers the full inventory
+			// gold balance into the player's personal stash tab.
+			if err := ctx.PacketSender.DepositGoldToStash(ctx.Data.PlayerUnit.ID, 0, invGold, invGold); err == nil {
 				utils.PingSleep(utils.Critical, 500)
 				return
 			} else {
-				ctx.Logger.Warn("stash gold deposit packet failed, falling back to HID", slog.Any("error", err))
+				ctx.Logger.Warn("stash gold deposit packet failed, skipping HID fallback", slog.Any("error", err), slog.Uint64("inventoryGold", uint64(invGold)))
 			}
 		}
+		return
 	}
 
 	// HID.Click — in-process SendMessageW for gold deposit dialog.
@@ -715,6 +980,14 @@ func SwitchStashTab(tab int) {
 	ctx := context.Get()
 	if tab == ctx.CurrentGame.CurrentStashTab {
 		return // Already on this tab
+	}
+
+	if fullPacketHIDDisabled(ctx) {
+		ctx.Logger.Debug("SwitchStashTab: packet mode virtual tab switch",
+			slog.Int("from", ctx.CurrentGame.CurrentStashTab),
+			slog.Int("to", tab))
+		ctx.CurrentGame.CurrentStashTab = tab
+		return
 	}
 
 	// Ensure any chat messages that could prevent clicking on the tab are cleared
@@ -887,11 +1160,15 @@ func OpenStash() error {
 	if !found {
 		return errors.New("stash not found")
 	}
-	InteractObject(bank,
+	if err := InteractObject(bank,
 		func() bool {
 			return ctx.Data.OpenMenus.Stash
 		},
-	)
+	); err != nil {
+		return err
+	}
+	ctx.RefreshGameData()
+	markStashOpened(ctx)
 
 	return nil
 }
@@ -904,6 +1181,9 @@ func CloseStash() error {
 	// when the stash is reopened within the same game.
 
 	if ctx.Data.OpenMenus.Stash {
+		if fullPacketHIDDisabled(ctx) {
+			return step.CloseAllMenus()
+		}
 		ctx.HID.PressKey(win.VK_ESCAPE)
 	} else {
 		return errors.New("stash is not open")
@@ -946,6 +1226,13 @@ func TakeItemsFromStash(stashedItems []data.Item) error {
 
 		SwitchStashTab(targetTab)
 
+		if fullPacketHIDDisabled(ctx) {
+			if err := takeItemFromStashPacket(ctx, i, targetTab); err != nil {
+				return err
+			}
+			continue
+		}
+
 		// HID.ClickWithModifier — HID.Click now routes via in-process
 		// SendMessageW (APC into D2R thread), no OS message queue.
 		screenPos := ui.GetScreenCoordsForItem(i)
@@ -954,4 +1241,51 @@ func TakeItemsFromStash(stashedItems []data.Item) error {
 	}
 
 	return nil
+}
+
+func takeItemFromStashPacket(ctx *context.Status, i data.Item, targetTab int) error {
+	if ctx == nil || ctx.PacketSender == nil {
+		return fmt.Errorf("packet sender unavailable")
+	}
+
+	col, row, ok := findFreeInventorySlotForCursorItem(ctx, i)
+	if !ok {
+		return fmt.Errorf("no free inventory slot for %s", formatItemName(i))
+	}
+
+	switch i.Location.LocationType {
+	case item.LocationStash:
+		if err := ctx.PacketSender.PickItemFromContainer(i.UnitID, i.Position.X, i.Position.Y, amb.ContainerStash); err != nil {
+			return err
+		}
+		utils.PingSleep(utils.Light, 150)
+		if err := ctx.PacketSender.PutItemToInventory(uint32(i.UnitID), uint32(col), uint32(row), uint32(amb.ContainerInventory)); err != nil {
+			return err
+		}
+	case item.LocationSharedStash:
+		ownerID, ok := sharedStashOwnerID(ctx, targetTab)
+		if !ok {
+			return fmt.Errorf("missing shared stash owner ID for tab %d", targetTab)
+		}
+		if err := ctx.PacketSender.PullItemFromSharedStash(i, ownerID); err != nil {
+			return err
+		}
+		utils.PingSleep(utils.Light, 150)
+		if err := ctx.PacketSender.PutItemToInventory(uint32(i.UnitID), uint32(col), uint32(row), uint32(amb.ContainerInventory)); err != nil {
+			return err
+		}
+	case item.LocationGemsTab, item.LocationMaterialsTab, item.LocationRunesTab:
+		return fmt.Errorf("packet take from DLC stash tab %s is not wired", i.Location.LocationType)
+	default:
+		return fmt.Errorf("unsupported stash location %s", i.Location.LocationType)
+	}
+
+	utils.PingSleep(utils.Medium, 500)
+	ctx.RefreshGameData()
+	for _, invItem := range ctx.Data.Inventory.ByLocation(item.LocationInventory) {
+		if invItem.UnitID == i.UnitID {
+			return nil
+		}
+	}
+	return fmt.Errorf("packet take from stash did not move %s to inventory", formatItemName(i))
 }

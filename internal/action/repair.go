@@ -2,20 +2,25 @@ package action
 
 import (
 	"fmt"
+	"regexp"
+	"strconv"
 	"strings"
 
-	"local/internal/svc/internal/gamelib/data"
-	"local/internal/svc/internal/gamelib/data/item"
-	"local/internal/svc/internal/gamelib/data/npc"
-	"local/internal/svc/internal/gamelib/data/stat"
 	"local/internal/svc/internal/action/step"
 	"local/internal/svc/internal/context"
 	botCtx "local/internal/svc/internal/context"
 	"local/internal/svc/internal/game"
+	"local/internal/svc/internal/gamelib/data"
+	"local/internal/svc/internal/gamelib/data/item"
+	"local/internal/svc/internal/gamelib/data/npc"
+	"local/internal/svc/internal/gamelib/data/stat"
+	"local/internal/svc/internal/gamelib/memory"
 	"local/internal/svc/internal/town"
 	"local/internal/svc/internal/ui"
 	"local/internal/svc/internal/utils"
 )
+
+var repairAllCostText = regexp.MustCompile(`(?i)repair\s+all\s+equipment:?\s*([0-9][0-9,.]*)`)
 
 func RepairTownRoutine() error {
 	ctx := context.Get()
@@ -144,7 +149,9 @@ func repairAllAtNPC(repairNPC npc.ID) error {
 		return err
 	}
 
-	SelectNPCTradeOption(repairNPC)
+	if !SelectNPCTradeOption(repairNPC) {
+		return fmt.Errorf("repair trade window did not open for npc %d", repairNPC)
+	}
 
 	utils.Sleep(100)
 	clickRepairButton(ctx, repairNPC)
@@ -153,22 +160,39 @@ func repairAllAtNPC(repairNPC npc.ID) error {
 	return step.CloseAllMenus()
 }
 
-// clickRepairButton triggers the "repair all" action. With UseForRepair enabled
-// it sends packet 0x35 via the UI NetMan path; otherwise it falls back to the
-// HID click on the repair button. Packet errors fall back to HID transparently.
+// clickRepairButton triggers the "repair all" action. When PacketSender is
+// available, packet 0x35 is authoritative and HID is used only when no sender
+// exists at all.
 func clickRepairButton(ctx *context.Status, repairNPC npc.ID) {
-	if ctx.CharacterCfg.PacketCasting.UseForRepair && ctx.PacketSender != nil {
+	if ctx.PacketSender != nil {
 		npcUnit, found := ctx.Data.Monsters.FindOne(repairNPC, data.MonsterTypeNone)
 		if found {
-			ctx.Logger.Debug("Sending repair all via packet", "npc", repairNPC, "gid", npcUnit.UnitID)
-			if err := ctx.PacketSender.RepairAll(ctx.Data.PlayerUnit.ID); err == nil {
+			repairCost, costFound := repairAllCostFromPanels(ctx)
+			if !costFound {
+				ctx.Logger.Warn("Repair packet path: repair-all cost not found in panels, skipping HID fallback", "npc", repairNPC, "gid", npcUnit.UnitID)
 				return
-			} else {
-				ctx.Logger.Warn("Repair packet failed, falling back to HID", "error", err)
 			}
+			if repairCost == 0 {
+				ctx.Logger.Debug("Repair packet path: repair-all cost is 0", "npc", repairNPC, "gid", npcUnit.UnitID)
+				return
+			}
+
+			ctx.Logger.Debug("Sending AMB 0x35 NPCRepairAll", "npc", repairNPC, "gid", npcUnit.UnitID, "cost", repairCost)
+			if err := ctx.PacketSender.NPCRepairAll(npcUnit.UnitID, repairCost); err != nil {
+				ctx.Logger.Warn("NPCRepairAll packet failed, skipping HID fallback", "error", err, "npc", repairNPC, "gid", npcUnit.UnitID, "cost", repairCost)
+				return
+			}
+
+			utils.Sleep(300)
+			ctx.RefreshGameData()
+			if afterCost, ok := repairAllCostFromPanels(ctx); ok && afterCost > 0 {
+				ctx.Logger.Warn("NPCRepairAll packet sent but repair-all cost is still non-zero", "npc", repairNPC, "gid", npcUnit.UnitID, "beforeCost", repairCost, "afterCost", afterCost)
+			}
+			return
 		} else {
-			ctx.Logger.Warn("Repair packet path: NPC unit not found, falling back to HID", "npc", repairNPC)
+			ctx.Logger.Warn("Repair packet path: NPC unit not found, skipping HID fallback", "npc", repairNPC)
 		}
+		return
 	}
 
 	if ctx.Data.LegacyGraphics {
@@ -176,6 +200,78 @@ func clickRepairButton(ctx *context.Status, repairNPC npc.ID) {
 	} else {
 		ctx.HID.Click(game.LeftButton, ui.RepairButtonX, ui.RepairButtonY)
 	}
+}
+
+func repairAllCostFromPanels(ctx *context.Status) (uint32, bool) {
+	if ctx == nil || ctx.GameReader == nil {
+		return 0, false
+	}
+	panels := ctx.GameReader.ReadAllPanels()
+	for _, p := range panels {
+		if price, ok := repairAllCostFromPanel(p); ok {
+			return price, true
+		}
+	}
+	return 0, false
+}
+
+func repairAllCostFromPanel(p data.Panel) (uint32, bool) {
+	if p.PanelVisible && p.PanelEnabled {
+		text := memory.GetText(p)
+		if price, ok := parseRepairAllCostText(text); ok {
+			return price, true
+		}
+		if p.PanelName == "button_repair_all" {
+			if price, ok := firstRepairCostNumber(text); ok {
+				return price, true
+			}
+		}
+	}
+
+	for _, child := range p.PanelChildren {
+		if price, ok := repairAllCostFromPanel(child); ok {
+			return price, true
+		}
+	}
+	return 0, false
+}
+
+func parseRepairAllCostText(text string) (uint32, bool) {
+	m := repairAllCostText.FindStringSubmatch(text)
+	if len(m) != 2 {
+		return 0, false
+	}
+	return parseRepairCostNumber(m[1])
+}
+
+func firstRepairCostNumber(text string) (uint32, bool) {
+	start := -1
+	end := -1
+	for i, r := range text {
+		if (r >= '0' && r <= '9') || (start >= 0 && (r == ',' || r == '.')) {
+			if start < 0 {
+				start = i
+			}
+			end = i + len(string(r))
+			continue
+		}
+		if start >= 0 {
+			break
+		}
+	}
+	if start < 0 {
+		return 0, false
+	}
+	return parseRepairCostNumber(text[start:end])
+}
+
+func parseRepairCostNumber(raw string) (uint32, bool) {
+	raw = strings.NewReplacer(",", "", ".", "").Replace(raw)
+	v, err := strconv.ParseUint(raw, 10, 32)
+	if err != nil {
+		return 0, false
+	}
+	return uint32(v), true
 }
 
 func Repair() error {
@@ -242,7 +338,9 @@ func Repair() error {
 				return err
 			}
 
-			SelectNPCTradeOption(repairNPC)
+			if !SelectNPCTradeOption(repairNPC) {
+				return fmt.Errorf("repair trade window did not open for npc %d", repairNPC)
+			}
 
 			utils.Sleep(100)
 			clickRepairButton(ctx, repairNPC)

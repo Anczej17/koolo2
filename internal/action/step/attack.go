@@ -6,14 +6,14 @@ import (
 	"sync"
 	"time"
 
+	"local/internal/svc/internal/chicken"
+	"local/internal/svc/internal/context"
+	"local/internal/svc/internal/game"
 	"local/internal/svc/internal/gamelib/data"
 	"local/internal/svc/internal/gamelib/data/npc"
 	"local/internal/svc/internal/gamelib/data/skill"
 	"local/internal/svc/internal/gamelib/data/stat"
 	"local/internal/svc/internal/gamelib/utils"
-	"local/internal/svc/internal/chicken"
-	"local/internal/svc/internal/context"
-	"local/internal/svc/internal/game"
 	"local/internal/svc/internal/packet"
 )
 
@@ -175,6 +175,9 @@ func isValidEnemy(monster data.Monster, ctx *context.Status) bool {
 
 // Cleanup function to ensure proper state on exit
 func keyCleanup(ctx *context.Status) {
+	if ctx.HID == nil || ctx.HID.IsDisabled() {
+		return
+	}
 	ctx.HID.KeyUp(ctx.Data.KeyBindings.StandStill)
 }
 
@@ -394,7 +397,7 @@ func performAttack(ctx *context.Status, settings attackSettings, targetID data.U
 	}
 
 	// Check if we should use entity-targeted packet casting
-	if ctx.CharacterCfg.PacketCasting.UseForEntitySkills && ctx.PacketSender != nil && targetID != 0 {
+	if ctx.PacketSender != nil && targetID != 0 {
 		// Ensure we have the skill selected
 		if settings.primaryAttack {
 			if settings.skill != 0 && ctx.Data.PlayerUnit.LeftSkill != settings.skill {

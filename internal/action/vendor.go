@@ -1,27 +1,26 @@
 package action
 
 import (
+	"fmt"
 	"log/slog"
 
+	"local/internal/svc/internal/action/step"
+	"local/internal/svc/internal/context"
+	botCtx "local/internal/svc/internal/context"
 	"local/internal/svc/internal/gamelib/data"
 	"local/internal/svc/internal/gamelib/data/item"
 	"local/internal/svc/internal/gamelib/data/npc"
 	"local/internal/svc/internal/gamelib/data/stat"
-	"local/internal/svc/internal/action/step"
-	"local/internal/svc/internal/context"
-	botCtx "local/internal/svc/internal/context"
-	"local/internal/svc/internal/game"
 	"local/internal/svc/internal/town"
-	"local/internal/svc/internal/ui"
 	"local/internal/svc/internal/utils"
 )
 
 // VendorRefillOpts configures vendor refill behavior
 type VendorRefillOpts struct {
-	ForceRefill    bool     // Force refill even if not needed
-	SellJunk       bool     // Sell junk items to vendor
-	BuyConsumables bool     // Buy potions, scrolls, keys (default behavior when not specified)
-	LockConfig     [][]int  // Inventory slots to protect from selling
+	ForceRefill    bool    // Force refill even if not needed
+	SellJunk       bool    // Sell junk items to vendor
+	BuyConsumables bool    // Buy potions, scrolls, keys (default behavior when not specified)
+	LockConfig     [][]int // Inventory slots to protect from selling
 }
 
 func VendorRefill(opts VendorRefillOpts) (err error) {
@@ -55,6 +54,9 @@ func VendorRefill(opts VendorRefillOpts) (err error) {
 	}
 
 	ctx.Logger.Info("Visiting vendor...", slog.Bool("forceRefill", opts.ForceRefill))
+	if ctx.PacketSender == nil {
+		return fmt.Errorf("vendor packet flow unavailable: refusing HID fallback")
+	}
 
 	vendorNPC := town.GetTownByArea(ctx.Data.PlayerUnit.Area).RefillNPC()
 	if vendorNPC == npc.Drognan {
@@ -79,7 +81,9 @@ func VendorRefill(opts VendorRefillOpts) (err error) {
 		return err
 	}
 
-	SelectNPCTradeOption(vendorNPC)
+	if !SelectNPCTradeOption(vendorNPC) {
+		return fmt.Errorf("vendor trade window did not open for npc %d", vendorNPC)
+	}
 
 	if opts.SellJunk {
 		if len(opts.LockConfig) > 0 {
@@ -102,13 +106,18 @@ func VendorRefill(opts VendorRefillOpts) (err error) {
 func BuyAtVendor(vendor npc.ID, items ...VendorItemRequest) error {
 	ctx := botCtx.Get()
 	ctx.SetLastAction("BuyAtVendor")
+	if ctx.PacketSender == nil {
+		return fmt.Errorf("vendor packet flow unavailable: refusing HID fallback")
+	}
 
 	err := InteractNPC(vendor)
 	if err != nil {
 		return err
 	}
 
-	SelectNPCTradeOption(vendor)
+	if !SelectNPCTradeOption(vendor) {
+		return fmt.Errorf("vendor trade window did not open for npc %d", vendor)
+	}
 
 	for _, i := range items {
 		SwitchVendorTab(i.Tab)
@@ -155,22 +164,9 @@ func SwitchVendorTab(tab int) {
 
 	ctx := context.Get()
 	ctx.SetLastStep("switchVendorTab")
-
-	if ctx.GameReader.LegacyGraphics() {
-		x := ui.SwitchVendorTabBtnXClassic
-		y := ui.SwitchVendorTabBtnYClassic
-
-		tabSize := ui.SwitchVendorTabBtnTabSizeClassic
-		x = x + tabSize*tab - tabSize/2
-		ctx.HID.Click(game.LeftButton, x, y)
-		utils.PingSleep(utils.Medium, 500) // Medium operation: Wait for tab switch
-	} else {
-		x := ui.SwitchVendorTabBtnX
-		y := ui.SwitchVendorTabBtnY
-
-		tabSize := ui.SwitchVendorTabBtnTabSize
-		x = x + tabSize*tab - tabSize/2
-		ctx.HID.Click(game.LeftButton, x, y)
-		utils.PingSleep(utils.Medium, 500) // Medium operation: Wait for tab switch
+	if ctx.PacketSender != nil {
+		ctx.Logger.Warn("SwitchVendorTab: packet route not implemented, refusing HID tab click", "tab", tab)
+		return
 	}
+	ctx.Logger.Warn("SwitchVendorTab: PacketSender nil, refusing HID tab click", "tab", tab)
 }

@@ -7,16 +7,40 @@ import (
 	"sort"
 	"time"
 
+	"local/internal/svc/internal/game"
 	"local/internal/svc/internal/gamelib/data"
 	"local/internal/svc/internal/gamelib/data/area"
 	"local/internal/svc/internal/gamelib/data/object"
 	"local/internal/svc/internal/gamelib/data/skill"
 	"local/internal/svc/internal/gamelib/data/stat"
-	"local/internal/svc/internal/game"
 	"local/internal/svc/internal/utils"
 )
 
 func (pf *PathFinder) RandomMovement() {
+	if pf.packetSender != nil {
+		playerPos := pf.data.PlayerUnit.Position
+		for i := 0; i < 8; i++ {
+			dx := rand.Intn(15) - 7
+			dy := rand.Intn(15) - 7
+			if dx == 0 && dy == 0 {
+				continue
+			}
+			dest := data.Position{X: playerPos.X + dx, Y: playerPos.Y + dy}
+			if !pf.data.AreaData.IsWalkable(dest) {
+				continue
+			}
+			if err := pf.packetSender.RunToLocation(
+				uint16(dest.X), uint16(dest.Y),
+				uint16(playerPos.X), uint16(playerPos.Y),
+			); err == nil {
+				utils.Sleep(50)
+				return
+			}
+		}
+		slog.Warn("RandomMovement packet recovery found no walkable target")
+		return
+	}
+
 	midGameX := pf.gr.GameAreaSizeX / 2
 	midGameY := pf.gr.GameAreaSizeY / 2
 	x := midGameX + rand.Intn(midGameX) - (midGameX / 2)
@@ -576,9 +600,12 @@ func (pf *PathFinder) moveThroughPathTeleport(p Path) {
 				Y: pos.Y + pf.data.AreaOrigin.Y,
 			}
 
-			usePacket := pf.cfg.PacketCasting.UseForTeleport && pf.packetSender != nil
+			usePacket := pf.packetSender != nil
+			// Full-packet mode must not demote teleport to HID just because
+			// the destination is near an area edge.
+			allowHIDTeleportFallback := false
 
-			if usePacket {
+			if allowHIDTeleportFallback && usePacket {
 				if pf.isMouseClickTeleportZone() {
 					slog.Debug("Mouse click teleport zone detected, using mouse click instead of packet",
 						slog.String("area", pf.data.PlayerUnit.Area.Area().Name),
@@ -672,7 +699,7 @@ func (pf *PathFinder) isMouseClickTeleportZone() bool {
 
 func (pf *PathFinder) MoveCharacter(x, y int, gamePos ...data.Position) {
 	if pf.data.CanTeleport() {
-		if pf.cfg.PacketCasting.UseForTeleport && pf.packetSender != nil && len(gamePos) > 0 {
+		if pf.packetSender != nil && len(gamePos) > 0 {
 			// Full-packet bot: skill selection is always packet-driven (0x3C).
 			if pf.data.PlayerUnit.RightSkill != skill.Teleport {
 				if err := pf.packetSender.SelectRightSkill(skill.Teleport); err == nil {
@@ -682,33 +709,29 @@ func (pf *PathFinder) MoveCharacter(x, y int, gamePos ...data.Position) {
 
 			err := pf.packetSender.Teleport(gamePos[0], pf.data.PlayerUnit.Position)
 			if err != nil {
-				pf.hid.Click(game.RightButton, x, y)
+				slog.Warn("packet teleport failed; HID fallback disabled", slog.Any("error", err))
 			} else {
 				utils.Sleep(int(pf.data.PlayerCastDuration().Milliseconds()))
 			}
 		} else {
-			pf.hid.Click(game.RightButton, x, y)
+			if pf.packetSender != nil {
+				slog.Warn("packet teleport requested without world position; HID fallback disabled",
+					slog.Int("screenX", x),
+					slog.Int("screenY", y))
+			} else {
+				pf.hid.Click(game.RightButton, x, y)
+			}
 		}
 	} else {
-		// Non-teleport movement (walk/run).
-		//
-		// CANONICAL PATH = HID. The game/mouse.go HID layer goes through
-		// Phase 8C (gi.CursorPos cursor trampoline) + cross-process
-		// SendMessage to D2R's hwnd, which already gives us:
-		//   - in-process operation (no SendInput, no kernel input queue)
-		//   - multi-instance (each D2R has its own trampoline)
-		//   - background-capable (SendMessage cross-process is documented
-		//     and does NOT require foreground)
-		//   - zero ongoing WriteProcessMemory (cursor coords flow via SHM)
-		//
-		// Movement: ForceClick (PostMessageW + ForceMove key) is the primary
-		// non-HID path. Falls back to HID if not available.
-		if pf.cfg.PacketCasting.UseForMovement && pf.packetSender != nil {
-			if err := pf.packetSender.ForceClick(int32(x), int32(y)); err != nil {
-				pf.hid.MovePointer(x, y)
-				pf.hid.PressKeyBinding(pf.data.KeyBindings.ForceMove)
-			}
-		} else {
+		// Non-teleport movement in full-packet mode uses AMB 0x03 RunToLocation.
+		if pf.packetSender != nil && len(gamePos) > 0 {
+			dest := gamePos[0]
+			origin := pf.data.PlayerUnit.Position
+			_ = pf.packetSender.RunToLocation(
+				uint16(dest.X), uint16(dest.Y),
+				uint16(origin.X), uint16(origin.Y),
+			)
+		} else if pf.packetSender == nil {
 			pf.hid.MovePointer(x, y)
 			pf.hid.PressKeyBinding(pf.data.KeyBindings.ForceMove)
 		}

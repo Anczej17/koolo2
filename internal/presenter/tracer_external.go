@@ -22,16 +22,16 @@ import (
 )
 
 const (
-	traceProcAllAccess  uintptr = 0x001F0FFF
-	traceTHReadCtx      uint32  = 0x0008
-	traceTHSuspendResume uint32 = 0x0002
-	traceTH32CSSnapThread uint32 = 0x00000004
-	traceCtxControlInt  uint32  = 0x00100003 // CONTEXT_CONTROL | CONTEXT_INTEGER
+	traceProcAllAccess    uintptr = 0x001F0FFF
+	traceTHReadCtx        uint32  = 0x0008
+	traceTHSuspendResume  uint32  = 0x0002
+	traceTH32CSSnapThread uint32  = 0x00000004
+	traceCtxControlInt    uint32  = 0x00100003 // CONTEXT_CONTROL | CONTEXT_INTEGER
 
-	traceBuf0RVA uintptr = 0x019ED886
-	traceBuf1RVA uintptr = 0x01F51330
-	traceBufWindow int   = 32
-	tracePollMs       = 5
+	traceBuf0RVA   uintptr = 0x019ED886
+	traceBuf1RVA   uintptr = 0x01F51330
+	traceBufWindow int     = 64
+	tracePollMs            = 5
 )
 
 type traceThreadEntry32 struct {
@@ -46,11 +46,11 @@ type traceThreadEntry32 struct {
 
 // External tracer state.
 type ExternalTracer struct {
-	pid        uint32
-	d2rBase    uintptr
-	sendFnVA   uintptr
-	dualVA     uintptr
-	sniffer    *Tracer // SHM ring writer
+	pid      uint32
+	d2rBase  uintptr
+	sendFnVA uintptr
+	dualVA   uintptr
+	sniffer  *Tracer // SHM ring writer
 
 	hProcess windows.Handle
 	stop     atomic.Bool
@@ -137,6 +137,7 @@ func (t *ExternalTracer) loop() {
 		if t.readMem(t.d2rBase+traceBuf0RVA, cur0) {
 			if bytesDiffer(prev0, cur0) {
 				copy(prev0, cur0)
+				t.pushEntry(0, 0, 0, 0, 0, uint64(len(cur0)), 0, 0, append([]byte(nil), cur0...))
 				// Buffer changed but we may have already captured the sender
 				// via scanAllThreads. Don't double-push if last entry has same
 				// payload — for now accept potential dups.
@@ -145,6 +146,7 @@ func (t *ExternalTracer) loop() {
 		if t.readMem(t.d2rBase+traceBuf1RVA, cur1) {
 			if bytesDiffer(prev1, cur1) {
 				copy(prev1, cur1)
+				t.pushEntry(1, 0, 0, 0, 0, uint64(len(cur1)), 0, 0, append([]byte(nil), cur1...))
 			}
 		}
 	}
@@ -216,6 +218,9 @@ func (t *ExternalTracer) tryRipQuickCheck(tid uint32, buf0, buf1 []byte) {
 		hookID = 1
 		payload = buf1
 	}
+	if direct := t.readPacketArg(rcx, rdx); len(direct) > 0 {
+		payload = direct
+	}
 	t.pushEntry(hookID, tid, rip, rbp, rcx, rdx, r8, r9, payload)
 }
 
@@ -235,6 +240,20 @@ func (t *ExternalTracer) readMem(addr uintptr, out []byte) bool {
 	var n uintptr
 	err := windows.ReadProcessMemory(t.hProcess, addr, &out[0], uintptr(len(out)), &n)
 	return err == nil && int(n) == len(out)
+}
+
+func (t *ExternalTracer) readPacketArg(ptr, size uint64) []byte {
+	if ptr < 0x10000 || ptr >= 0x0000800000000000 {
+		return nil
+	}
+	if size == 0 || size > TraceEntryPayloadMax {
+		return nil
+	}
+	out := make([]byte, int(size))
+	if !t.readMem(uintptr(ptr), out) {
+		return nil
+	}
+	return out
 }
 
 // snapshotForBuf is called immediately after a packet appeared in buf0 or

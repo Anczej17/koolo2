@@ -12,6 +12,13 @@
 - ✅ Full project builds clean
 - ⏳ H1-H8 (ten plik) — TODO
 
+Audit note 2026-04-23:
+- H1 random SHM naming: already implemented
+- H3 cache TTL jitter: already implemented
+- H4 title rotation: already implemented
+- H5 chunk-read guard: already implemented
+- H7 auto-enable `STEALTH_READ`: still NOT done
+
 ---
 
 ## H1. Randomize SHM name per-session

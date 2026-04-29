@@ -29,8 +29,8 @@ const DATA_BUF_SIZE: usize = 64 * 1024;
 /// need just one Executor because everything is within rmod's ±2 GB range
 /// of D2R itself.
 pub struct Executor {
-    code:        AllocatedMemory,
-    data:        AllocatedMemory,
+    code: AllocatedMemory,
+    data: AllocatedMemory,
     code_cursor: usize,
     data_cursor: usize,
 }
@@ -68,10 +68,22 @@ impl Executor {
         })
     }
 
-    #[inline] pub fn code_base(&self) -> usize { self.code.addr() }
-    #[inline] pub fn data_base(&self) -> usize { self.data.addr() }
-    #[inline] pub fn code_rip(&self) -> usize { self.code.addr() + self.code_cursor }
-    #[inline] pub fn data_rip(&self) -> usize { self.data.addr() + self.data_cursor }
+    #[inline]
+    pub fn code_base(&self) -> usize {
+        self.code.addr()
+    }
+    #[inline]
+    pub fn data_base(&self) -> usize {
+        self.data.addr()
+    }
+    #[inline]
+    pub fn code_rip(&self) -> usize {
+        self.code.addr() + self.code_cursor
+    }
+    #[inline]
+    pub fn data_rip(&self) -> usize {
+        self.data.addr() + self.data_cursor
+    }
 
     /// Write bytes to the code buffer. Returns the VA of the first byte
     /// (useful as the call target). Panics if over-run — caller must not
@@ -101,7 +113,9 @@ impl Executor {
     pub unsafe fn inject_data_u64(&mut self, v: u64) -> Option<usize> {
         // Ensure 8-byte alignment before write.
         let pad = (8 - (self.data_cursor & 7)) & 7;
-        if self.data_cursor + pad + 8 > DATA_BUF_SIZE { return None; }
+        if self.data_cursor + pad + 8 > DATA_BUF_SIZE {
+            return None;
+        }
         self.data_cursor += pad;
         let va = self.data_rip();
         let bytes = v.to_le_bytes();

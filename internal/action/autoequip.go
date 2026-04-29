@@ -242,8 +242,11 @@ func equipCTAIfFound(allItems []data.Item) (bool, error) {
 	// Check secondary weapon slot
 	// Full-packet bot: always emit 0x50; no HID fallback (user 2026-04-19).
 	if ctx.PacketSender != nil {
-		fL, fR, tL, tR := WeaponSwapGIDs(ctx.Data)
-		if err := ctx.PacketSender.SwapWeapon(fL, fR, tL, tR, uint8(ctx.Data.ActiveWeaponSlot)); err != nil {
+		s0L, s0R, s1L, s1R := WeaponSwapGIDs(ctx.Data)
+		target := uint8(ctx.Data.ActiveWeaponSlot) ^ 1
+		lSk := uint16(ctx.Data.PlayerUnit.LeftSkill)
+		rSk := uint16(ctx.Data.PlayerUnit.RightSkill)
+		if err := ctx.PacketSender.SwapWeapon(s0L, s0R, s1L, s1R, lSk, rSk, target); err != nil {
 			ctx.Logger.Warn("autoequip SwapWeapon packet failed", "err", err)
 		}
 	}
@@ -280,8 +283,11 @@ func equipCTAIfFound(allItems []data.Item) (bool, error) {
 	// Switch back to primary
 	// Full-packet bot: always emit 0x50; no HID fallback (user 2026-04-19).
 	if ctx.PacketSender != nil {
-		fL, fR, tL, tR := WeaponSwapGIDs(ctx.Data)
-		if err := ctx.PacketSender.SwapWeapon(fL, fR, tL, tR, uint8(ctx.Data.ActiveWeaponSlot)); err != nil {
+		s0L, s0R, s1L, s1R := WeaponSwapGIDs(ctx.Data)
+		target := uint8(ctx.Data.ActiveWeaponSlot) ^ 1
+		lSk := uint16(ctx.Data.PlayerUnit.LeftSkill)
+		rSk := uint16(ctx.Data.PlayerUnit.RightSkill)
+		if err := ctx.PacketSender.SwapWeapon(s0L, s0R, s1L, s1R, lSk, rSk, target); err != nil {
 			ctx.Logger.Warn("autoequip SwapWeapon packet failed", "err", err)
 		}
 	}

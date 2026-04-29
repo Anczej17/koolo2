@@ -5,12 +5,12 @@ import (
 	"log/slog"
 	"time"
 
+	"local/internal/svc/internal/context"
+	"local/internal/svc/internal/game"
 	"local/internal/svc/internal/gamelib/data"
 	"local/internal/svc/internal/gamelib/data/area"
 	"local/internal/svc/internal/gamelib/data/mode"
 	"local/internal/svc/internal/gamelib/data/object"
-	"local/internal/svc/internal/context"
-	"local/internal/svc/internal/game"
 	"local/internal/svc/internal/town"
 	"local/internal/svc/internal/ui"
 	"local/internal/svc/internal/utils"
@@ -22,16 +22,13 @@ const (
 	maxPortalSyncAttempts  = 15
 )
 
-// InteractObject routes to packet or mouse implementation based on config
+// InteractObject routes object interactions through the packet path whenever a
+// sender is available. The mouse path is only for non-packet runs.
 func InteractObject(obj data.Object, isCompletedFn func() bool) error {
 	ctx := context.Get()
-
-	// For portals (blue/red), check if packet mode is enabled
-	if (obj.IsPortal() || obj.IsRedPortal()) && ctx.CharacterCfg.PacketCasting.UseForTpInteraction {
+	if ctx.PacketSender != nil {
 		return InteractObjectPacket(obj, isCompletedFn)
 	}
-
-	// Default to mouse interaction
 	return InteractObjectMouse(obj, isCompletedFn)
 }
 

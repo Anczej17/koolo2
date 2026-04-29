@@ -94,21 +94,33 @@ func TestNewGoldTransfer_0x27(t *testing.T) {
 }
 
 func TestNewNPCSellItem_0x33(t *testing.T) {
-	got := NewNPCSellItem(0x1D4C, data.UnitID(0x38), data.UnitID(0x0E), 5, 2, 0x03)
-	if len(got) != 22 {
-		t.Fatalf("0x33 length: got %d want 22 (capture_buysell.log last_diff=21)", len(got))
+	got := NewNPCSellItem(250, data.UnitID(0x7A), data.UnitID(0x0E), 0, 0, 5, 1, 0xFF)
+	if len(got) != 24 {
+		t.Fatalf("0x33 length: got %d want 24 (Akara live APC sell proof)", len(got))
 	}
 	if got[0] != 0x33 {
 		t.Fatalf("0x33 opcode: got 0x%02X want 0x33", got[0])
 	}
-	if binary.LittleEndian.Uint32(got[13:17]) != 0x00080009 {
-		t.Fatalf("0x33 constant bytes 13-16: want 09 00 08 00, got %X", got[13:17])
+	if binary.LittleEndian.Uint32(got[1:5]) != 250 {
+		t.Fatalf("0x33 price: got %d want 250", binary.LittleEndian.Uint32(got[1:5]))
+	}
+	if binary.LittleEndian.Uint32(got[5:9]) != 0x7A {
+		t.Fatalf("0x33 item gid: got 0x%X want 0x7A", binary.LittleEndian.Uint32(got[5:9]))
+	}
+	if binary.LittleEndian.Uint32(got[9:13]) != 0x0E {
+		t.Fatalf("0x33 npc gid: got 0x%X want 0x0E", binary.LittleEndian.Uint32(got[9:13]))
+	}
+	if binary.LittleEndian.Uint16(got[13:15]) != 0 || binary.LittleEndian.Uint16(got[15:17]) != 0 {
+		t.Fatalf("0x33 target pos: got %X want 0000 0000", got[13:17])
 	}
 	if binary.LittleEndian.Uint16(got[17:19]) != 5 {
-		t.Fatalf("0x33 slot: got %d want 5", binary.LittleEndian.Uint16(got[17:19]))
+		t.Fatalf("0x33 item x: got %d want 5", binary.LittleEndian.Uint16(got[17:19]))
 	}
-	if got[21] != 0x03 {
-		t.Fatalf("0x33 term: got 0x%02X want 0x03", got[21])
+	if binary.LittleEndian.Uint16(got[19:21]) != 1 {
+		t.Fatalf("0x33 item y: got %d want 1", binary.LittleEndian.Uint16(got[19:21]))
+	}
+	if got[21] != 0xFF || got[22] != 0 || got[23] != 0 {
+		t.Fatalf("0x33 tail: got %X want ff0000", got[21:24])
 	}
 }
 
@@ -181,13 +193,30 @@ func TestNewItemMoveStash_0x54(t *testing.T) {
 }
 
 func TestNewWeaponSwap_0x50(t *testing.T) {
-	// 0x50 weapon swap - ground truth 30B from logs/sec_*.log
-	got := NewWeaponSwap(data.UnitID(0x5C), data.UnitID(0x56), data.UnitID(0x4B), data.UnitID(0x50), 0)
+	// 0x50 weapon swap - 30B fixed layout per AMB.
+	// Args: slot0L, slot0R, slot1L, slot1R, leftSkillID, rightSkillID, targetSlot.
+	got := NewWeaponSwap(
+		data.UnitID(0x5C), data.UnitID(0x56),
+		data.UnitID(0x4B), data.UnitID(0x50),
+		54, 27, 1, // leftSkill=54, rightSkill=27, target slot 1
+	)
 	if len(got) != 30 {
-		t.Fatalf("0x50 length: got %d want 30 (ground truth)", len(got))
+		t.Fatalf("0x50 length: got %d want 30", len(got))
 	}
 	if got[0] != 0x50 {
 		t.Fatalf("0x50 opcode: got 0x%02X want 0x50", got[0])
+	}
+	// [17..25] must be all zeros (AMB "Unknown1/Unknown2").
+	for i := 17; i < 25; i++ {
+		if got[i] != 0 {
+			t.Fatalf("0x50 byte %d: got 0x%02X want 0x00 (trailer must be zeros)", i, got[i])
+		}
+	}
+	if got[25] != 54 || got[26] != 0 {
+		t.Fatalf("0x50 leftSkillID @25..27: got %02X %02X want 36 00", got[25], got[26])
+	}
+	if got[29] != 1 {
+		t.Fatalf("0x50 targetSlot @29: got %d want 1", got[29])
 	}
 }
 
@@ -349,13 +378,13 @@ func TestBuildersMatchLUT(t *testing.T) {
 		{"0x2F chat-init", NewNPCChatInit(data.UnitID(0x0E), 0, 0)},
 		{"0x30 chat-terminate", NewNPCChatTerminate(data.UnitID(0x0E), 0, 0)},
 		{"0x30 chat-terminate post-trade", NewNPCChatTerminatePostTrade(data.UnitID(0x0E), 0, 0, 0x03)},
-		{"0x33 sell", NewNPCSellItem(0x1D4C, data.UnitID(0x38), data.UnitID(0x0E), 5, 2, 0x03)},
+		{"0x33 sell", NewNPCSellItem(0x1D4C, data.UnitID(0x38), data.UnitID(0x0E), 9, 8, 5, 2, 0x03)},
 		{"0x38 dialog", NewNPCDialogOption(1, data.UnitID(0x0E))},
 		{"0x3C select-skill", NewSkillSelection(45).GetPayload()},
 		{"0x43 tp-confirm", NewTpConfirmTravel().GetPayload()},
 		{"0x4B tp-dest", NewTpDestinationSelect(6).GetPayload()},
 		{"0x4D npc-entity-action", NewNPCEntityAction(data.UnitID(0x0E), data.UnitID(0xD6), 0, 0, 0, 0)},
-		{"0x50 weapon-swap 0→1", NewWeaponSwap(data.UnitID(0x5C), data.UnitID(0x56), data.UnitID(0x4B), data.UnitID(0x50), 0)},
+		{"0x50 weapon-swap 0→1", NewWeaponSwap(data.UnitID(0x5C), data.UnitID(0x56), data.UnitID(0x4B), data.UnitID(0x50), 54, 27, 1)},
 	}
 	for _, tc := range cases {
 		if len(tc.data) == 0 {

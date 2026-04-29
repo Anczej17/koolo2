@@ -11,8 +11,8 @@ func TestStealthEnabled_Default(t *testing.T) {
 	// Reset once
 	stealthOnce = sync.Once{}
 	os.Unsetenv("STEALTH_READ")
-	if !StealthEnabled() {
-		t.Fatal("expected stealth ON by default (opt-out via STEALTH_READ=0)")
+	if StealthEnabled() {
+		t.Fatal("expected stealth OFF by default (opt-in via STEALTH_READ=1)")
 	}
 }
 

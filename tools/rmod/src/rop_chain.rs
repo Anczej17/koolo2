@@ -42,19 +42,19 @@ pub const BIT_RDI: u16 = 1 << 7;
 /// per the header comment. `trigger_va` is a code pointer: call it like a
 /// normal function (no args), it executes the chain and returns.
 pub struct BuiltChain {
-    pub stack_base:  *mut u64,
+    pub stack_base: *mut u64,
     pub stack_words: usize,
-    pub trigger_va:  usize,
+    pub trigger_va: usize,
 }
 
 /// Chain builder that owns a scratch stack + trigger thunk, each in
 /// pre-allocated memory. Build phase: assemble chain. Execute phase:
 /// call `trigger_va` as a zero-arg function pointer.
 pub struct RopChainBuilder<'a> {
-    gadgets:      &'a ROPGadgets,
-    stack_mem:    &'a AllocatedMemory,   // scratch stack: 4 KB+ RWX
-    trigger_mem:  &'a AllocatedMemory,   // code buffer for the trigger thunk
-    tick:         u64,                   // rdtsc — drives polymorphic picks
+    gadgets: &'a ROPGadgets,
+    stack_mem: &'a AllocatedMemory,   // scratch stack: 4 KB+ RWX
+    trigger_mem: &'a AllocatedMemory, // code buffer for the trigger thunk
+    tick: u64,                        // rdtsc — drives polymorphic picks
 }
 
 impl<'a> RopChainBuilder<'a> {
@@ -64,7 +64,12 @@ impl<'a> RopChainBuilder<'a> {
         trigger_mem: &'a AllocatedMemory,
         tick: u64,
     ) -> Self {
-        Self { gadgets, stack_mem, trigger_mem, tick }
+        Self {
+            gadgets,
+            stack_mem,
+            trigger_mem,
+            tick,
+        }
     }
 
     /// Build a `memcpy(dst, src, len)` chain using D2R's own `rep movsb` gadget.
@@ -74,26 +79,36 @@ impl<'a> RopChainBuilder<'a> {
         let g_pop_rsi = self.gadgets.find_pop_reg(BIT_RSI, self.tick)?;
         let g_pop_rdi = self.gadgets.find_pop_reg(BIT_RDI, self.tick ^ 0xA5A5)?;
         let g_pop_rcx = self.gadgets.find_pop_reg(BIT_RCX, self.tick ^ 0xC3C3)?;
-        let g_movsb   = self.gadgets.get_random_of_kind(GadgetKind::RepMovsb, self.tick)?;
+        let g_movsb = self
+            .gadgets
+            .get_random_of_kind(GadgetKind::RepMovsb, self.tick)?;
 
         // Build the stack in the scratch buffer. Layout grows DOWN (higher
         // addresses = bottom of stack). We write from base upwards so the
         // first qword we write is popped first.
         let stack_base = self.stack_mem.as_ptr() as *mut u64;
         let mut i = 0usize;
-        *stack_base.add(i) = g_pop_rsi.va; i += 1;
-        *stack_base.add(i) = src as u64;    i += 1;
-        *stack_base.add(i) = g_pop_rdi.va; i += 1;
-        *stack_base.add(i) = dst as u64;    i += 1;
-        *stack_base.add(i) = g_pop_rcx.va; i += 1;
-        *stack_base.add(i) = len as u64;    i += 1;
-        *stack_base.add(i) = g_movsb.va;   i += 1;
+        *stack_base.add(i) = g_pop_rsi.va;
+        i += 1;
+        *stack_base.add(i) = src as u64;
+        i += 1;
+        *stack_base.add(i) = g_pop_rdi.va;
+        i += 1;
+        *stack_base.add(i) = dst as u64;
+        i += 1;
+        *stack_base.add(i) = g_pop_rcx.va;
+        i += 1;
+        *stack_base.add(i) = len as u64;
+        i += 1;
+        *stack_base.add(i) = g_movsb.va;
+        i += 1;
         // The epilogue is placed at the END of the trigger thunk — gadget
         // chain eventually `ret`s to it and we return normally.
         let trigger_va = self.trigger_mem.addr();
         // Compute epilogue VA lazily — caller plugs after emit.
         // We leave a placeholder here; emit_trigger writes it back.
-        *stack_base.add(i) = 0; i += 1; // patched after emit_trigger
+        *stack_base.add(i) = 0;
+        i += 1; // patched after emit_trigger
 
         // Emit the trigger thunk into trigger_mem. It:
         //   1. pushes all callee-saved GPR + flags
@@ -196,10 +211,10 @@ impl<'a> RopChainBuilder<'a> {
         e.bytes(&[0x48, 0x8B, 0x25]);
         let disp_patch_offset = e.len();
         e.u32_le(0); // placeholder disp32
-        // next_rip at this point = e.len()
+                     // next_rip at this point = e.len()
         let next_rip_after_mov = e.len();
         let disp_target_offset = save_rsp_slot_offset as i64;
-        let disp_from_offset   = next_rip_after_mov as i64;
+        let disp_from_offset = next_rip_after_mov as i64;
         let disp_val = (disp_target_offset - disp_from_offset) as i32;
         // Patch disp
         let patch_ptr = self.trigger_mem.as_ptr().add(disp_patch_offset) as *mut i32;

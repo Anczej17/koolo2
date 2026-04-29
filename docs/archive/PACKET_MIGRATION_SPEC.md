@@ -85,18 +85,10 @@ Repair all items at NPC.
 ### Tier 3 — Town
 - Waypoint, Identify, Repair — separate packets needed
 
-## Config Flags (existing)
-- PacketCasting.UseForTeleport
-- PacketCasting.UseForSkillSelection
-- PacketCasting.UseForEntitySkills
-- PacketCasting.UseForItemPickup
-- PacketCasting.UseForEntranceInteraction
-- PacketCasting.UseForTpInteraction
+## Config Flags
 
-## Config Flags (new, needed)
-- PacketCasting.UseForMovement (walk/run)
-- PacketCasting.UseForWeaponSwap
-- PacketCasting.UseForNPCInteraction
-- PacketCasting.UseForWaypoint
-- PacketCasting.UseForIdentify
-- PacketCasting.UseForRepair
+Historical note:
+- `PacketCasting.*` used to gate packet features during the migration.
+- As of the 2026-04-23 cleanup, that config/UI layer has been removed.
+- Runtime should now decide directly based on sender availability and the
+  specific action path, not per-feature checkboxes in character config.

@@ -5,10 +5,10 @@ import (
 	"strings"
 	"time"
 
+	"github.com/lxn/win"
 	"local/internal/svc/internal/gamelib/data"
 	"local/internal/svc/internal/livetrace"
 	"local/internal/svc/internal/utils/winproc"
-	"github.com/lxn/win"
 )
 
 const (
@@ -18,6 +18,9 @@ const (
 
 // PressKey receives an ASCII code and sends a key press event to the game window
 func (hid *HID) PressKey(key byte) {
+	if !hid.guard("PressKey") {
+		return
+	}
 	livetrace.Get().Key(key, "")
 	win.PostMessage(hid.gr.HWND, win.WM_KEYDOWN, uintptr(key), hid.calculatelParam(key, true))
 	sleepTime := rand.Intn(keyPressMaxTime-keyPressMinTime) + keyPressMinTime
@@ -26,6 +29,9 @@ func (hid *HID) PressKey(key byte) {
 }
 
 func (hid *HID) KeySequence(keysToPress ...byte) {
+	if !hid.guard("KeySequence") {
+		return
+	}
 	for _, key := range keysToPress {
 		hid.PressKey(key)
 		time.Sleep(200 * time.Millisecond)
@@ -34,12 +40,18 @@ func (hid *HID) KeySequence(keysToPress ...byte) {
 
 // PressKeyWithModifier works the same as PressKey but with a modifier key (shift, ctrl, alt)
 func (hid *HID) PressKeyWithModifier(key byte, modifier ModifierKey) {
+	if !hid.guard("PressKeyWithModifier") {
+		return
+	}
 	hid.gi.OverrideGetKeyState(byte(modifier))
 	hid.PressKey(key)
 	hid.gi.RestoreGetKeyState()
 }
 
 func (hid *HID) PressKeyBinding(kb data.KeyBinding) {
+	if !hid.guard("PressKeyBinding") {
+		return
+	}
 	keys := getKeysForKB(kb)
 	if keys[1] == 0 || keys[1] == 255 {
 		hid.PressKey(keys[0])
@@ -51,12 +63,18 @@ func (hid *HID) PressKeyBinding(kb data.KeyBinding) {
 
 // KeyDown sends a key down event to the game window
 func (hid *HID) KeyDown(kb data.KeyBinding) {
+	if !hid.guard("KeyDown") {
+		return
+	}
 	keys := getKeysForKB(kb)
 	win.PostMessage(hid.gr.HWND, win.WM_KEYDOWN, uintptr(keys[0]), hid.calculatelParam(keys[0], true))
 }
 
 // KeyUp sends a key up event to the game window
 func (hid *HID) KeyUp(kb data.KeyBinding) {
+	if !hid.guard("KeyUp") {
+		return
+	}
 	keys := getKeysForKB(kb)
 	win.PostMessage(hid.gr.HWND, win.WM_KEYUP, uintptr(keys[0]), hid.calculatelParam(keys[0], false))
 }
@@ -67,6 +85,10 @@ func getKeysForKB(kb data.KeyBinding) [2]byte {
 	}
 
 	return [2]byte{kb.Key1[0], kb.Key1[1]}
+}
+
+func KeyBindingKeys(kb data.KeyBinding) [2]byte {
+	return getKeysForKB(kb)
 }
 
 func (hid *HID) GetASCIICode(key string) byte {

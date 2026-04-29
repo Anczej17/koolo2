@@ -39,6 +39,7 @@ var bakedOffsets = map[string]Offset{
 		UnitTable:                   0x1EA73D0,
 		UI:                          0x1EB70CA,
 		Hover:                       0x1DFB080,
+		MouseXY:                     0x1EC3BB8,
 		Expansion:                   0x1DFA4E8,
 		RosterOffset:                0x1EBD6E8,
 		PanelManagerContainerOffset: 0x1E11E40,

@@ -1,5 +1,10 @@
 package presenter
 
+import (
+	"fmt"
+	"time"
+)
+
 // capture.go — inline-hook packet capture (Discord 2026-04-15 approach).
 //
 // Complements existing PacketTracer (external polling mode) with a FAST PATH
@@ -26,10 +31,10 @@ type CapHookEntry struct {
 
 // CapHookStatus is a lightweight summary of ring state.
 type CapHookStatus struct {
-	Fires      uint32 // total hook fires since install
-	RingHead   uint32
-	RingTail   uint32
-	RingTotal  uint32
+	Fires       uint32 // total hook fires since install
+	RingHead    uint32
+	RingTail    uint32
+	RingTotal   uint32
 	RingDropped uint32
 }
 
@@ -40,6 +45,41 @@ func (p *Presenter) CapHookInstall() error { return p.sendCommand(CmdTraceInstal
 
 // CapHookUninstall restores the 14 stolen bytes and stops capture.
 func (p *Presenter) CapHookUninstall() error { return p.sendCommand(CmdTraceUninstall) }
+
+// CapHookSuppressVendor toggles send suppression for captured native vendor
+// transaction packets. When enabled, rmod still records outgoing 0x32/0x33
+// payloads but returns from send_fn before the packet reaches the server.
+func (p *Presenter) CapHookSuppressVendor(enabled bool) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if !p.initialized || p.localView == nil {
+		return nil
+	}
+	if readU32(p.localView, uintptr(offCapabilities))&CapVendorSendSuppress == 0 {
+		return fmt.Errorf("loaded rmod does not support vendor send suppression")
+	}
+	clearBytes(p.localView, uintptr(offPacketData), 8)
+	if enabled {
+		writeU32(p.localView, uintptr(offPacketData), 1)
+	}
+	writeU32(p.localView, uintptr(offCommandType), CmdCapSuppressVendor)
+	writeU32(p.localView, uintptr(offStatusFlag), StatusBusy)
+	writeU32(p.localView, uintptr(offCommandFlag), 1)
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		status := readU32(p.localView, uintptr(offStatusFlag))
+		if status == StatusDone {
+			return nil
+		}
+		if status == StatusError {
+			ec := readU32(p.localView, uintptr(offErrorCode))
+			return fmt.Errorf("vendor suppress command error 0x%X", ec)
+		}
+		time.Sleep(100 * time.Microsecond)
+	}
+	return fmt.Errorf("vendor suppress command timeout")
+}
 
 // CapHookStatusRead returns the current ring stats.
 func (p *Presenter) CapHookStatusRead() CapHookStatus {

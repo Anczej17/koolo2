@@ -9,27 +9,27 @@ import (
 	"sync"
 	"time"
 
-	"local/internal/svc/internal/gamelib/data"
-	"local/internal/svc/internal/gamelib/data/area"
-	"local/internal/svc/internal/gamelib/data/skill"
-	"local/internal/svc/internal/gamelib/data/stat"
-	"local/internal/svc/internal/gamelib/memory"
+	"golang.org/x/sync/errgroup"
 	"local/internal/svc/internal/action"
 	"local/internal/svc/internal/action/step"
 	botCtx "local/internal/svc/internal/context"
 	"local/internal/svc/internal/drop"
 	"local/internal/svc/internal/event"
+	"local/internal/svc/internal/gamelib/data"
+	"local/internal/svc/internal/gamelib/data/area"
+	"local/internal/svc/internal/gamelib/data/skill"
+	"local/internal/svc/internal/gamelib/data/stat"
+	"local/internal/svc/internal/gamelib/memory"
 	"local/internal/svc/internal/health"
 	"local/internal/svc/internal/run"
 	"local/internal/svc/internal/utils"
-	"golang.org/x/sync/errgroup"
 )
 
 // Sentinel errors for run finish reasons
 var (
-	errPlayerIdle   = errors.New("player idle for too long, quitting game")
-	errGlobalIdle   = errors.New("globally idle for too long (no movement), quitting game")
-	errPlayerStuck  = errors.New("player stuck in an unrecoverable movement loop, quitting")
+	errPlayerIdle  = errors.New("player idle for too long, quitting game")
+	errGlobalIdle  = errors.New("globally idle for too long (no movement), quitting game")
+	errPlayerStuck = errors.New("player stuck in an unrecoverable movement loop, quitting")
 )
 
 type Bot struct {
@@ -130,15 +130,25 @@ func (b *Bot) Run(ctx context.Context, firstRun bool, runs []run.Run) error {
 	// VK_G press (single_supervisor.go:257) for ClassicMode supervisors so
 	// tiny-mod actually switches even when the memory flag lies.
 	if b.ctx.CharacterCfg.ClassicMode && !b.ctx.Data.IsDLC() {
-		b.ctx.Logger.Info("ClassicMode: forcing VK_G to toggle tiny-mod legacy graphics")
-		b.ctx.HID.PressKey(0x47) // VK_G
-		utils.Sleep(500)
-		b.ctx.RefreshGameData()
+		if b.ctx.PacketSender != nil {
+			b.ctx.Logger.Info("ClassicMode: forcing VK_G via in-process key sender")
+			if err := b.ctx.PacketSender.PostKeyInProcess(0x47); err != nil {
+				b.ctx.Logger.Warn("ClassicMode: in-process VK_G failed; no HID fallback in-game", slog.Any("error", err))
+			} else {
+				utils.Sleep(500)
+				b.ctx.RefreshGameData()
+			}
+		} else {
+			b.ctx.Logger.Warn("ClassicMode: PacketSender nil for VK_G; no HID fallback in-game")
+		}
 	}
 	if !b.ctx.Data.IsDLC() {
 		action.SwitchToLegacyMode()
 	}
 	b.ctx.RefreshGameData()
+	if err := b.ctx.WaitForStableInGame(15 * time.Second); err != nil {
+		return fmt.Errorf("game load validation failed: %w", err)
+	}
 
 	b.ctx.Logger.Info("Game loaded", slog.String("expansion", b.ctx.Data.ExpCharLabel()))
 
@@ -275,17 +285,18 @@ func (b *Bot) Run(ctx context.Context, firstRun bool, runs []run.Run) error {
 				}
 
 				// Legacy/Portrait/Chat checks (Fast, Read-only/Input-gated) only for non DLC Characters
-				if b.ctx.CharacterCfg.ClassicMode && !b.ctx.Data.LegacyGraphics && !b.ctx.Data.IsDLC() {
+				hidDisabled := b.ctx.HID != nil && b.ctx.HID.IsDisabled()
+				if !hidDisabled && b.ctx.CharacterCfg.ClassicMode && !b.ctx.Data.LegacyGraphics && !b.ctx.Data.IsDLC() {
 					action.SwitchToLegacyMode()
 					time.Sleep(150 * time.Millisecond)
 				}
 				// Hide merc/other players portraits if enabled
-				if b.ctx.CharacterCfg.HidePortraits && b.ctx.Data.OpenMenus.PortraitsShown {
+				if !hidDisabled && b.ctx.CharacterCfg.HidePortraits && b.ctx.Data.OpenMenus.PortraitsShown {
 					action.HidePortraits()
 					time.Sleep(150 * time.Millisecond)
 				}
 				// Close chat if somehow was opened (prevention)
-				if b.ctx.Data.OpenMenus.ChatOpen {
+				if !hidDisabled && b.ctx.Data.OpenMenus.ChatOpen {
 					b.ctx.HID.PressKey(b.ctx.Data.KeyBindings.Chat.Key1[0])
 					time.Sleep(150 * time.Millisecond)
 				}

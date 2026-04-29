@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
-	"path/filepath"
 	"runtime"
 	"strconv"
 	"sync"
@@ -12,8 +11,7 @@ import (
 	"time"
 	"unsafe"
 
-	"golang.org/x/sys/windows"
-
+	"github.com/lxn/win"
 	"local/internal/svc/cmd/app/log"
 	"local/internal/svc/internal/character"
 	"local/internal/svc/internal/config"
@@ -21,16 +19,12 @@ import (
 	"local/internal/svc/internal/drop"
 	"local/internal/svc/internal/event"
 	"local/internal/svc/internal/game"
-	"local/internal/svc/internal/gamelib/memory"
 	"local/internal/svc/internal/health"
-	"local/internal/svc/internal/livetrace"
 	"local/internal/svc/internal/mule"
-	"local/internal/svc/internal/ntapi"
 	"local/internal/svc/internal/pather"
 	"local/internal/svc/internal/presenter"
 	"local/internal/svc/internal/utils"
 	"local/internal/svc/internal/utils/winproc"
-	"github.com/lxn/win"
 )
 
 type SupervisorManager struct {
@@ -38,6 +32,7 @@ type SupervisorManager struct {
 	logger         *slog.Logger
 	supervisors    map[string]Supervisor
 	crashDetectors map[string]*game.CrashDetector
+	starting       map[string]bool
 	eventListener  *event.Listener
 	Drop           *drop.Service // Drop: Service façade to manage Drop domain
 }
@@ -50,6 +45,7 @@ func NewSupervisorManager(logger *slog.Logger, eventListener *event.Listener) *S
 		logger:         logger,
 		supervisors:    make(map[string]Supervisor),
 		crashDetectors: make(map[string]*game.CrashDetector),
+		starting:       make(map[string]bool),
 		eventListener:  eventListener,
 		Drop:           drop.NewService(logger),
 	}
@@ -93,18 +89,29 @@ func (mng *SupervisorManager) Start(supervisorName string, attachToExisting bool
 
 func (mng *SupervisorManager) startInternal(supervisorName string, attachToExisting bool, manualMode bool, claudeMode bool, pid uint32, hwnd uint32) error {
 	// Avoid multiple instances of the supervisor - shitstorm prevention
-	mng.mu.RLock()
+	mng.mu.Lock()
 	_, exists := mng.supervisors[supervisorName]
-	mng.mu.RUnlock()
 	if exists {
+		mng.mu.Unlock()
 		return fmt.Errorf("supervisor %s is already running", supervisorName)
 	}
+	if mng.starting[supervisorName] {
+		mng.mu.Unlock()
+		return fmt.Errorf("supervisor %s is already starting", supervisorName)
+	}
+	mng.starting[supervisorName] = true
+	mng.mu.Unlock()
+	defer func() {
+		mng.mu.Lock()
+		delete(mng.starting, supervisorName)
+		mng.mu.Unlock()
+	}()
 
 	// buildSupervisor reads CLAUDE_MODE to decide between rmod.dll and
 	// rmod_sniffer.dll for the in-process presenter. Set the env var now,
 	// BEFORE buildSupervisor runs — setting it later leaves the wrong DLL
 	// injected and the sniffer's Present hook gets overridden.
-	if claudeMode {
+	if claudeMode || !manualMode {
 		os.Setenv("CLAUDE_MODE", "1")
 	}
 
@@ -124,6 +131,9 @@ func (mng *SupervisorManager) startInternal(supervisorName string, attachToExist
 
 	if attachToExisting {
 		if pid != 0 && hwnd != 0 {
+			if claudeMode && !win.IsWindowVisible(win.HWND(hwnd)) {
+				return fmt.Errorf("refusing Claude-mode attach to hidden/headless D2R window: pid=%d hwnd=%d", pid, hwnd)
+			}
 			mng.logger.Info("Attaching to existing game", "pid", pid, "hwnd", hwnd)
 			optionalPID = pid
 			optionalHWND = win.HWND(hwnd)
@@ -142,6 +152,7 @@ func (mng *SupervisorManager) startInternal(supervisorName string, attachToExist
 	if ctx != nil {
 		if claudeMode {
 			ctx.ClaudeModeActive = true
+			ctx.ClaudeAttachExisting = attachToExisting
 			os.Setenv("CLAUDE_MODE", "1")
 			supervisorLogger.Info("Claude mode enabled")
 		} else if manualMode {
@@ -149,7 +160,8 @@ func (mng *SupervisorManager) startInternal(supervisorName string, attachToExist
 			supervisorLogger.Info("Manual mode enabled")
 		} else {
 			ctx.ManualModeActive = false
-			supervisorLogger.Info("Normal mode enabled")
+			os.Setenv("CLAUDE_MODE", "1")
+			supervisorLogger.Info("Normal mode enabled with Claude-equivalent packet runtime")
 		}
 	}
 
@@ -159,6 +171,7 @@ func (mng *SupervisorManager) startInternal(supervisorName string, attachToExist
 	}
 	mng.supervisors[supervisorName] = supervisor
 	mng.crashDetectors[supervisorName] = crashDetector
+	delete(mng.starting, supervisorName)
 	mng.mu.Unlock()
 
 	if config.App.GameWindowArrangement {
@@ -250,13 +263,14 @@ func (mng *SupervisorManager) Stop(supervisor string) {
 		// Log the stop sequence
 		mng.logger.Info("Stopping supervisor instance", slog.String("supervisor", supervisor))
 
-		// Stop the Supervisor's internal loops and kill the client if configured
-		s.Stop()
-
-		// Stop the crash detector associated with it
+		// Stop the crash detector FIRST so it cannot observe the intentional
+		// client teardown as a crash and race into restartFunc.
 		if cd != nil {
 			cd.Stop()
 		}
+
+		// Stop the Supervisor's internal loops and kill the client if configured
+		s.Stop()
 
 		// Delete from the list of active Supervisors
 		mng.mu.Lock()
@@ -331,6 +345,10 @@ func (mng *SupervisorManager) buildSupervisor(supervisorName string, logger *slo
 		if optionalPID != 0 && optionalHWND != 0 {
 			pid = optionalPID
 			hwnd = optionalHWND
+			logger.Info("buildSupervisor: using existing game process",
+				slog.String("supervisor", supervisorName),
+				slog.Uint64("pid", uint64(pid)),
+				slog.Uint64("hwnd", uint64(hwnd)))
 		} else {
 			return nil, nil, fmt.Errorf("pid and hwnd are required when attaching to an existing game")
 		}
@@ -341,226 +359,63 @@ func (mng *SupervisorManager) buildSupervisor(supervisorName string, logger *slo
 		} else if kbResult.Missing {
 			logger.Info("Key binding file missing; will bootstrap in-game", slog.String("character", cfg.CharacterName))
 		}
+		logger.Info("buildSupervisor: StartGame begin",
+			slog.String("supervisor", supervisorName),
+			slog.String("appPath", config.App.AppPath),
+			slog.String("authMethod", cfg.AuthMethod),
+			slog.String("realm", cfg.Realm),
+			slog.String("args", cfg.CommandLineArgs))
 		pid, hwnd, err = game.StartGame(cfg.Username, cfg.Password, cfg.AuthMethod, cfg.AuthToken, cfg.Realm, cfg.CommandLineArgs, config.App.UseCustomSettings)
 		if err != nil {
 			return nil, nil, fmt.Errorf("error starting game: %w", err)
 		}
+		logger.Info("buildSupervisor: StartGame complete",
+			slog.String("supervisor", supervisorName),
+			slog.Uint64("pid", uint64(pid)),
+			slog.Uint64("hwnd", uint64(hwnd)))
 	}
 
+	logger.Info("buildSupervisor: NewGameReader begin",
+		slog.String("supervisor", supervisorName),
+		slog.Uint64("pid", uint64(pid)),
+		slog.Uint64("hwnd", uint64(hwnd)))
 	gr, err := game.NewGameReader(cfg, supervisorName, pid, hwnd, logger)
 	if err != nil {
 		return nil, nil, fmt.Errorf("error creating game reader: %w", err)
 	}
+	logger.Info("buildSupervisor: NewGameReader complete", slog.String("supervisor", supervisorName))
 
+	logger.Info("buildSupervisor: InjectorInit begin",
+		slog.String("supervisor", supervisorName),
+		slog.Uint64("pid", uint64(pid)))
 	gi, err := game.InjectorInit(logger, gr.GetPID())
 	if err != nil {
 		return nil, nil, fmt.Errorf("error creating game injector: %w", err)
 	}
+	logger.Info("buildSupervisor: InjectorInit complete", slog.String("supervisor", supervisorName))
 
-	// Present hook — Phase 8. Requires absolute path for LoadLibraryW in D2R.
-	func() {
-		defer func() {
-			if r := recover(); r != nil {
-				logger.Error(fmt.Sprintf("PANIC in presenter init: %v", r))
-			}
-		}()
-		presenterDLLName := "rmod.dll"
-		// In Claude mode, use the sniffer-enabled DLL that includes
-		// in-process buf0/buf1 polling with zero detection surface.
-		if os.Getenv("CLAUDE_MODE") == "1" {
-			if _, err := os.Stat(filepath.Join("tools", "rmod_sniffer.dll")); err == nil {
-				presenterDLLName = "rmod_sniffer.dll"
-				logger.Info("Claude mode: using sniffer-enabled DLL")
-			}
-		}
-		presenterDLLPath := filepath.Join("tools", presenterDLLName)
-		if absPath, err := filepath.Abs(presenterDLLPath); err == nil {
-			presenterDLLPath = absPath
-		}
-		if _, statErr := os.Stat(presenterDLLPath); statErr == nil {
-			logger.Debug("init presenter", slog.Uint64("pid", uint64(pid)), slog.Uint64("grPid", uint64(gr.GetPID())))
-			fnSendPacket, fnErr := gr.Process.GetD2GSSendPacketFn()
-			if fnErr != nil {
-				logger.Warn("could not resolve dispatch function, using legacy path", slog.Any("error", fnErr))
-			} else {
-				// UI NetMan global RVA — required for identify/buy/sell/cube/gamble.
-				// RE'd from D2R image: UI NetMan global @ base + 0x19ED860 (vtable[5]
-				// of struct = the queue inserter at FUN_7ff79d8b81b0).
-				const uiNetManRVA uintptr = 0x19ED860
-				uiNetManAddr := gr.Process.ModuleBaseAddress() + uiNetManRVA
-
-				// Mirror buffer RVA — for dual-send vendor path.
-				// RE'd 2026-04-10: D2R's wrapper at ~RVA 0x117500 does memcpy to
-				// this global before calling send_fn. Resolved from:
-				//   lea rcx, [rip + 0x1e09cf0] at RVA 0x117639 → target RVA 0x1F21330
-				// Mirror buffer used by D2R's dual_send_wrap (vendor trade path).
-				// Verified live 2026-04-12 via memdiff capture — dual_send_wrap at
-				// RVA 0x147639 does `LEA RCX, [rip+disp]` where the target is this
-				// global. The value was 0x1F21330 prior to a recent D2R patch that
-				// shifted it by +0x30000. See logs/capture2_analysis_2026-04-12.md
-				// for the full decode. TODO: resolve this dynamically via a sigscan
-				// that disassembles dual_send_wrap at startup so the next patch
-				// can't silently break the dual-send path again.
-				const mirrorBufRVA uintptr = 0x1F51330
-				mirrorBufAddr := gr.Process.ModuleBaseAddress() + mirrorBufRVA
-
-				// Phase 9: in-process click via real_click_worker.
-				// Failure here is non-fatal — the legacy HID path still works.
-				var realClickFn uintptr
-				if rcFn, rcErr := gr.Process.GetRealClickWorkerFn(); rcErr == nil {
-					realClickFn = rcFn
-				} else {
-					logger.Warn("could not resolve real_click_worker; in-process click disabled", slog.Any("error", rcErr))
-				}
-
-				logger.Debug("resolved runtime addresses",
-					slog.Uint64("send", uint64(fnSendPacket)),
-					slog.Uint64("ui", uint64(uiNetManAddr)),
-					slog.Uint64("click", uint64(realClickFn)),
-					slog.Uint64("mirror", uint64(mirrorBufAddr)))
-				// Claude mode delegates pres.Init to single_supervisor.initClaudePresenter
-				// (runs after game entry). Two pres.Init calls inject two rmod images
-				// whose Present detours chain — image_2's UninstallDetour then restores
-				// image_1's JMP back instead of the original Present prologue, so
-				// SnapshotInit acks time out and D2R dies. Normal/Manual modes still
-				// get their presenter here (they never reach initClaudePresenter).
-				if os.Getenv("MODE2") == "1" && os.Getenv("CLAUDE_MODE") != "1" {
-					pres := presenter.New(pid, presenterDLLPath)
-					if initErr := pres.Init(fnSendPacket, uiNetManAddr, realClickFn, uintptr(hwnd), mirrorBufAddr); initErr != nil {
-						logger.Error("runtime module init FAILED — falling through to APC path", slog.Any("error", initErr))
-					} else {
-						gi.SetPresenter(pres)
-						gr.Process.SetExternalCallFn(pres.CallFn)
-						gr.Process.SetExternalWriteMem(pres.WriteMem)
-						forceMoveAddr := gr.Process.GetModuleBase() + 0x19D25B4 + 0x49C + 4
-						pres.SetForceMoveAddr(forceMoveAddr)
-						if os.Getenv("MODE2") == "1" {
-							gr.Process.SetExternalSender(pres.SendPacket)
-							gr.Process.SetExternalUISender(pres.SendUIPacket)
-							gr.Process.SetExternalDualSender(pres.SendDualPacket)
-							gr.Process.SetExternalClick(func(x, y int32, btn byte) error {
-								return pres.ClickAt(x, y, presenter.ClickButton(btn))
-							})
-							gr.Process.SetExternalForceClick(func(x, y int32) error {
-								return pres.ForceClick(x, y)
-							})
-							logger.Info("runtime module: Present hook path enabled for packet sending")
-						}
-						logger.Info("runtime module initialized")
-
-						// P1-GID Phase B0: wire in-process PlayerUnit snapshot.
-						// Opt-in via SNAPSHOT_ENABLE=1 — default off because Phase-2
-						// dup-injection (manager.go pres.Init + single_supervisor
-						// initClaudePresenter both call loadModule) creates two
-						// rmod images in D2R; the install_detour G_TRAMPOLINE guard
-						// is per-image and doesn't unify them, so SnapshotInit acks
-						// time out and D2R dies. Live test 2026-04-17 16:28 confirmed.
-						// Re-enable after dup-injection is fixed (SetPresenter check).
-						if os.Getenv("SNAPSHOT_ENABLE") != "1" {
-							logger.Info("MODE2: skipping snapshot init (SNAPSHOT_ENABLE not set — presenter-only)")
-						} else {
-							unitTableVA, expansionVA, waypointVA := gr.GameReader.SnapshotInitOffsets()
-							// Hard-fail semantics per P1_GID_PLAN.md, but clean teardown
-							// so rmod restores Present before we exit — otherwise D2R
-							// zombies (see Desktop/reports/RESUME_AFTER_REBOOT_4.md).
-							failSnapshot := func(msg string) {
-								logger.Error(msg)
-								if uerr := pres.UninstallDetour(); uerr != nil {
-									logger.Warn("uninstall detour during hard-fail",
-										slog.Any("error", uerr))
-								}
-								os.Exit(1)
-							}
-							if setErr := pres.WriteSnapshotStatics(gr.GameReader.SnapshotStaticEntries()); setErr != nil {
-								failSnapshot(fmt.Sprintf("snapshot statics write failed: %v", setErr))
-							}
-							if snapErr := pres.SnapshotInit(unitTableVA, expansionVA, waypointVA); snapErr != nil {
-								failSnapshot(fmt.Sprintf("snapshot init failed: %v", snapErr))
-							}
-							sr := memory.NewSnapshotReader(pres.LocalView(), uintptr(presenter.SharedBufSize))
-							// Soft-fallback to RPM for walker-coverage gaps during
-							// bootstrap. Walker at period=60 needs ~1 second at 60 FPS
-							// to populate statics; without fallback bot panics on
-							// first read before the first scan lands.
-							sr.SetFallback(gr.Process)
-							if tickErr := sr.WaitForFirstTick(3 * time.Second); tickErr != nil {
-								failSnapshot(fmt.Sprintf("snapshot tick never advanced: %v", tickErr))
-							}
-							gr.GameReader.AttachSnapshot(sr)
-							logger.Info("P1-GID snapshot attached; bot memory reads now in-process via SHM",
-								slog.Uint64("tick", sr.Tick()),
-								slog.Uint64("regions", uint64(sr.RegionCount())),
-								slog.Uint64("data_bytes", uint64(sr.DataBytes())))
-						}
-					}
-				}
-				// Liveness watchdog: tight poll (200 ms) so we can snapshot the
-				// in-process VEH crash record before the supervisor restart
-				// tears down the presenter (and its SHM mapping).
-				go func(watchPID uint32, gi *game.MemoryInjector) {
-					defer func() {
-						if r := recover(); r != nil {
-							logger.Error(fmt.Sprintf("D2R watchdog PANIC: %v", r))
-						}
-					}()
-					const query = 0x0400 // PROCESS_QUERY_LIMITED_INFORMATION
-					h, err := ntapi.OpenProcess(query, watchPID)
-					if err != nil {
-						logger.Warn("D2R watchdog: could not open process", slog.Any("error", err))
-						return
-					}
-					defer ntapi.CloseHandle(h)
-
-					// Cache D2R's module list now so ResolveAddress can map
-					// crash frames to "module+0xRVA" strings.
-					if err := RefreshD2RModules(watchPID); err != nil {
-						logger.Warn("D2R watchdog: module refresh failed", slog.Any("error", err))
-					}
-
-					tick := time.NewTicker(200 * time.Millisecond)
-					defer tick.Stop()
-					var exit uint32
-					var sec int
-					for range tick.C {
-						if err := windows.GetExitCodeProcess(h, &exit); err != nil {
-							logger.Error("D2R watchdog: GetExitCodeProcess failed — D2R gone", slog.Any("error", err), slog.Uint64("pid", uint64(watchPID)))
-							snapshotAndLogCrashDiag(gi, logger, watchPID)
-							return
-						}
-						if exit != 259 { // STILL_ACTIVE
-							logger.Error(fmt.Sprintf("D2R watchdog: D2R EXITED pid=%d exitCode=%#x (%d)", watchPID, exit, exit))
-							livetrace.Get().Crash("d2r_exit", watchPID, exit, nil)
-							snapshotAndLogCrashDiag(gi, logger, watchPID)
-							return
-						}
-						sec++
-						if sec%25 == 0 { // ~5 s heartbeat
-							logger.Info(fmt.Sprintf("D2R watchdog: alive pid=%d", watchPID))
-						}
-					}
-				}(pid, gi)
-			}
-		}
-	}()
+	// Presenter/rmod injection is intentionally delayed until the character is
+	// in-game. Injecting here happens during title/char-select flow and has
+	// repeatedly broken normal menu navigation.
 
 	ctx := context.NewContext(supervisorName)
 
 	hidM := game.NewHID(gr, gi)
 	pf := pather.NewPathFinder(gr, ctx.Data, hidM, cfg)
 
-	bm := health.NewBeltManager(ctx.Data, hidM, logger, supervisorName)
-	hm := health.NewHealthManager(bm, ctx.Data)
-
 	ctx.CharacterCfg = cfg
 	ctx.EventListener = mng.eventListener
 	ctx.HID = hidM
 	ctx.PacketSender = game.NewPacketSender(gr.Process)
 	ctx.Logger = logger
-	ctx.Manager = game.NewGameManager(gr, hidM, supervisorName)
+	ctx.Manager = game.NewGameManager(gr, hidM, gi, ctx.PacketSender, supervisorName)
 	ctx.GameReader = gr
 	ctx.MemoryInjector = gi
 	ctx.PathFinder = pf
 	pf.SetPacketSender(ctx.PacketSender)
+
+	bm := health.NewBeltManager(ctx.Data, hidM, ctx.PacketSender, logger, supervisorName)
+	hm := health.NewHealthManager(bm, ctx.Data)
 	ctx.BeltManager = bm
 	ctx.HealthManager = hm
 	char, err := character.BuildCharacter(ctx.Context)
@@ -614,6 +469,27 @@ func (mng *SupervisorManager) buildSupervisor(supervisorName string, logger *slo
 
 	// This function will be used to restart the client - passed to the crashDetector
 	restartFunc := func() {
+		mng.mu.RLock()
+		managedSup, stillManaged := mng.supervisors[supervisorName]
+		managedCd := mng.crashDetectors[supervisorName]
+		mng.mu.RUnlock()
+		if !stillManaged || managedSup != supervisor {
+			mng.logger.Info("Skipping crash restart because supervisor is no longer managed",
+				slog.String("supervisor", supervisorName))
+			return
+		}
+		if managedCd != nil && managedCd.StopRequested() {
+			mng.logger.Info("Skipping crash restart because stop was already requested",
+				slog.String("supervisor", supervisorName))
+			return
+		}
+
+		if os.Getenv("DISABLE_CRASH_RESTART") == "1" {
+			mng.logger.Warn("Crash restart disabled via DISABLE_CRASH_RESTART=1; stopping supervisor without relaunch",
+				slog.String("supervisor", supervisorName))
+			mng.Stop(supervisorName)
+			return
+		}
 
 		ctx := supervisor.GetContext()
 
@@ -810,7 +686,6 @@ func (mng *SupervisorManager) rearrangeWindows() {
 		}
 	}
 }
-
 
 // LastCrashDiag is a package-level snapshot of the most recent in-process VEH
 // capture. The watchdog writes here when D2R exits so /debug/crash-info can

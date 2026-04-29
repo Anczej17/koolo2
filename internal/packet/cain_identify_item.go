@@ -8,23 +8,19 @@ import (
 
 // NewCainIdentifyItem creates a per-item identify packet (0x5C).
 //
-// LIVE CAPTURE 2026-04-10 (buf1, last_diff=16 = 17 bytes):
+// LIVE/SPEC baseline:
 //
-//	5c [itemGID:u32] [FFFFFFFF] [00000000] [page:u8] [00] [idx:u16] [00] [08]
+//	5c [itemGID:u32] [FFFFFFFF]
 //
-// This is sent once per unidentified item. page/idx track position in
-// the identify-all sequence. The trailing 0x08 is a constant marker.
-//
-// For simple "identify all" use, page=0 idx=0 works (server identifies all).
+// This is sent once per unidentified item after Cain's identify dialog action.
+// page/idx are kept in the API for callers that sequence items, but the D2R
+// packet body does not carry them in this verified per-item form.
 func NewCainIdentifyItem(itemGID data.UnitID, page uint8, idx uint16) []byte {
-	buf := make([]byte, 17)
+	_, _ = page, idx
+	buf := make([]byte, 9)
 	buf[0] = OpCainIdentifyItem
 	binary.LittleEndian.PutUint32(buf[1:5], uint32(itemGID))
 	binary.LittleEndian.PutUint32(buf[5:9], 0xFFFFFFFF)
-	// buf[9:13] = zero
-	buf[13] = page
-	// buf[14] = 0
-	binary.LittleEndian.PutUint16(buf[15:17], idx)
 	return buf
 }
 

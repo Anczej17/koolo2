@@ -6,16 +6,18 @@ import (
 	"strings"
 	"time"
 
-	"local/internal/svc/internal/gamelib/data"
-	"local/internal/svc/internal/gamelib/data/area"
-	"local/internal/svc/internal/gamelib/data/npc"
 	"local/internal/svc/internal/action/step"
 	"local/internal/svc/internal/context"
 	"local/internal/svc/internal/drop"
 	"local/internal/svc/internal/event"
 	"local/internal/svc/internal/game"
+	"local/internal/svc/internal/gamelib/data"
+	"local/internal/svc/internal/gamelib/data/area"
+	"local/internal/svc/internal/gamelib/data/npc"
 	"local/internal/svc/internal/utils"
 )
+
+const npcTradeTargetDistance = 3
 
 func InteractNPC(npcID npc.ID) (err error) {
 	defer deferredTrace(fmt.Sprintf("InteractNPC:%d", npcID), &err)()
@@ -150,11 +152,10 @@ func InteractObjectByID(id data.UnitID, isCompletedFn func() bool) error {
 	return InteractObject(o, isCompletedFn)
 }
 
-// SelectNPCOption sends a generic NPC dialog option (0x38) for `npcID`.
-// Replaces any HID.KeySequence(VK_HOME, VK_DOWN..., VK_RETURN) navigation
-// pattern. option=0 → first menu item, 1 → second, 2 → third, etc.
-// Full-packet bot: returns silently on missing PacketSender / NPC (no HID
-// fallback per user mandate 2026-04-19).
+// SelectNPCOption writes the raw ActionID field into AMB NPCAction (0x38).
+// Standard service menus should use SelectNPCTradeOption/SelectNPCGambleOption
+// or the PacketSender service wrappers, which resolve ActionID from the AMB
+// NPC-service map. This raw helper remains for quest-specific dialog entries.
 func SelectNPCOption(option uint32, npcID npc.ID) {
 	ctx := context.Get()
 	if ctx.PacketSender == nil {
@@ -165,66 +166,221 @@ func SelectNPCOption(option uint32, npcID npc.ID) {
 		ctx.Logger.Warn("SelectNPCOption: NPC not found", "npc", npcID, "option", option)
 		return
 	}
-	if err := ctx.PacketSender.NPCDialogOption(option, npcUnit.UnitID); err != nil {
+	settleNPCDialogBeforeAction(ctx, npcID, npcUnit.UnitID, 850*time.Millisecond)
+	if err := ctx.PacketSender.NPCAction(option, npcUnit.UnitID); err != nil {
 		ctx.Logger.Warn("SelectNPCOption packet failed", "npc", npcID, "option", option, "err", err)
 	}
 }
 
-// SelectNPCTradeOption sends the "Trade" dialog option via 0x38 packet.
-// Full-packet bot: no HID fallback (user 2026-04-19).
-// option: 0 = first option (Jamella), 1 = second option (most vendors).
-func SelectNPCTradeOption(npcID npc.ID) {
+// SelectNPCTradeOption selects the Trade service from an already-open NPC
+// dialog via AMB NPCAction: opcode 0x38 with ActionID=0x01. No HID fallback.
+//
+// Per AMB NPCAction docs: Trade is at menu position 0x01 for ALL trade NPCs
+// (Gheed/Charsi/Akara/Fara/Hratli/Jamella/Halbu/Larzuk/Anya).
+func SelectNPCTradeOption(npcID npc.ID) bool {
 	ctx := context.Get()
 	if ctx.PacketSender == nil {
 		ctx.Logger.Warn("SelectNPCTradeOption: PacketSender nil", "npc", npcID)
-		return
+		return false
 	}
-	townNPC, found := ctx.Data.Monsters.FindOne(npcID, data.MonsterTypeNone)
-	if !found {
-		ctx.Logger.Warn("SelectNPCTradeOption: NPC not found", "npc", npcID)
-		return
+	townNPC, distance, err := standNextToNPC(ctx, npcID, npcTradeTargetDistance)
+	if err != nil {
+		ctx.Logger.Warn("SelectNPCTradeOption: cannot stand next to NPC before trade",
+			"npc", npcID, "err", err)
+		return false
 	}
-	option := uint32(1) // most vendors: Trade is second option
-	if npcID == npc.Jamella {
-		option = 0 // Jamella: Trade is first
+	if ctx.Data.OpenMenus.NPCShop {
+		ctx.Logger.Info("SelectNPCTradeOption: NPCShop already open",
+			"npc", npcID, "npcGID", townNPC.UnitID, "distance", distance)
+		return true
 	}
-	// Diagnostic: snapshot menu state before/after so we can see if D2R
-	// transitioned from NPCInteract → Shop after the 0x38 packet.
+	if !ctx.Data.OpenMenus.NPCInteract {
+		townNPC, distance, err = openTradeNPCDialog(ctx, npcID)
+		if err != nil {
+			ctx.Logger.Warn("SelectNPCTradeOption: NPC dialog is not open and AMB open flow failed",
+				"npc", npcID, "err", err)
+			return false
+		}
+	}
+	option := uint32(1)
 	beforeNPC := ctx.Data.OpenMenus.NPCInteract
 	beforeShop := ctx.Data.OpenMenus.NPCShop
-	ctx.Logger.Info("SelectNPCTradeOption: sending 0x38",
-		"npc", npcID, "option", option, "npcGID", townNPC.UnitID,
+	ctx.Logger.Info("SelectNPCTradeOption: selecting Trade via AMB 0x38 ActionID=1",
+		"npc", npcID, "option", option, "npcGID", townNPC.UnitID, "distance", distance,
 		"NPCInteract", beforeNPC, "NPCShop", beforeShop)
-	if err := ctx.PacketSender.NPCDialogOption(option, townNPC.UnitID); err != nil {
-		ctx.Logger.Warn("SelectNPCTradeOption packet failed", "err", err)
-		utils.Sleep(100)
+	settleNPCDialogBeforeAction(ctx, npcID, townNPC.UnitID, 850*time.Millisecond)
+	if err := ctx.PacketSender.NPCTradeFor(uint32(npcID), townNPC.UnitID); err != nil {
+		ctx.Logger.Warn("SelectNPCTradeOption: AMB 0x38 send failed",
+			"npc", npcID, "option", option, "npcGID", townNPC.UnitID, "err", err)
+		return false
 	}
-	utils.Sleep(500)
-	ctx.RefreshGameData()
-	afterNPC := ctx.Data.OpenMenus.NPCInteract
-	afterShop := ctx.Data.OpenMenus.NPCShop
+	afterShop := waitForNPCShop(ctx, 30)
 	if !afterShop {
-		// Stateless 0x38 (SendUIPacket vtable[5] or SendDualPacket without
-		// transaction_id threading) does NOT flip NPCShop. Bot then deadlocks
-		// because trade window never becomes available. Fallback: D2R's own
-		// "Home + DOWN + Enter" keyboard navigation picks the Trade menu
-		// entry from inside the dialog. Halbu (Act3 armor vendor) has Trade
-		// as the first entry, so only Home+Enter for him.
-		ctx.Logger.Warn("SelectNPCTradeOption: 0x38 sent but NPCShop did NOT open — HID keyboard fallback",
-			"npc", npcID, "option", option,
-			"NPCInteract_before", beforeNPC, "NPCInteract_after", afterNPC,
+		ctx.Logger.Warn("SelectNPCTradeOption: 0x38 sent at close range but NPCShop did NOT open",
+			"npc", npcID, "option", option, "distance", distance,
 			"NPCShop_before", beforeShop, "NPCShop_after", afterShop)
-		if npcID == npc.Halbu {
-			ctx.HID.KeySequence(0x24 /*HOME*/, 0x0D /*ENTER*/)
-		} else {
-			ctx.HID.KeySequence(0x24 /*HOME*/, 0x28 /*DOWN*/, 0x0D /*ENTER*/)
-		}
-		utils.Sleep(500)
-		ctx.RefreshGameData()
 	} else {
 		ctx.Logger.Info("SelectNPCTradeOption: NPCShop opened ✓",
 			"npc", npcID, "option", option)
 	}
+	return afterShop
+}
+
+func settleNPCDialogBeforeAction(ctx *context.Status, npcID npc.ID, unitID data.UnitID, delay time.Duration) {
+	ctx.Logger.Debug("NPC dialog settle before 0x38",
+		"npc", npcID,
+		"npcGID", unitID,
+		"delay", delay.String(),
+		"NPCInteract", ctx.Data.OpenMenus.NPCInteract,
+		"NPCShop", ctx.Data.OpenMenus.NPCShop)
+	deadline := time.Now().Add(delay)
+	for time.Now().Before(deadline) {
+		utils.Sleep(100)
+		ctx.RefreshGameData()
+		if ctx.Data.OpenMenus.NPCShop {
+			return
+		}
+	}
+}
+
+func waitForNPCDialog(ctx *context.Status, attempts int) bool {
+	for i := 0; i < attempts; i++ {
+		utils.Sleep(100)
+		ctx.RefreshGameData()
+		if ctx.Data.OpenMenus.NPCInteract || ctx.Data.OpenMenus.NPCShop {
+			return true
+		}
+	}
+	return false
+}
+
+func waitForNPCMenusClosed(ctx *context.Status, attempts int) bool {
+	for i := 0; i < attempts; i++ {
+		utils.Sleep(100)
+		ctx.RefreshGameData()
+		if !ctx.Data.OpenMenus.NPCInteract && !ctx.Data.OpenMenus.NPCShop {
+			return true
+		}
+	}
+	return false
+}
+
+func openTradeNPCDialog(ctx *context.Status, npcID npc.ID) (data.Monster, int, error) {
+	townNPC, distance, err := standNextToNPC(ctx, npcID, npcTradeTargetDistance)
+	if err != nil {
+		return data.Monster{}, distance, err
+	}
+
+	ctx.Logger.Debug("Trade NPC dialog open: AMB 0x2F NPCInit",
+		"npc", npcID, "npcGID", townNPC.UnitID, "distance", distance)
+	playerPos := ctx.Data.PlayerUnit.Position
+	ctx.Logger.Debug("Trade NPC dialog open: AMB 0x04 RunToUnit prime",
+		"npc", npcID, "npcGID", townNPC.UnitID, "playerX", playerPos.X, "playerY", playerPos.Y)
+	if err := ctx.PacketSender.NPCPrimeInteraction(townNPC.UnitID, ctx.Data.PlayerUnit.ID, playerPos, townNPC.Position); err != nil {
+		return data.Monster{}, distance, fmt.Errorf("NPCPrimeInteraction failed: %w", err)
+	}
+	utils.Sleep(150)
+	ctx.RefreshGameData()
+	if refreshedNPC, ok := ctx.Data.Monsters.FindOne(npcID, data.MonsterTypeNone); ok {
+		townNPC = refreshedNPC
+	}
+	distance = ctx.PathFinder.DistanceFromMe(townNPC.Position)
+	if err := ctx.PacketSender.NPCInit(townNPC.UnitID); err != nil {
+		return data.Monster{}, distance, fmt.Errorf("NPCInit failed: %w", err)
+	}
+	utils.Sleep(100)
+	ctx.RefreshGameData()
+	playerPos = ctx.Data.PlayerUnit.Position
+	ctx.Logger.Debug("Trade NPC dialog open: AMB 0x03 dialog position sync",
+		"npc", npcID, "npcGID", townNPC.UnitID, "playerX", playerPos.X, "playerY", playerPos.Y)
+	if err := ctx.PacketSender.NPCDialogPositionSync(playerPos); err != nil {
+		return data.Monster{}, distance, fmt.Errorf("NPCDialogPositionSync failed: %w", err)
+	}
+	if !waitForNPCDialog(ctx, 20) {
+		return data.Monster{}, distance, fmt.Errorf("NPC dialog did not open after NPCInit")
+	}
+	ctx.RefreshGameData()
+	if refreshedNPC, ok := ctx.Data.Monsters.FindOne(npcID, data.MonsterTypeNone); ok {
+		townNPC = refreshedNPC
+	}
+	distance = ctx.PathFinder.DistanceFromMe(townNPC.Position)
+	return townNPC, distance, nil
+}
+
+func waitForNPCShop(ctx *context.Status, attempts int) bool {
+	for i := 0; i < attempts; i++ {
+		utils.Sleep(100)
+		ctx.RefreshGameData()
+		if ctx.Data.OpenMenus.NPCShop {
+			return true
+		}
+	}
+	return false
+}
+
+func standNextToNPC(ctx *context.Status, npcID npc.ID, targetDistance int) (data.Monster, int, error) {
+	ctx.RefreshGameData()
+	townNPC, found := ctx.Data.Monsters.FindOne(npcID, data.MonsterTypeNone)
+	if !found {
+		return data.Monster{}, 0, fmt.Errorf("npc %d not found", npcID)
+	}
+	distance := ctx.PathFinder.DistanceFromMe(townNPC.Position)
+	if distance <= targetDistance {
+		return townNPC, distance, nil
+	}
+
+	if ctx.Data.OpenMenus.NPCInteract || ctx.Data.OpenMenus.NPCShop {
+		if ctx.PacketSender != nil {
+			_ = ctx.PacketSender.NPCCancel(townNPC.UnitID)
+			utils.Sleep(150)
+			ctx.RefreshGameData()
+		}
+	}
+
+	if err := step.MoveTo(townNPC.Position, step.WithDistanceToFinish(targetDistance), step.WithIgnoreMonsters()); err != nil {
+		if packetNPC, packetDistance, ok := packetRunToNPC(ctx, npcID, townNPC, targetDistance); ok {
+			return packetNPC, packetDistance, nil
+		}
+		return data.Monster{}, distance, err
+	}
+	ctx.RefreshGameData()
+	if refreshedNPC, ok := ctx.Data.Monsters.FindOne(npcID, data.MonsterTypeNone); ok {
+		townNPC = refreshedNPC
+	}
+	distance = ctx.PathFinder.DistanceFromMe(townNPC.Position)
+	if distance > targetDistance {
+		if packetNPC, packetDistance, ok := packetRunToNPC(ctx, npcID, townNPC, targetDistance); ok {
+			return packetNPC, packetDistance, nil
+		}
+		return townNPC, distance, fmt.Errorf("npc %d still too far after move (distance: %d)", npcID, distance)
+	}
+	return townNPC, distance, nil
+}
+
+func packetRunToNPC(ctx *context.Status, npcID npc.ID, townNPC data.Monster, targetDistance int) (data.Monster, int, bool) {
+	if ctx.PacketSender == nil {
+		return townNPC, ctx.PathFinder.DistanceFromMe(townNPC.Position), false
+	}
+	playerPos := ctx.Data.PlayerUnit.Position
+	ctx.Logger.Warn("standNextToNPC: step move did not close distance; trying AMB 0x04 RunToUnit packet",
+		"npc", npcID, "npcGID", townNPC.UnitID, "playerX", playerPos.X, "playerY", playerPos.Y)
+	if err := ctx.PacketSender.RunToUnit(1, townNPC.UnitID, uint16(playerPos.X), uint16(playerPos.Y)); err != nil {
+		ctx.Logger.Warn("standNextToNPC: RunToUnit packet fallback failed",
+			"npc", npcID, "npcGID", townNPC.UnitID, "err", err)
+		return townNPC, ctx.PathFinder.DistanceFromMe(townNPC.Position), false
+	}
+	for i := 0; i < 30; i++ {
+		utils.Sleep(100)
+		ctx.RefreshGameData()
+		if refreshedNPC, ok := ctx.Data.Monsters.FindOne(npcID, data.MonsterTypeNone); ok {
+			townNPC = refreshedNPC
+		}
+		distance := ctx.PathFinder.DistanceFromMe(townNPC.Position)
+		if distance <= targetDistance {
+			return townNPC, distance, true
+		}
+	}
+	return townNPC, ctx.PathFinder.DistanceFromMe(townNPC.Position), false
 }
 
 // CloseNPCDialog sends the NPC-close packet 0x30 via DualSend.
@@ -239,17 +395,14 @@ func CloseNPCDialog(npcID npc.ID) {
 		ctx.Logger.Warn("CloseNPCDialog: NPC not found", "npc", npcID)
 		return
 	}
-	npcX := uint16(townNPC.Position.X)
-	npcY := uint16(townNPC.Position.Y)
-	if err := ctx.PacketSender.TerminateNPCChat(townNPC.UnitID, npcX, npcY); err != nil {
+	if err := ctx.PacketSender.NPCCancel(townNPC.UnitID); err != nil {
 		ctx.Logger.Warn("CloseNPCDialog packet failed", "err", err)
 	}
 	utils.Sleep(100)
 }
 
-// SelectNPCGambleOption sends the "Gamble" dialog option via 0x38 packet.
-// Gamble is option=2 for most NPCs, option=1 for Jamella.
-// Full-packet bot: no HID fallback (user 2026-04-19).
+// SelectNPCGambleOption selects the Gamble service via AMB NPCAction
+// ActionID=0x02. Full-packet bot: no HID fallback.
 func SelectNPCGambleOption(npcID npc.ID) {
 	ctx := context.Get()
 	if ctx.PacketSender == nil {
@@ -260,11 +413,7 @@ func SelectNPCGambleOption(npcID npc.ID) {
 		ctx.Logger.Warn("SelectNPCGambleOption: NPC not found", "npc", npcID)
 		return
 	}
-	option := uint32(2) // gamble usually 2nd option
-	if npcID == npc.Jamella {
-		option = 1
-	}
-	if err := ctx.PacketSender.NPCDialogOption(option, townNPC.UnitID); err != nil {
+	if err := ctx.PacketSender.NPCGambleFor(uint32(npcID), townNPC.UnitID); err != nil {
 		ctx.Logger.Warn("SelectNPCGambleOption packet failed", "err", err)
 	}
 	utils.Sleep(100)

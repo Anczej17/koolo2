@@ -1,6 +1,8 @@
 package context
 
 import (
+	"errors"
+	"fmt"
 	"log/slog"
 	"runtime"
 	"strconv"
@@ -9,13 +11,13 @@ import (
 	"sync/atomic"
 	"time"
 
-	"local/internal/svc/internal/gamelib/data"
-	"local/internal/svc/internal/gamelib/data/area"
-	"local/internal/svc/internal/gamelib/data/skill"
 	"local/internal/svc/internal/config"
 	"local/internal/svc/internal/drop"
 	"local/internal/svc/internal/event"
 	"local/internal/svc/internal/game"
+	"local/internal/svc/internal/gamelib/data"
+	"local/internal/svc/internal/gamelib/data/area"
+	"local/internal/svc/internal/gamelib/data/skill"
 	"local/internal/svc/internal/health"
 	"local/internal/svc/internal/pather"
 	"local/internal/svc/internal/utils"
@@ -42,56 +44,62 @@ type Status struct {
 }
 
 type Context struct {
-	Name                      string
-	executionPriority         atomic.Int32
-	CharacterCfg              *config.CharacterCfg
-	Data                      *game.Data
-	EventListener             *event.Listener
-	HID                       *game.HID
-	Logger                    *slog.Logger
-	Manager                   *game.Manager
-	GameReader                *game.MemoryReader
-	MemoryInjector            *game.MemoryInjector
-	PathFinder                *pather.PathFinder
-	BeltManager               *health.BeltManager
-	HealthManager             *health.Manager
-	Char                      Character
-	LastBuffAt                time.Time
-	WasInTown                 bool      // Track if we were in town (to detect leaving town)
-	BuffInProgress            bool      // Prevent concurrent buff execution for this character
-	BestWeaponSlotCache       map[skill.ID]int // Per-character cache: best weapon slot (0=primary, 1=secondary) per buff skill
-	WeaponCacheReady          bool             // Per-character flag: true after weapon probe has run
-	LastCastAt                time.Time
-	ContextDebug              map[Priority]*Debug
-	CurrentGame               *CurrentGameHelper
-	SkillPointIndex           int // NEW FIELD: Tracks the next skill to consider from the character's SkillPoints() list
-	ForceAttack               bool
-	StopSupervisorFn          StopFunc
-	CleanStopRequested        bool
-	RestartWithCharacter      string
-	PacketSender              *game.PacketSender
-	IsLevelingCharacter       *bool
-	ManualModeActive          bool          // Manual play mode: stops after character selection
-	ClaudeModeActive          bool          // Claude mode: attach + init + sit idle for HTTP-driven packet experiments
-	LastPortalTick            time.Time     // NEW FIELD: Tracks last portal creation for spam prevention
-	IsBossEquipmentActive     bool          // flag for barb leveling
-	Drop                      *drop.Manager // Drop: Per-supervisor Drop manager
-	IsAllocatingStatsOrSkills atomic.Bool   // Prevents stuck detection during stat/skill allocation
-	WaitingForParty           atomic.Bool   // Prevents stuck detection while waiting for party members
+	Name                       string
+	executionPriority          atomic.Int32
+	CharacterCfg               *config.CharacterCfg
+	Data                       *game.Data
+	EventListener              *event.Listener
+	HID                        *game.HID
+	Logger                     *slog.Logger
+	Manager                    *game.Manager
+	GameReader                 *game.MemoryReader
+	MemoryInjector             *game.MemoryInjector
+	PathFinder                 *pather.PathFinder
+	BeltManager                *health.BeltManager
+	HealthManager              *health.Manager
+	Char                       Character
+	LastBuffAt                 time.Time
+	WasInTown                  bool             // Track if we were in town (to detect leaving town)
+	BuffInProgress             bool             // Prevent concurrent buff execution for this character
+	BestWeaponSlotCache        map[skill.ID]int // Per-character cache: best weapon slot (0=primary, 1=secondary) per buff skill
+	WeaponCacheReady           bool             // Per-character flag: true after weapon probe has run
+	LastCastAt                 time.Time
+	ContextDebug               map[Priority]*Debug
+	CurrentGame                *CurrentGameHelper
+	SkillPointIndex            int // NEW FIELD: Tracks the next skill to consider from the character's SkillPoints() list
+	ForceAttack                bool
+	StopSupervisorFn           StopFunc
+	CleanStopRequested         bool
+	RestartWithCharacter       string
+	PacketSender               *game.PacketSender
+	IsLevelingCharacter        *bool
+	ManualModeActive           bool          // Manual play mode: stops after character selection
+	ClaudeModeActive           bool          // Claude mode: attach + init + sit idle for HTTP-driven packet experiments
+	ClaudeAttachExisting       bool          // Claude mode attached to an already-running in-game client
+	LastPortalTick             time.Time     // NEW FIELD: Tracks last portal creation for spam prevention
+	IsBossEquipmentActive      bool          // flag for barb leveling
+	Drop                       *drop.Manager // Drop: Per-supervisor Drop manager
+	IsAllocatingStatsOrSkills  atomic.Bool   // Prevents stuck detection during stat/skill allocation
+	WaitingForParty            atomic.Bool   // Prevents stuck detection while waiting for party members
 	CompletedRuns              []string      // Runs completed in current game (survives bot.Run() reset)
 	CompletedGameID            string        // Game name for which CompletedRuns is valid
 	completedRunsMu            sync.Mutex
-	refreshMu                  sync.Mutex    // serialises RefreshGameData — GameReader.GetData mutates unprotected caches (monsters/inventory/objects); two concurrent callers (supervisor Start + /debug/gamestate) race → fatal concurrent map access → SIGSEGV
-	CurrentRunName             string        // Name of the currently executing run (for failed run tracking)
-	AbortBonusRun              atomic.Bool   // Signal long-running actions (gambling) to abort during bonus runs
-	FailedToCreateGameAttempts int           // Consecutive lobby game creation failures (survives bot.Run() reset)
-	FailedModalDismissAttempts int           // Consecutive modal dismiss failures (survives bot.Run() reset)
+	refreshMu                  sync.Mutex  // serialises RefreshGameData — GameReader.GetData mutates unprotected caches (monsters/inventory/objects); two concurrent callers (supervisor Start + /debug/gamestate) race → fatal concurrent map access → SIGSEGV
+	CurrentRunName             string      // Name of the currently executing run (for failed run tracking)
+	AbortBonusRun              atomic.Bool // Signal long-running actions (gambling) to abort during bonus runs
+	FailedToCreateGameAttempts int         // Consecutive lobby game creation failures (survives bot.Run() reset)
+	FailedModalDismissAttempts int         // Consecutive modal dismiss failures (survives bot.Run() reset)
 }
 
 type Debug struct {
 	LastAction string `json:"lastAction"`
 	LastStep   string `json:"lastStep"`
 }
+
+var (
+	ErrGameProcessExited = errors.New("game process exited while waiting for stable in-game state")
+	ErrGameStateNotReady = errors.New("game state did not stabilise before timeout")
+)
 
 type CurrentGameHelper struct {
 	BlacklistedItems []data.Item
@@ -113,7 +121,7 @@ type CurrentGameHelper struct {
 	CurrentMuleIndex  int
 	ShouldCheckStash  bool
 	StashFull         bool
-	mutex sync.Mutex
+	mutex             sync.Mutex
 }
 
 // ResetForNewGame resets per-game fields without replacing the entire struct,
@@ -147,8 +155,8 @@ func (ctx *Context) StopSupervisor() {
 
 func NewContext(name string) *Status {
 	ctx := &Context{
-		Name:              name,
-		Data:              &game.Data{},
+		Name: name,
+		Data: &game.Data{},
 		// executionPriority defaults to 0 (PriorityHigh); set to Normal after init
 		ContextDebug: map[Priority]*Debug{
 			PriorityBackground: {},
@@ -179,10 +187,10 @@ func NewContext(name string) *Status {
 
 func NewGameHelper() *CurrentGameHelper {
 	return &CurrentGameHelper{
-		PickupItems:                true,
-		PickedUpItems:              make(map[int]int),
-		BlacklistedItems:           []data.Item{},
-		UnstashableItems:           make(map[data.UnitID]bool),
+		PickupItems:      true,
+		PickedUpItems:    make(map[int]int),
+		BlacklistedItems: []data.Item{},
+		UnstashableItems: make(map[data.UnitID]bool),
 	}
 }
 
@@ -309,6 +317,67 @@ func (ctx *Context) WaitForGameToLoad() {
 	}
 	// Add a small buffer to ensure everything is fully loaded
 	time.Sleep(300 * time.Millisecond)
+}
+
+// WaitForStableInGame blocks until the process is alive, the player unit is
+// populated, and the loading screen has cleared. It prevents transient or stale
+// reads from being treated as a successful enter-game transition.
+func (ctx *Context) WaitForStableInGame(timeout time.Duration) error {
+	if ctx == nil || ctx.GameReader == nil || ctx.GameReader.Process == nil {
+		return ErrGameStateNotReady
+	}
+
+	deadline := time.Now().Add(timeout)
+	pid := ctx.GameReader.Process.GetPID()
+
+	for {
+		ctx.RefreshGameData()
+
+		rawInGame := ctx.GameReader.InGame()
+		if rawInGame &&
+			!ctx.Data.OpenMenus.LoadingScreen &&
+			ctx.Data.PlayerUnit.ID != 0 &&
+			ctx.Data.PlayerUnit.Area != 0 {
+			return nil
+		}
+
+		running, exitCode, err := ctx.GameReader.Process.ProcessStatus()
+		if err != nil {
+			if ctx.Logger != nil {
+				ctx.Logger.Error("Failed to query D2R process status while waiting for stable in-game state",
+					slog.Uint64("pid", uint64(pid)),
+					slog.Any("error", err))
+			}
+			return fmt.Errorf("%w: pid=%d query=%v", ErrGameProcessExited, pid, err)
+		}
+		if !running {
+			if ctx.Logger != nil {
+				ctx.Logger.Error("D2R exited while waiting for stable in-game state",
+					slog.Uint64("pid", uint64(pid)),
+					slog.Uint64("exitCode", uint64(exitCode)),
+					slog.Bool("loadingScreen", ctx.Data.OpenMenus.LoadingScreen),
+					slog.Bool("rawInGame", rawInGame),
+					slog.Int("playerID", int(ctx.Data.PlayerUnit.ID)),
+					slog.Int("area", int(ctx.Data.PlayerUnit.Area)))
+			}
+			return fmt.Errorf("%w: pid=%d exitCode=%#x", ErrGameProcessExited, pid, exitCode)
+		}
+
+		if time.Now().After(deadline) {
+			if ctx.Logger != nil {
+				ctx.Logger.Warn("Timed out waiting for stable in-game state",
+					slog.Uint64("pid", uint64(pid)),
+					slog.Bool("loadingScreen", ctx.Data.OpenMenus.LoadingScreen),
+					slog.Bool("rawInGame", rawInGame),
+					slog.Bool("uiInGame", ctx.Data.IsIngame),
+					slog.Int("playerID", int(ctx.Data.PlayerUnit.ID)),
+					slog.Int("area", int(ctx.Data.PlayerUnit.Area)))
+			}
+			return ErrGameStateNotReady
+		}
+
+		time.Sleep(100 * time.Millisecond)
+	}
 }
 
 func (ctx *Context) Cleanup() {

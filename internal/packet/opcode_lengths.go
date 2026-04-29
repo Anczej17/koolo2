@@ -59,17 +59,17 @@ var OpcodeLengths = map[byte]OpcodeLenInfo{
 	0x30: {Min: 5, Max: 22, Variable: true}, // 5B safe, 22B post-trade
 
 	// Merchants
-	0x32: {Min: 22, Max: 22, Variable: false}, // NPC buy subform
-	0x33: {Min: 22, Max: 23, Variable: true},  // builder 22B; buf=1 sample 23B (1B residue or real trailer — ambiguous, 1 sample)
+	0x32: {Min: 22, Max: 24, Variable: true},  // NPC buy subform; AMB/live vendor form is 24B
+	0x33: {Min: 24, Max: 24, Variable: false}, // NPC sell: live Akara 2026-04-26 24B through D2GS APC
 	0x34: {Min: 2, Max: 5, Variable: true},    // ack (2B) vs cain-id-all (5B)
 	0x35: {Min: 16, Max: 16, Variable: false}, // repair all
 
 	// NPC services — 0x38 9B: 6B buf=1 form crashed D2R (Test27 04-19). 9B
 	// is the koolo-original safe shape; 6B is D2R's post-process mirror view.
-	0x38: {Min: 6, Max: 9, Variable: true},    // buf=1 6B informational; 9B wire-safe
-	0x3A: {Min: 4, Max: 4, Variable: false},   // allocate stat (builder)
-	0x3B: {Min: 4, Max: 4, Variable: false},   // learn skill (builder)
-	0x3C: {Min: 9, Max: 15, Variable: true},   // 9B koolo-minimal; 15B adds cursor coords
+	0x38: {Min: 6, Max: 9, Variable: true},  // buf=1 6B informational; 9B wire-safe
+	0x3A: {Min: 4, Max: 4, Variable: false}, // allocate stat (builder)
+	0x3B: {Min: 4, Max: 4, Variable: false}, // learn skill (builder)
+	0x3C: {Min: 9, Max: 15, Variable: true}, // 9B koolo-minimal; 15B adds cursor coords
 
 	// World / travel
 	0x40: {Min: 5, Max: 5, Variable: false},   // entrance (builder)
@@ -81,8 +81,8 @@ var OpcodeLengths = map[byte]OpcodeLenInfo{
 	0x4D: {Min: 5, Max: 29, Variable: true},   // entity result — 5B clean, 29B w/ context
 
 	// Character
-	0x50: {Min: 28, Max: 30, Variable: true}, // weapon swap
-	0x52: {Min: 18, Max: 28, Variable: true}, // merc hire/revive — leave range, corpus thin
+	0x50: {Min: 28, Max: 30, Variable: true},  // weapon swap
+	0x52: {Min: 18, Max: 28, Variable: true},  // merc hire/revive — leave range, corpus thin
 	0x54: {Min: 20, Max: 20, Variable: false}, // cube transmute
 	0x5C: {Min: 9, Max: 9, Variable: false},   // cain id per-item (sniffed)
 }

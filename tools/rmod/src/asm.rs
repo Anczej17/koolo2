@@ -25,16 +25,37 @@ use core::ptr;
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 #[repr(u8)]
 pub enum Reg64 {
-    Rax = 0, Rcx = 1, Rdx = 2, Rbx = 3,
-    Rsp = 4, Rbp = 5, Rsi = 6, Rdi = 7,
-    R8  = 8, R9  = 9, R10 = 10, R11 = 11,
-    R12 = 12, R13 = 13, R14 = 14, R15 = 15,
+    Rax = 0,
+    Rcx = 1,
+    Rdx = 2,
+    Rbx = 3,
+    Rsp = 4,
+    Rbp = 5,
+    Rsi = 6,
+    Rdi = 7,
+    R8 = 8,
+    R9 = 9,
+    R10 = 10,
+    R11 = 11,
+    R12 = 12,
+    R13 = 13,
+    R14 = 14,
+    R15 = 15,
 }
 
 impl Reg64 {
-    #[inline] pub fn idx(self) -> u8 { self as u8 }
-    #[inline] pub fn rex_b(self) -> bool { self.idx() >= 8 }
-    #[inline] pub fn low3(self) -> u8 { self.idx() & 0x7 }
+    #[inline]
+    pub fn idx(self) -> u8 {
+        self as u8
+    }
+    #[inline]
+    pub fn rex_b(self) -> bool {
+        self.idx() >= 8
+    }
+    #[inline]
+    pub fn low3(self) -> u8 {
+        self.idx() & 0x7
+    }
 }
 
 /// Writes machine code into a fixed-size buffer with a bump pointer. The
@@ -54,10 +75,14 @@ impl Emitter {
     }
 
     #[inline]
-    pub fn len(&self) -> usize { self.pos }
+    pub fn len(&self) -> usize {
+        self.pos
+    }
 
     #[inline]
-    pub fn rip(&self) -> *const u8 { unsafe { self.buf.add(self.pos) } }
+    pub fn rip(&self) -> *const u8 {
+        unsafe { self.buf.add(self.pos) }
+    }
 
     #[inline]
     pub unsafe fn byte(&mut self, b: u8) {
@@ -69,7 +94,9 @@ impl Emitter {
 
     #[inline]
     pub unsafe fn bytes(&mut self, bs: &[u8]) {
-        for &b in bs { self.byte(b); }
+        for &b in bs {
+            self.byte(b);
+        }
     }
 
     #[inline]
@@ -127,14 +154,18 @@ impl Emitter {
     /// `PUSH reg64` (1-2 bytes): `50+rd` or `REX.B 50+rd`.
     #[inline]
     pub unsafe fn push_reg64(&mut self, reg: Reg64) {
-        if reg.rex_b() { self.byte(0x41); }
+        if reg.rex_b() {
+            self.byte(0x41);
+        }
         self.byte(0x50 | reg.low3());
     }
 
     /// `POP reg64` (1-2 bytes): `58+rd` or `REX.B 58+rd`.
     #[inline]
     pub unsafe fn pop_reg64(&mut self, reg: Reg64) {
-        if reg.rex_b() { self.byte(0x41); }
+        if reg.rex_b() {
+            self.byte(0x41);
+        }
         self.byte(0x58 | reg.low3());
     }
 
@@ -143,7 +174,9 @@ impl Emitter {
     /// `mov_reg64_imm64` for the MOV+JMP long-jump pattern.
     #[inline]
     pub unsafe fn jmp_reg64(&mut self, reg: Reg64) {
-        if reg.rex_b() { self.byte(0x41); }
+        if reg.rex_b() {
+            self.byte(0x41);
+        }
         self.byte(0xFF);
         self.byte(0xE0 | reg.low3());
     }
@@ -163,11 +196,15 @@ impl Emitter {
 
     /// `RET` (1 byte).
     #[inline]
-    pub unsafe fn ret(&mut self) { self.byte(0xC3); }
+    pub unsafe fn ret(&mut self) {
+        self.byte(0xC3);
+    }
 
     /// `NOP` (1 byte) — padding.
     #[inline]
-    pub unsafe fn nop(&mut self) { self.byte(0x90); }
+    pub unsafe fn nop(&mut self) {
+        self.byte(0x90);
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -205,19 +242,28 @@ pub unsafe fn decode_insn(ip: *const u8, max_bytes: usize) -> Option<InsnInfo> {
 
     // Step 1: skip legacy / REX prefixes.
     loop {
-        if p >= max_bytes { return None; }
+        if p >= max_bytes {
+            return None;
+        }
         let b = *ip.add(p);
         match b {
             // REX prefix family (0x40-0x4F).
-            0x40..=0x4F => { rex = b; p += 1; }
+            0x40..=0x4F => {
+                rex = b;
+                p += 1;
+            }
             // Operand/address size override, segment overrides.
-            0x26 | 0x2E | 0x36 | 0x3E | 0x64 | 0x65 | 0x66 | 0x67 | 0xF0 | 0xF2 | 0xF3 => { p += 1; }
+            0x26 | 0x2E | 0x36 | 0x3E | 0x64 | 0x65 | 0x66 | 0x67 | 0xF0 | 0xF2 | 0xF3 => {
+                p += 1;
+            }
             _ => break,
         }
     }
 
     let opcode_start = p;
-    if p >= max_bytes { return None; }
+    if p >= max_bytes {
+        return None;
+    }
     let op1 = *ip.add(p);
     p += 1;
 
@@ -230,7 +276,9 @@ pub unsafe fn decode_insn(ip: *const u8, max_bytes: usize) -> Option<InsnInfo> {
         p_start: usize,
         max_bytes: usize,
     ) -> Option<(usize, bool, usize)> {
-        if p_start >= max_bytes { return None; }
+        if p_start >= max_bytes {
+            return None;
+        }
         let modrm = *ip.add(p_start);
         let mod_ = (modrm >> 6) & 0x3;
         let rm = modrm & 0x7;
@@ -239,14 +287,18 @@ pub unsafe fn decode_insn(ip: *const u8, max_bytes: usize) -> Option<InsnInfo> {
         // RIP-relative: Mod=00, R/M=101 (no SIB).
         if mod_ == 0b00 && rm == 0b101 {
             let disp_off = p;
-            if p + 4 > max_bytes { return None; }
+            if p + 4 > max_bytes {
+                return None;
+            }
             p += 4;
             return Some((p - p_start, true, disp_off));
         }
 
         // SIB follows when R/M=100 and Mod != 11.
         if mod_ != 0b11 && rm == 0b100 {
-            if p >= max_bytes { return None; }
+            if p >= max_bytes {
+                return None;
+            }
             p += 1; // skip SIB
         }
 
@@ -261,17 +313,23 @@ pub unsafe fn decode_insn(ip: *const u8, max_bytes: usize) -> Option<InsnInfo> {
                     let sib = *ip.add(p - 1);
                     let base = sib & 0x7;
                     if base == 0b101 {
-                        if p + 4 > max_bytes { return None; }
+                        if p + 4 > max_bytes {
+                            return None;
+                        }
                         p += 4;
                     }
                 }
             }
             0b01 => {
-                if p >= max_bytes { return None; }
+                if p >= max_bytes {
+                    return None;
+                }
                 p += 1;
             }
             0b10 => {
-                if p + 4 > max_bytes { return None; }
+                if p + 4 > max_bytes {
+                    return None;
+                }
                 p += 4;
             }
             0b11 => { /* register operand — no disp */ }
@@ -333,7 +391,9 @@ pub unsafe fn decode_insn(ip: *const u8, max_bytes: usize) -> Option<InsnInfo> {
     };
 
     if is_two_byte {
-        if p >= max_bytes { return None; }
+        if p >= max_bytes {
+            return None;
+        }
         let op2 = *ip.add(p);
         p += 1;
         // Minimal two-byte opcode subset.
@@ -351,12 +411,24 @@ pub unsafe fn decode_insn(ip: *const u8, max_bytes: usize) -> Option<InsnInfo> {
             p += consumed;
             let rip_rel_off = (opcode_start + 2 + disp_off) as u8; // +2 bytes for opcode 0F xx
             p += imm2 as usize;
-            if p > max_bytes { return None; }
-            return Some(InsnInfo { len: p as u8, has_rip_rel: has_rip, rip_rel_off });
+            if p > max_bytes {
+                return None;
+            }
+            return Some(InsnInfo {
+                len: p as u8,
+                has_rip_rel: has_rip,
+                rip_rel_off,
+            });
         }
         p += imm2 as usize;
-        if p > max_bytes { return None; }
-        return Some(InsnInfo { len: p as u8, has_rip_rel: false, rip_rel_off: 0 });
+        if p > max_bytes {
+            return None;
+        }
+        return Some(InsnInfo {
+            len: p as u8,
+            has_rip_rel: false,
+            rip_rel_off: 0,
+        });
     }
 
     if uses_modrm {
@@ -364,22 +436,40 @@ pub unsafe fn decode_insn(ip: *const u8, max_bytes: usize) -> Option<InsnInfo> {
         let rip_rel_off = (p + disp_off) as u8;
         p += consumed;
         p += imm_size as usize;
-        if p > max_bytes { return None; }
-        return Some(InsnInfo { len: p as u8, has_rip_rel: has_rip, rip_rel_off });
+        if p > max_bytes {
+            return None;
+        }
+        return Some(InsnInfo {
+            len: p as u8,
+            has_rip_rel: has_rip,
+            rip_rel_off,
+        });
     }
 
     p += imm_size as usize;
-    if p > max_bytes { return None; }
-    Some(InsnInfo { len: p as u8, has_rip_rel: false, rip_rel_off: 0 })
+    if p > max_bytes {
+        return None;
+    }
+    Some(InsnInfo {
+        len: p as u8,
+        has_rip_rel: false,
+        rip_rel_off: 0,
+    })
 }
 
 /// Walk forward from `ip` counting instructions until total length ≥ `min_len`,
 /// stopping on an instruction boundary. Caller uses this to determine how
 /// many bytes of prologue to move into the trampoline (GID's "CopyAmount").
-pub unsafe fn walk_instruction_boundary(ip: *const u8, min_len: usize, max_bytes: usize) -> Option<usize> {
+pub unsafe fn walk_instruction_boundary(
+    ip: *const u8,
+    min_len: usize,
+    max_bytes: usize,
+) -> Option<usize> {
     let mut cursor = 0usize;
     while cursor < min_len {
-        if cursor >= max_bytes { return None; }
+        if cursor >= max_bytes {
+            return None;
+        }
         let info = decode_insn(ip.add(cursor), max_bytes - cursor)?;
         cursor += info.len as usize;
     }
@@ -389,7 +479,9 @@ pub unsafe fn walk_instruction_boundary(ip: *const u8, min_len: usize, max_bytes
 // Local alias for Option::Some — keeps the decoder easy to read.
 #[allow(non_snake_case)]
 #[inline]
-fn Ok_<T>(v: T) -> Option<T> { Some(v) }
+fn Ok_<T>(v: T) -> Option<T> {
+    Some(v)
+}
 
 // Unit tests disabled: rmod is #![no_std] with its own panic handler; the
 // std-dependent test harness conflicts (E0152 duplicate panic_impl lang item).
@@ -403,7 +495,9 @@ mod tests {
     // `cargo test --lib` with std enabled; they exercise just the pure-logic
     // portions (Emitter byte output, decoder instruction lengths).
 
-    fn buf16() -> [u8; 32] { [0u8; 32] }
+    fn buf16() -> [u8; 32] {
+        [0u8; 32]
+    }
 
     #[test]
     fn emit_ret() {
@@ -534,10 +628,8 @@ mod tests {
         // 48 83 EC 20     sub rsp, 0x20          (4 B)
         // Total 15 — walk_instruction_boundary(14) lands on 15 (next boundary past 14).
         let bytes: [u8; 15] = [
-            0x48, 0x89, 0x5C, 0x24, 0x08,
-            0x48, 0x89, 0x74, 0x24, 0x10,
-            0x57,
-            0x48, 0x83, 0xEC, 0x20,
+            0x48, 0x89, 0x5C, 0x24, 0x08, 0x48, 0x89, 0x74, 0x24, 0x10, 0x57, 0x48, 0x83, 0xEC,
+            0x20,
         ];
         let n = unsafe { walk_instruction_boundary(bytes.as_ptr(), 14, bytes.len()) }.unwrap();
         assert_eq!(n, 15);

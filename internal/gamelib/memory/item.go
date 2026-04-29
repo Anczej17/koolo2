@@ -33,9 +33,12 @@ func (gd *GameReader) Inventory(rawPlayerUnits RawPlayerUnits, hover data.HoverD
 		}
 	}
 	slices.Sort(stashPlayerUnitOrder)
+	stashTabUnitIDs := make([]data.UnitID, 0, 1+len(stashPlayerUnitOrder))
+	stashTabUnitIDs = append(stashTabUnitIDs, mainPlayer.UnitID)
 	for i, orderKey := range stashPlayerUnitOrder {
 		uid := uint(stashPlayerUnits[orderKey].UnitID)
 		stashUnitIDToPage[uid] = uint(i + 1) // pages are 1-based
+		stashTabUnitIDs = append(stashTabUnitIDs, data.UnitID(uid))
 	}
 
 	// Gold
@@ -56,6 +59,7 @@ func (gd *GameReader) Inventory(rawPlayerUnits RawPlayerUnits, hover data.HoverD
 		Gold:             inventoryGold.Value,
 		StashedGold:      stashedGold,
 		SharedStashPages: len(stashPlayerUnitOrder),
+		StashTabUnitIDs:  stashTabUnitIDs,
 	}
 	belt := data.Belt{}
 
@@ -115,366 +119,371 @@ func (gd *GameReader) Inventory(rawPlayerUnits RawPlayerUnits, hover data.HoverD
 					}
 				}
 
-			itemType := ReadUIntFromBuffer(itemDataBuffer, 0x00, Uint32)
+				itemType := ReadUIntFromBuffer(itemDataBuffer, 0x00, Uint32)
 
-			// Skip non-item entries early
-			if itemType != 4 {
-				itemUnitPtr = nextItemPtr
-				continue
-			}
-
-			txtFileNo := ReadUIntFromBuffer(itemDataBuffer, 0x04, Uint32)
-			unitID := ReadUIntFromBuffer(itemDataBuffer, 0x08, Uint32)
-
-			// itemLoc = 0 in inventory, 1 equipped, 2 in belt, 3 on ground, 4 cursor, 5 dropping, 6 socketed
-			itemLoc := ReadUIntFromBuffer(itemDataBuffer, 0x0C, Uint32)
-
-			unitDataPtr := uintptr(ReadUIntFromBuffer(itemDataBuffer, 0x10, Uint64))
-			pathPtr := uintptr(ReadUIntFromBuffer(itemDataBuffer, 0x38, Uint64))
-
-			// Batch 2: unitData (144 B) + path (144 B) = one dispatch.
-			bufsBatched := false
-			if bufs, err := gd.Process.BatchReadBytes([]BatchReadEntry{
-				{Src: unitDataPtr, Len: 144},
-				{Src: pathPtr, Len: 144},
-			}); err == nil && len(bufs) == 2 && len(bufs[0]) == 144 && len(bufs[1]) == 144 {
-				copy(unitDataBuffer, bufs[0])
-				copy(pathBuffer, bufs[1])
-				bufsBatched = true
-			}
-			if !bufsBatched {
-				if err := gd.reader.ReadIntoBuffer(unitDataPtr, unitDataBuffer); err != nil {
+				// Skip non-item entries early
+				if itemType != 4 {
 					itemUnitPtr = nextItemPtr
 					continue
 				}
-				if err := gd.reader.ReadIntoBuffer(pathPtr, pathBuffer); err != nil {
+
+				txtFileNo := ReadUIntFromBuffer(itemDataBuffer, 0x04, Uint32)
+				unitID := ReadUIntFromBuffer(itemDataBuffer, 0x08, Uint32)
+
+				// itemLoc = 0 in inventory, 1 equipped, 2 in belt, 3 on ground, 4 cursor, 5 dropping, 6 socketed
+				itemLoc := ReadUIntFromBuffer(itemDataBuffer, 0x0C, Uint32)
+
+				unitDataPtr := uintptr(ReadUIntFromBuffer(itemDataBuffer, 0x10, Uint64))
+				pathPtr := uintptr(ReadUIntFromBuffer(itemDataBuffer, 0x38, Uint64))
+
+				// Batch 2: unitData (144 B) + path (144 B) = one dispatch.
+				bufsBatched := false
+				if bufs, err := gd.Process.BatchReadBytes([]BatchReadEntry{
+					{Src: unitDataPtr, Len: 144},
+					{Src: pathPtr, Len: 144},
+				}); err == nil && len(bufs) == 2 && len(bufs[0]) == 144 && len(bufs[1]) == 144 {
+					copy(unitDataBuffer, bufs[0])
+					copy(pathBuffer, bufs[1])
+					bufsBatched = true
+				}
+				if !bufsBatched {
+					if err := gd.reader.ReadIntoBuffer(unitDataPtr, unitDataBuffer); err != nil {
+						itemUnitPtr = nextItemPtr
+						continue
+					}
+					if err := gd.reader.ReadIntoBuffer(pathPtr, pathBuffer); err != nil {
+						itemUnitPtr = nextItemPtr
+						continue
+					}
+				}
+
+				flags := ReadUIntFromBuffer(unitDataBuffer, 0x18, Uint32)
+				invPage := ReadUIntFromBuffer(unitDataBuffer, 0x55, Uint8)
+				itemQuality := ReadUIntFromBuffer(unitDataBuffer, 0x00, Uint32)
+				itemOwnerNPC := ReadUIntFromBuffer(unitDataBuffer, 0x0C, Uint32)
+
+				// txtUniqueSet at +0x34 fits inside the 144-byte unitDataBuffer
+				// already loaded above; no extra RPM / round-trip needed.
+				txtUniqueSet := int32(ReadUIntFromBuffer(unitDataBuffer, 0x34, Uint32))
+
+				// Item coordinates (X, Y) — already fetched into pathBuffer above.
+				itemX := ReadUIntFromBuffer(pathBuffer, 0x10, Uint16)
+				itemY := ReadUIntFromBuffer(pathBuffer, 0x14, Uint16)
+
+				// Create item structure
+				itm := &data.Item{
+					ID:          int(txtFileNo),
+					UnitID:      data.UnitID(unitID),
+					UnitPtr:     itemUnitPtr,
+					UnitDataPtr: unitDataPtr,
+					PathPtr:     pathPtr,
+					Name:        item.GetNameByEnum(txtFileNo),
+					Quality:     item.Quality(itemQuality),
+					Position: data.Position{
+						X: int(itemX),
+						Y: int(itemY),
+					},
+					IsHovered:   hover.IsHovered && hover.UnitType == 4 && hover.UnitID == data.UnitID(unitID),
+					Sockets:     make([]data.Item, 0),
+					UniqueSetID: txtUniqueSet,
+				}
+
+				// Set item properties
+				setProperties(itm, uint32(flags))
+
+				// Affixes at 0x42/0x44 (rare) and 0x48..0x4E/0x4E..0x54 (magic
+				// prefixes/suffixes) are all inside the 144 B unitDataBuffer we
+				// already loaded — read from the buffer instead of firing 8 RPM
+				// per item. 8 RPM × ~150 items = 1200 RPM/tick saved.
+				rarePrefix := int16(ReadUIntFromBuffer(unitDataBuffer, 0x42, Uint16))
+				rareSuffix := int16(ReadUIntFromBuffer(unitDataBuffer, 0x44, Uint16))
+				//autoAffix := int16(ReadUIntFromBuffer(unitDataBuffer, 0x46, Uint16))
+				var prefixes [3]int16
+				var suffixes [3]int16
+				for i := 0; i < 3; i++ {
+					prefixes[i] = int16(ReadUIntFromBuffer(unitDataBuffer, uint(0x48+i*2), Uint16))
+					suffixes[i] = int16(ReadUIntFromBuffer(unitDataBuffer, uint(0x4E+i*2), Uint16))
+				}
+
+				itm.Affixes = data.ItemAffixes{
+					Rare: struct {
+						Prefix int16
+						Suffix int16
+					}{
+						Prefix: rarePrefix,
+						Suffix: rareSuffix,
+					},
+					Magic: struct {
+						Prefixes [3]int16
+						Suffixes [3]int16
+					}{
+						Prefixes: prefixes,
+						Suffixes: suffixes,
+					},
+				}
+
+				maxAffixReq := 0
+				if itm.Identified {
+					switch itm.Quality {
+					case item.QualityUnique:
+						// find matching item (uniqueitems.txt)
+						for _, uniqueInfo := range item.UniqueItems {
+							if uniqueInfo.ID == int(txtUniqueSet) {
+								itm.IdentifiedName = uniqueInfo.Name
+								itm.LevelReq = uniqueInfo.LevelReq
+								break
+							}
+						}
+					case item.QualitySet:
+						// find matching item (setitems.txt)
+						for setItemName, setItemInfo := range item.SetItems {
+							if setItemInfo.ID == int(txtUniqueSet) {
+								itm.IdentifiedName = string(setItemName)
+								itm.LevelReq = setItemInfo.LevelReq
+								break
+							}
+						}
+					case item.QualityRare, item.QualityCrafted:
+						// Set item name from rare affixes
+						if prefix, exists := item.RarePrefixDesc[int(rarePrefix)]; exists {
+							if suffix, exists := item.RareSuffixDesc[int(rareSuffix)]; exists {
+								itm.IdentifiedName = prefix.Name + " " + suffix.Name
+							}
+						}
+						// Get level requirements from magic affixes
+						for _, prefixID := range prefixes {
+							if prefix, exists := item.MagicPrefixDesc[int(prefixID)]; exists && prefixID != 0 {
+								if prefix.LevelReq > maxAffixReq {
+									maxAffixReq = prefix.LevelReq
+								}
+							}
+						}
+						for _, suffixID := range suffixes {
+							if suffix, exists := item.MagicSuffixDesc[int(suffixID)]; exists && suffixID != 0 {
+								if suffix.LevelReq > maxAffixReq {
+									maxAffixReq = suffix.LevelReq
+								}
+							}
+						}
+					case item.QualityMagic:
+						var prefixParts []string
+						var suffixParts []string
+
+						// Get all prefixes
+						for _, prefixID := range prefixes {
+							if prefix, exists := item.MagicPrefixDesc[int(prefixID)]; exists && prefixID != 0 {
+								prefixParts = append(prefixParts, prefix.Name)
+								if prefix.LevelReq > maxAffixReq {
+									maxAffixReq = prefix.LevelReq
+								}
+							}
+						}
+
+						// Get all suffixes
+						for _, suffixID := range suffixes {
+							if suffix, exists := item.MagicSuffixDesc[int(suffixID)]; exists && suffixID != 0 {
+								suffixParts = append(suffixParts, suffix.Name)
+								if suffix.LevelReq > maxAffixReq {
+									maxAffixReq = suffix.LevelReq
+								}
+							}
+						}
+
+						// Construct name: prefixes + base name + suffixes
+						var nameParts []string
+						if len(prefixParts) > 0 {
+							nameParts = append(nameParts, prefixParts...)
+						}
+						nameParts = append(nameParts, itm.Desc().Name)
+						if len(suffixParts) > 0 {
+							nameParts = append(nameParts, suffixParts...)
+						}
+						itm.IdentifiedName = strings.Join(nameParts, " ")
+					}
+				}
+
+				// Set runeword name if applicable
+				if itm.IsRuneword {
+					if runeword, exists := item.RunewordIDMap[prefixes[0]]; exists {
+						itm.RunewordName = runeword
+					}
+				}
+				// Determine item location
+				location := item.LocationUnknown
+				switch itemLoc {
+				case 0:
+					// Check shared stash ownership dynamically via UnitID map.
+					// Also keep legacy checks (ownerNPC 2/3/4) for older D2R versions.
+					if page, ok := stashUnitIDToPage[itemOwnerNPC]; ok {
+						location = item.LocationSharedStash
+						invPage = page
+					} else if itemOwnerNPC == 2 && len(stashUnitIDToPage) == 0 {
+						location = item.LocationSharedStash
+						invPage = 1
+					} else if itemOwnerNPC == 3 && len(stashUnitIDToPage) == 0 {
+						location = item.LocationSharedStash
+						invPage = 2
+					} else if itemOwnerNPC == 4 && len(stashUnitIDToPage) == 0 {
+						location = item.LocationSharedStash
+						invPage = 3
+					} else if itemOwnerNPC == 4294967295 {
+						if 0x00002000&flags != 0 {
+							location = item.LocationVendor
+						} else {
+							// DLC stash tab items: ownerNPC=0xFFFFFFFF, no vendor flag.
+							// Sold equipment in the vendor buyback pane can also appear
+							// with this owner and no vendor flag, so only known DLC
+							// stash-tab types should be reported as DLC tabs.
+							location = classifyDLCTabItem(txtFileNo)
+						}
+					} else if data.UnitID(itemOwnerNPC) == mainPlayer.UnitID || itemOwnerNPC == 1 {
+						if invPage == 0 {
+							location = item.LocationInventory
+						} else if invPage == 3 {
+							location = item.LocationCube
+							invPage = 0
+						} else {
+							location = item.LocationStash
+							invPage = 0
+						}
+					}
+				case 1:
+					isMercItem := (flags & 0x800000) != 0
+					if data.UnitID(itemOwnerNPC) == mainPlayer.UnitID || itemOwnerNPC == 1 {
+						location = item.LocationEquipped
+						if itm.Type().Code == item.TypeBelt {
+							itemsMu.Lock()
+							belt.Name = itm.Name
+							itemsMu.Unlock()
+						}
+					} else if isMercItem {
+						location = item.LocationMercenary
+					}
+				case 2:
+					if data.UnitID(itemOwnerNPC) == mainPlayer.UnitID || itemOwnerNPC == 1 {
+						location = item.LocationBelt
+					}
+				case 3, 5:
+					location = item.LocationGround
+				case 6:
+					location = item.LocationSocket
+				case 4:
+					location = item.LocationCursor
+				}
+
+				// Set body location if equipped
+				bodyLoc := item.LocNone
+				equipSlotFlags := uint16(gd.reader.ReadUInt(unitDataPtr+uintptr(0x54), Uint16))
+				if equipSlotFlags&0xFF00 == 0xFF00 {
+					equipSlot := uint8(equipSlotFlags & 0xFF)
+					switch equipSlot {
+					case 0x01:
+						bodyLoc = item.LocHead
+					case 0x02:
+						bodyLoc = item.LocNeck
+					case 0x03:
+						bodyLoc = item.LocTorso
+					case 0x04:
+						bodyLoc = item.LocLeftArm
+					case 0x05:
+						bodyLoc = item.LocRightArm
+					case 0x06:
+						bodyLoc = item.LocLeftRing
+					case 0x07:
+						bodyLoc = item.LocRightRing
+					case 0x08:
+						bodyLoc = item.LocBelt
+					case 0x09:
+						bodyLoc = item.LocFeet
+					case 0x0A:
+						bodyLoc = item.LocGloves
+					case 0x0B:
+						bodyLoc = item.LocLeftArmSecondary
+					case 0x0C:
+						bodyLoc = item.LocRightArmSecondary
+					}
+				}
+
+				itm.Location = item.Location{
+					LocationType: location,
+					BodyLocation: bodyLoc,
+					Page:         int(invPage),
+				}
+
+				// We don't care about the inventory we don't know where they are, probably previous games or random crap
+				if location == item.LocationUnknown {
 					itemUnitPtr = nextItemPtr
 					continue
 				}
-			}
 
-			flags := ReadUIntFromBuffer(unitDataBuffer, 0x18, Uint32)
-			invPage := ReadUIntFromBuffer(unitDataBuffer, 0x55, Uint8)
-			itemQuality := ReadUIntFromBuffer(unitDataBuffer, 0x00, Uint32)
-			itemOwnerNPC := ReadUIntFromBuffer(unitDataBuffer, 0x0C, Uint32)
+				// Read item stats
+				statsListExPtr := uintptr(ReadUIntFromBuffer(itemDataBuffer, 0x88, Uint64))
+				itm.BaseStats, itm.Stats = gd.getItemStats(statsListExPtr)
 
-			// txtUniqueSet at +0x34 fits inside the 144-byte unitDataBuffer
-			// already loaded above; no extra RPM / round-trip needed.
-			txtUniqueSet := int32(ReadUIntFromBuffer(unitDataBuffer, 0x34, Uint32))
+				// stack quantity as item property
+				stackQty := gd.reader.ReadUInt(unitDataPtr+0x9C, Uint32)
+				itm.StackedQuantity = int(stackQty)
 
-			// Item coordinates (X, Y) — already fetched into pathBuffer above.
-			itemX := ReadUIntFromBuffer(pathBuffer, 0x10, Uint16)
-			itemY := ReadUIntFromBuffer(pathBuffer, 0x14, Uint16)
+				// Process socket information
+				if location == item.LocationSocket {
+					if itm.Desc().Code == "jew" {
+						// Base requirement for jewels
+						itm.LevelReq = itm.Desc().RequiredLevel
 
-			// Create item structure
-			itm := &data.Item{
-				ID:      int(txtFileNo),
-				UnitID:  data.UnitID(unitID),
-				Name:    item.GetNameByEnum(txtFileNo),
-				Quality: item.Quality(itemQuality),
-				Position: data.Position{
-					X: int(itemX),
-					Y: int(itemY),
-				},
-				IsHovered:   hover.IsHovered && hover.UnitType == 4 && hover.UnitID == data.UnitID(unitID),
-				Sockets:     make([]data.Item, 0),
-				UniqueSetID: txtUniqueSet,
-			}
-
-			// Set item properties
-			setProperties(itm, uint32(flags))
-
-			// Affixes at 0x42/0x44 (rare) and 0x48..0x4E/0x4E..0x54 (magic
-			// prefixes/suffixes) are all inside the 144 B unitDataBuffer we
-			// already loaded — read from the buffer instead of firing 8 RPM
-			// per item. 8 RPM × ~150 items = 1200 RPM/tick saved.
-			rarePrefix := int16(ReadUIntFromBuffer(unitDataBuffer, 0x42, Uint16))
-			rareSuffix := int16(ReadUIntFromBuffer(unitDataBuffer, 0x44, Uint16))
-			//autoAffix := int16(ReadUIntFromBuffer(unitDataBuffer, 0x46, Uint16))
-			var prefixes [3]int16
-			var suffixes [3]int16
-			for i := 0; i < 3; i++ {
-				prefixes[i] = int16(ReadUIntFromBuffer(unitDataBuffer, uint(0x48+i*2), Uint16))
-				suffixes[i] = int16(ReadUIntFromBuffer(unitDataBuffer, uint(0x4E+i*2), Uint16))
-			}
-
-			itm.Affixes = data.ItemAffixes{
-				Rare: struct {
-					Prefix int16
-					Suffix int16
-				}{
-					Prefix: rarePrefix,
-					Suffix: rareSuffix,
-				},
-				Magic: struct {
-					Prefixes [3]int16
-					Suffixes [3]int16
-				}{
-					Prefixes: prefixes,
-					Suffixes: suffixes,
-				},
-			}
-
-			maxAffixReq := 0
-			if itm.Identified {
-				switch itm.Quality {
-				case item.QualityUnique:
-					// find matching item (uniqueitems.txt)
-					for _, uniqueInfo := range item.UniqueItems {
-						if uniqueInfo.ID == int(txtUniqueSet) {
-							itm.IdentifiedName = uniqueInfo.Name
-							itm.LevelReq = uniqueInfo.LevelReq
-							break
+						// For magic/rare jewels, check affixes
+						if itm.Quality == item.QualityMagic || itm.Quality == item.QualityRare {
+							itm.LevelReq = updateMaxReqFromAffixes(itm.LevelReq, itm.Affixes)
 						}
-					}
-				case item.QualitySet:
-					// find matching item (setitems.txt)
-					for setItemName, setItemInfo := range item.SetItems {
-						if setItemInfo.ID == int(txtUniqueSet) {
-							itm.IdentifiedName = string(setItemName)
-							itm.LevelReq = setItemInfo.LevelReq
-							break
-						}
-					}
-				case item.QualityRare, item.QualityCrafted:
-					// Set item name from rare affixes
-					if prefix, exists := item.RarePrefixDesc[int(rarePrefix)]; exists {
-						if suffix, exists := item.RareSuffixDesc[int(rareSuffix)]; exists {
-							itm.IdentifiedName = prefix.Name + " " + suffix.Name
-						}
-					}
-					// Get level requirements from magic affixes
-					for _, prefixID := range prefixes {
-						if prefix, exists := item.MagicPrefixDesc[int(prefixID)]; exists && prefixID != 0 {
-							if prefix.LevelReq > maxAffixReq {
-								maxAffixReq = prefix.LevelReq
+						// Rainbow facets
+					} else if itm.Quality == item.QualityUnique {
+						for _, uniqueInfo := range item.UniqueItems {
+							if uniqueInfo.Code == itm.Desc().Code {
+								itm.LevelReq = uniqueInfo.LevelReq
+								break
 							}
 						}
-					}
-					for _, suffixID := range suffixes {
-						if suffix, exists := item.MagicSuffixDesc[int(suffixID)]; exists && suffixID != 0 {
-							if suffix.LevelReq > maxAffixReq {
-								maxAffixReq = suffix.LevelReq
-							}
-						}
-					}
-				case item.QualityMagic:
-					var prefixParts []string
-					var suffixParts []string
-
-					// Get all prefixes
-					for _, prefixID := range prefixes {
-						if prefix, exists := item.MagicPrefixDesc[int(prefixID)]; exists && prefixID != 0 {
-							prefixParts = append(prefixParts, prefix.Name)
-							if prefix.LevelReq > maxAffixReq {
-								maxAffixReq = prefix.LevelReq
-							}
-						}
-					}
-
-					// Get all suffixes
-					for _, suffixID := range suffixes {
-						if suffix, exists := item.MagicSuffixDesc[int(suffixID)]; exists && suffixID != 0 {
-							suffixParts = append(suffixParts, suffix.Name)
-							if suffix.LevelReq > maxAffixReq {
-								maxAffixReq = suffix.LevelReq
-							}
-						}
-					}
-
-					// Construct name: prefixes + base name + suffixes
-					var nameParts []string
-					if len(prefixParts) > 0 {
-						nameParts = append(nameParts, prefixParts...)
-					}
-					nameParts = append(nameParts, itm.Desc().Name)
-					if len(suffixParts) > 0 {
-						nameParts = append(nameParts, suffixParts...)
-					}
-					itm.IdentifiedName = strings.Join(nameParts, " ")
-				}
-			}
-
-			// Set runeword name if applicable
-			if itm.IsRuneword {
-				if runeword, exists := item.RunewordIDMap[prefixes[0]]; exists {
-					itm.RunewordName = runeword
-				}
-			}
-			// Determine item location
-			location := item.LocationUnknown
-			switch itemLoc {
-			case 0:
-				// Check shared stash ownership dynamically via UnitID map.
-				// Also keep legacy checks (ownerNPC 2/3/4) for older D2R versions.
-				if page, ok := stashUnitIDToPage[itemOwnerNPC]; ok {
-					location = item.LocationSharedStash
-					invPage = page
-				} else if itemOwnerNPC == 2 && len(stashUnitIDToPage) == 0 {
-					location = item.LocationSharedStash
-					invPage = 1
-				} else if itemOwnerNPC == 3 && len(stashUnitIDToPage) == 0 {
-					location = item.LocationSharedStash
-					invPage = 2
-				} else if itemOwnerNPC == 4 && len(stashUnitIDToPage) == 0 {
-					location = item.LocationSharedStash
-					invPage = 3
-				} else if itemOwnerNPC == 4294967295 {
-					if 0x00002000&flags != 0 {
-						location = item.LocationVendor
 					} else {
-						// DLC stash tab items: ownerNPC=0xFFFFFFFF, no vendor flag.
-						// Classify by item type: gems, runes, or materials.
-						location = classifyDLCTabItem(txtFileNo)
+						// Normal socketed items (runes,gems) just use base requirement
+						itm.LevelReq = itm.Desc().RequiredLevel
 					}
-				} else if data.UnitID(itemOwnerNPC) == mainPlayer.UnitID || itemOwnerNPC == 1 {
-					if invPage == 0 {
-						location = item.LocationInventory
-					} else if invPage == 3 {
-						location = item.LocationCube
-						invPage = 0
-					} else {
-						location = item.LocationStash
-						invPage = 0
-					}
-				}
-			case 1:
-				isMercItem := (flags & 0x800000) != 0
-				if data.UnitID(itemOwnerNPC) == mainPlayer.UnitID || itemOwnerNPC == 1 {
-					location = item.LocationEquipped
-					if itm.Type().Code == item.TypeBelt {
-						itemsMu.Lock()
-						belt.Name = itm.Name
-						itemsMu.Unlock()
-					}
-				} else if isMercItem {
-					location = item.LocationMercenary
-				}
-			case 2:
-				if data.UnitID(itemOwnerNPC) == mainPlayer.UnitID || itemOwnerNPC == 1 {
-					location = item.LocationBelt
-				}
-			case 3, 5:
-				location = item.LocationGround
-			case 6:
-				location = item.LocationSocket
-			case 4:
-				location = item.LocationCursor
-			}
-
-			// Set body location if equipped
-			bodyLoc := item.LocNone
-			equipSlotFlags := uint16(gd.reader.ReadUInt(unitDataPtr+uintptr(0x54), Uint16))
-			if equipSlotFlags&0xFF00 == 0xFF00 {
-				equipSlot := uint8(equipSlotFlags & 0xFF)
-				switch equipSlot {
-				case 0x01:
-					bodyLoc = item.LocHead
-				case 0x02:
-					bodyLoc = item.LocNeck
-				case 0x03:
-					bodyLoc = item.LocTorso
-				case 0x04:
-					bodyLoc = item.LocLeftArm
-				case 0x05:
-					bodyLoc = item.LocRightArm
-				case 0x06:
-					bodyLoc = item.LocLeftRing
-				case 0x07:
-					bodyLoc = item.LocRightRing
-				case 0x08:
-					bodyLoc = item.LocBelt
-				case 0x09:
-					bodyLoc = item.LocFeet
-				case 0x0A:
-					bodyLoc = item.LocGloves
-				case 0x0B:
-					bodyLoc = item.LocLeftArmSecondary
-				case 0x0C:
-					bodyLoc = item.LocRightArmSecondary
-				}
-			}
-
-			itm.Location = item.Location{
-				LocationType: location,
-				BodyLocation: bodyLoc,
-				Page:         int(invPage),
-			}
-
-			// We don't care about the inventory we don't know where they are, probably previous games or random crap
-			if location == item.LocationUnknown {
-				itemUnitPtr = nextItemPtr
-				continue
-			}
-
-			// Read item stats
-			statsListExPtr := uintptr(ReadUIntFromBuffer(itemDataBuffer, 0x88, Uint64))
-			itm.BaseStats, itm.Stats = gd.getItemStats(statsListExPtr)
-
-			// stack quantity as item property
-			stackQty := gd.reader.ReadUInt(unitDataPtr+0x9C, Uint32)
-			itm.StackedQuantity = int(stackQty)
-
-			// Process socket information
-			if location == item.LocationSocket {
-				if itm.Desc().Code == "jew" {
-					// Base requirement for jewels
-					itm.LevelReq = itm.Desc().RequiredLevel
-
-					// For magic/rare jewels, check affixes
-					if itm.Quality == item.QualityMagic || itm.Quality == item.QualityRare {
-						itm.LevelReq = updateMaxReqFromAffixes(itm.LevelReq, itm.Affixes)
-					}
-					// Rainbow facets
-				} else if itm.Quality == item.QualityUnique {
-					for _, uniqueInfo := range item.UniqueItems {
-						if uniqueInfo.Code == itm.Desc().Code {
-							itm.LevelReq = uniqueInfo.LevelReq
-							break
+					itemExtraData := uintptr(gd.reader.ReadUInt(unitDataPtr+0xA0, Uint64))
+					if itemExtraData != 0 {
+						parentInfoPtr := uintptr(gd.reader.ReadUInt(itemExtraData+0x08, Uint64))
+						if parentInfoPtr != 0 {
+							// Read parent unit ID directly from base item memory structure
+							if err := gd.reader.ReadIntoBuffer(parentInfoPtr, itemDataBuffer); err == nil {
+								parentUnitID := data.UnitID(ReadUIntFromBuffer(itemDataBuffer, 0x08, Uint32))
+								itemsMu.Lock()
+								socketedItemsMap[parentUnitID] = append(socketedItemsMap[parentUnitID], socketInfo{
+									item:     itm,
+									position: itm.Position.X,
+								})
+								itemsMu.Unlock()
+							}
 						}
 					}
 				} else {
-					// Normal socketed items (runes,gems) just use base requirement
-					itm.LevelReq = itm.Desc().RequiredLevel
-				}
-				itemExtraData := uintptr(gd.reader.ReadUInt(unitDataPtr+0xA0, Uint64))
-				if itemExtraData != 0 {
-					parentInfoPtr := uintptr(gd.reader.ReadUInt(itemExtraData+0x08, Uint64))
-					if parentInfoPtr != 0 {
-						// Read parent unit ID directly from base item memory structure
-						if err := gd.reader.ReadIntoBuffer(parentInfoPtr, itemDataBuffer); err == nil {
-							parentUnitID := data.UnitID(ReadUIntFromBuffer(itemDataBuffer, 0x08, Uint32))
-							itemsMu.Lock()
-							socketedItemsMap[parentUnitID] = append(socketedItemsMap[parentUnitID], socketInfo{
-								item:     itm,
-								position: itm.Position.X,
-							})
-							itemsMu.Unlock()
-						}
+					// Check if item has sockets
+					if numSockets, _ := itm.Stats.FindStat(stat.NumSockets, 0); numSockets.Value > 0 {
+						itemsMu.Lock()
+						baseItemsMap[itm.UnitID] = itm
+						itemsMu.Unlock()
 					}
 				}
-			} else {
-				// Check if item has sockets
-				if numSockets, _ := itm.Stats.FindStat(stat.NumSockets, 0); numSockets.Value > 0 {
+
+				// Add to appropriate collections
+				if location == item.LocationBelt {
 					itemsMu.Lock()
-					baseItemsMap[itm.UnitID] = itm
+					belt.Items = append(belt.Items, *itm)
+					itemsMu.Unlock()
+				} else if location != item.LocationSocket {
+					itemsMu.Lock()
+					allItems = append(allItems, itm)
 					itemsMu.Unlock()
 				}
-			}
 
-			// Add to appropriate collections
-			if location == item.LocationBelt {
-				itemsMu.Lock()
-				belt.Items = append(belt.Items, *itm)
-				itemsMu.Unlock()
-			} else if location != item.LocationSocket {
-				itemsMu.Lock()
-				allItems = append(allItems, itm)
-				itemsMu.Unlock()
+				itemUnitPtr = nextItemPtr
 			}
-
-			itemUnitPtr = nextItemPtr
-		}
 		}()
 	}
 	itemsWG.Wait()
@@ -897,6 +906,6 @@ func classifyDLCTabItem(txtFileNo uint) item.LocationType {
 	if materialIDs[txtFileNo] {
 		return item.LocationMaterialsTab
 	}
-	// Fallback: unknown DLC item — treat as materials tab
-	return item.LocationMaterialsTab
+	// Fallback: normal equipment in vendor buyback, not a DLC stash tab.
+	return item.LocationVendor
 }

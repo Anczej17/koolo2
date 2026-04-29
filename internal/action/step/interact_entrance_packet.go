@@ -174,8 +174,8 @@ func InteractEntrancePacket(targetArea area.ID) error {
 			continue
 		}
 
-		// Send the packet using PacketSender
-		if err := ctx.PacketSender.InteractWithEntrance(targetEntrance); err != nil {
+		// Send the packet using PacketSender (AMB 0x40 entrance interaction)
+		if err := ctx.PacketSender.EntranceInteractAMB(targetEntrance); err != nil {
 			ctx.Logger.Warn("Entrance packet send failed",
 				"attempt", attempt,
 				"error", err)

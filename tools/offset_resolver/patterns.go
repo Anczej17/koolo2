@@ -112,7 +112,9 @@ var Patterns = map[string][]PatternDef{
 	"CharData": {
 		{"4C 8B 3D ?? ?? ?? ?? 33 D2 4D 3B", 3,
 			"MOV R15,[rip+disp]; XOR EDX,EDX; CMP R11,..."},
-		{"48 8D 05 ?? ?? ?? ?? 89 93 FC 0C 00 00 48 8D 35", 3,
+		// D2R 3.0.92198: the first LEA targets a zeroed neighbor at
+		// CharData-0x40; the live character metadata header is the second LEA.
+		{"48 8D 05 ?? ?? ?? ?? 89 93 FC 0C 00 00 48 8D 35", 16,
 			"LEA RAX,[rip+disp]; MOV [RBX+0xCFC],EDX; LEA RSI,[rip+disp2]"},
 	},
 	"SendPacket": {

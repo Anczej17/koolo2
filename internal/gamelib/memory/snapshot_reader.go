@@ -8,7 +8,7 @@
 // covering any requested D2R virtual address and serves the bytes from its
 // own (bot-side) mapped view.
 //
-// See Desktop/reports/P1_GID_PLAN.md and C:/src/svc/PLAYER_UNIT_FIELDS.md.
+// See Desktop/reports/P1_GID_PLAN.md and C:/src/svc/docs/archive/PLAYER_UNIT_FIELDS.md.
 package memory
 
 import (

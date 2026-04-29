@@ -7,10 +7,10 @@ import (
 	"embed"
 	"encoding/hex"
 	"encoding/json"
-	"image/png"
 	"errors"
 	"fmt"
 	"html/template"
+	"image/png"
 	"io/fs"
 	"log/slog"
 	"math"
@@ -31,30 +31,34 @@ import (
 	"path/filepath"
 
 	"github.com/gorilla/websocket"
-	"local/internal/svc/internal/gamelib/data"
-	"local/internal/svc/internal/gamelib/data/area"
-	"local/internal/svc/internal/gamelib/data/difficulty"
-	"local/internal/svc/internal/gamelib/memory"
-	"local/internal/svc/internal/gamelib/data/skill"
-	"local/internal/svc/internal/gamelib/data/stat"
-	"local/internal/svc/internal/bot"
-	"local/internal/svc/internal/config"
-	"local/internal/svc/internal/action"
-	ctx "local/internal/svc/internal/context"
-	"local/internal/svc/internal/ui"
-	"local/internal/svc/internal/drop"
-	"local/internal/svc/internal/game"
-	"local/internal/svc/internal/remote/droplog"
-	"local/internal/svc/internal/secrets"
-	terrorzones "local/internal/svc/internal/terrorzone"
-	"local/internal/svc/internal/updater"
-	"local/internal/svc/internal/presenter"
-	"local/internal/svc/internal/utils"
-	"local/internal/svc/internal/utils/winproc"
 	"github.com/lxn/win"
 	cp "github.com/otiai10/copy"
 	"golang.org/x/sys/windows"
 	"gopkg.in/yaml.v3"
+	"local/internal/svc/internal/action"
+	"local/internal/svc/internal/bot"
+	"local/internal/svc/internal/config"
+	ctx "local/internal/svc/internal/context"
+	"local/internal/svc/internal/drop"
+	"local/internal/svc/internal/game"
+	"local/internal/svc/internal/gamelib/data"
+	"local/internal/svc/internal/gamelib/data/area"
+	"local/internal/svc/internal/gamelib/data/difficulty"
+	"local/internal/svc/internal/gamelib/data/item"
+	"local/internal/svc/internal/gamelib/data/npc"
+	"local/internal/svc/internal/gamelib/data/skill"
+	"local/internal/svc/internal/gamelib/data/stat"
+	"local/internal/svc/internal/gamelib/memory"
+	"local/internal/svc/internal/livetrace"
+	"local/internal/svc/internal/presenter"
+	"local/internal/svc/internal/remote/droplog"
+	"local/internal/svc/internal/secrets"
+	terrorzones "local/internal/svc/internal/terrorzone"
+	"local/internal/svc/internal/town"
+	"local/internal/svc/internal/ui"
+	"local/internal/svc/internal/updater"
+	"local/internal/svc/internal/utils"
+	"local/internal/svc/internal/utils/winproc"
 )
 
 // isValidSupervisorName rejects names that could cause path traversal or are otherwise invalid for use in file paths.
@@ -374,6 +378,7 @@ func (s *HttpServer) getProcessList(w http.ResponseWriter, r *http.Request) {
 func (s *HttpServer) attachProcess(w http.ResponseWriter, r *http.Request) {
 	characterName := r.URL.Query().Get("characterName")
 	pidStr := r.URL.Query().Get("pid")
+	claudeMode := r.URL.Query().Get("claudeMode") == "true"
 
 	pid, err := strconv.ParseUint(pidStr, 10, 32)
 	if err != nil {
@@ -400,8 +405,18 @@ func (s *HttpServer) attachProcess(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Call manager.Start with the correct arguments, including the HWND
-	go s.manager.Start(characterName, true, false, uint32(pid), uint32(hwnd))
+	// Call manager.Start with the correct arguments, including the HWND.
+	// Claude mode attaches to an already-open client without starting the
+	// configured run workflow, which is required for live packet/debug work.
+	if claudeMode {
+		go func() {
+			if err := s.manager.StartClaude(characterName, uint32(pid), uint32(hwnd)); err != nil {
+				s.logger.Error("Failed to attach process in Claude mode", "character", characterName, "pid", pid, "error", err)
+			}
+		}()
+	} else {
+		go s.manager.Start(characterName, true, false, uint32(pid), uint32(hwnd))
+	}
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]bool{"success": true})
@@ -687,13 +702,14 @@ func (s *HttpServer) initialData(w http.ResponseWriter, r *http.Request) {
 	data := s.getStatusData()
 
 	skipPrompt := r.URL.Query().Get("skipAutoStartPrompt") == "true"
+	autoStartDisabled := os.Getenv("DISABLE_AUTOSTART") == "1"
 
 	// Decide whether to show the auto-start confirmation prompt.
 	// This should only happen once per program run, on the first
 	// dashboard load where global auto-start is enabled and at
 	// least one character is marked for auto-start.
 	showPrompt := false
-	if !skipPrompt && data.GlobalAutoStartEnabled {
+	if !skipPrompt && !autoStartDisabled && data.GlobalAutoStartEnabled {
 		hiddenSet := make(map[string]struct{}, len(data.HiddenSupervisors))
 		for _, name := range data.HiddenSupervisors {
 			hiddenSet[name] = struct{}{}
@@ -981,11 +997,16 @@ func (s *HttpServer) Listen(port int) error {
 	http.HandleFunc("/debug", s.debugHandler)
 	http.HandleFunc("/debug-data", s.debugData)
 	http.HandleFunc("/debug/sendpacket", s.debugSendPacket)
+	http.HandleFunc("/debug/npc-action", s.debugNPCAction)
+	http.HandleFunc("/debug/open-shop", s.debugOpenShop)
+	http.HandleFunc("/debug/open-shop-packet", s.debugOpenShopPacket)
+	http.HandleFunc("/debug/npc-cancel", s.debugNPCCancel)
 	http.HandleFunc("/debug/click", s.debugClick)
 	http.HandleFunc("/debug/hidclick", s.debugHIDClick)
 	http.HandleFunc("/debug/keypress-inproc", s.debugPressKeyInProcess)
 	http.HandleFunc("/debug/postkey-inproc", s.debugPostKeyInProcess)
 	http.HandleFunc("/debug/postclick-inproc", s.debugPostClickInProcess)
+	http.HandleFunc("/debug/mouse", s.debugMouse)
 	http.HandleFunc("/debug/swap-test", s.debugSwapTest)
 	http.HandleFunc("/debug/walkpacket", s.debugWalkPacket)
 	http.HandleFunc("/debug/senduipacket-apc", s.debugSendUIPacketAPC)
@@ -997,6 +1018,8 @@ func (s *HttpServer) Listen(port int) error {
 	http.HandleFunc("/debug/inventory", s.debugInventory)
 	http.HandleFunc("/debug/screenshot", s.debugScreenshot)
 	http.HandleFunc("/debug/panels", s.debugPanels)
+	http.HandleFunc("/debug/panel-texts", s.debugPanelTexts)
+	http.HandleFunc("/debug/tooltip-render-texts", s.debugTooltipRenderTexts)
 	http.HandleFunc("/debug/readmem", s.debugReadMem)
 	http.HandleFunc("/debug/rpm-counter", s.debugRPMCounter)
 	http.HandleFunc("/debug/rop-scan", s.debugRopScan)
@@ -1008,6 +1031,7 @@ func (s *HttpServer) Listen(port int) error {
 	http.HandleFunc("/debug/read-trace", s.debugReadTrace)
 	http.HandleFunc("/debug/read-trace-stats", s.debugReadTraceStats)
 	http.HandleFunc("/debug/read-trace-enable", s.debugReadTraceEnable)
+	http.HandleFunc("/debug/live", s.debugLive)
 	http.HandleFunc("/debug/dispatch-ping", s.debugDispatchPing)
 	http.HandleFunc("/debug/handle-audit", s.debugHandleAudit)
 	http.HandleFunc("/debug/d2rhash", s.debugD2RHash)
@@ -1017,6 +1041,10 @@ func (s *HttpServer) Listen(port int) error {
 	http.HandleFunc("/debug/dumprange", s.debugDumpRange)
 	http.HandleFunc("/debug/scanmem", s.debugScanMem)
 	http.HandleFunc("/debug/snifflog", s.debugSniffLog)
+	http.HandleFunc("/debug/packet-runtime", s.debugPacketRuntime)
+	http.HandleFunc("/debug/rmod-state", s.debugRmodState)
+	http.HandleFunc("/debug/rmod-clear", s.debugRmodClear)
+	http.HandleFunc("/debug/present-latency", s.debugPresentLatency)
 	http.HandleFunc("/debug/sniff/install", s.debugSniffInstall)
 	http.HandleFunc("/debug/sniff/uninstall", s.debugSniffUninstall)
 	http.HandleFunc("/debug/hwbp/install", s.debugHwbpInstall)
@@ -1027,6 +1055,8 @@ func (s *HttpServer) Listen(port int) error {
 	http.HandleFunc("/debug/hwbp/drain", s.debugHwbpDrain)
 	http.HandleFunc("/debug/drprobe", s.debugDrProbe)
 	http.HandleFunc("/debug/callfn", s.debugCallFn)
+	http.HandleFunc("/debug/callfn-apc", s.debugCallFnAPC)
+	http.HandleFunc("/debug/callfn-apc6", s.debugCallFnAPC6)
 	http.HandleFunc("/debug/callfn-gt", s.debugCallFnGT)
 	http.HandleFunc("/debug/inproc-writemem", s.debugInprocWriteMem)
 	http.HandleFunc("/debug/unlock-cursor", s.debugUnlockCursor)
@@ -1045,9 +1075,22 @@ func (s *HttpServer) Listen(port int) error {
 	http.HandleFunc("/debug/caphook/uninstall", s.debugCaptureHookUninstall)
 	http.HandleFunc("/debug/caphook/drain", s.debugCaptureHookDrain)
 	http.HandleFunc("/debug/caphook/status", s.debugCaptureHookStatus)
+	http.HandleFunc("/debug/caphook/suppress-vendor", s.debugCaptureHookSuppressVendor)
+	http.HandleFunc("/debug/argtrace/install", s.debugArgTraceInstall)
+	http.HandleFunc("/debug/argtrace/uninstall", s.debugArgTraceUninstall)
+	http.HandleFunc("/debug/argtrace/drain", s.debugArgTraceDrain)
+	http.HandleFunc("/debug/argtrace/status", s.debugArgTraceStatus)
 	http.HandleFunc("/debug/crash-info", s.debugCrashInfo)
 	http.HandleFunc("/debug/clickworld", s.debugClickWorld)
 	http.HandleFunc("/debug/clickitem", s.debugClickItem)
+	http.HandleFunc("/debug/cursoritem", s.debugCursorItem)
+	http.HandleFunc("/debug/cursor-at", s.debugCursorAt)
+	http.HandleFunc("/debug/d2r-cursor", s.debugD2RCursor)
+	http.HandleFunc("/debug/resolve-hover", s.debugResolveHover)
+	http.HandleFunc("/debug/vendor-sell", s.debugVendorSell)
+	http.HandleFunc("/debug/vendor-price-live", s.debugVendorPriceLive)
+	http.HandleFunc("/debug/vendor-price-native", s.debugVendorPriceNative)
+	http.HandleFunc("/debug/vendor-price-probe", s.debugVendorPriceProbe)
 	http.HandleFunc("/debug/movetocoords", s.debugMoveToCoords)
 	http.HandleFunc("/debug/test-stash-packet", s.debugTestStashPacket)
 	http.HandleFunc("/claude-attach", s.claudeAttach)
@@ -1059,8 +1102,8 @@ func (s *HttpServer) Listen(port int) error {
 	http.HandleFunc("/reset-droplogs", s.resetDroplogs)
 	http.HandleFunc("/process-list", s.getProcessList)
 	http.HandleFunc("/attach-process", s.attachProcess)
-	http.HandleFunc("/ws", s.wsServer.HandleWebSocket)                         // Web socket
-	http.HandleFunc("/initial-data", s.initialData)                            // Web socket data
+	http.HandleFunc("/ws", s.wsServer.HandleWebSocket) // Web socket
+	http.HandleFunc("/initial-data", s.initialData)    // Web socket data
 	http.HandleFunc("/api/reload-config", s.reloadConfig)
 	http.HandleFunc("/api/supervisors/reorder", s.reorderSupervisors)
 	http.HandleFunc("/api/supervisors/hide", s.hideSupervisor)
@@ -1267,6 +1310,369 @@ func (s *HttpServer) debugData(w http.ResponseWriter, r *http.Request) {
 	w.Write(jsonData)
 }
 
+func resolveLiveTracePath() string {
+	tracePath := strings.TrimSpace(config.App.Debug.LiveTrace.File)
+	if tracePath == "" {
+		tracePath = filepath.Join("logs", "livetrace.log")
+	}
+	return tracePath
+}
+
+func tailJSONLog(path string, limit int, maxBytes int64) ([]map[string]any, error) {
+	if limit <= 0 {
+		limit = 25
+	}
+	if maxBytes <= 0 {
+		maxBytes = 128 * 1024
+	}
+
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+
+	st, err := f.Stat()
+	if err != nil {
+		return nil, err
+	}
+
+	size := st.Size()
+	start := int64(0)
+	if size > maxBytes {
+		start = size - maxBytes
+	}
+
+	buf := make([]byte, size-start)
+	if len(buf) > 0 {
+		if _, err := f.ReadAt(buf, start); err != nil {
+			return nil, err
+		}
+	}
+
+	if start > 0 {
+		if idx := bytes.IndexByte(buf, '\n'); idx >= 0 {
+			buf = buf[idx+1:]
+		} else {
+			buf = nil
+		}
+	}
+
+	rawLines := bytes.Split(buf, []byte{'\n'})
+	lines := make([][]byte, 0, len(rawLines))
+	for _, line := range rawLines {
+		line = bytes.TrimSpace(line)
+		if len(line) == 0 {
+			continue
+		}
+		lines = append(lines, line)
+	}
+
+	if len(lines) > limit {
+		lines = lines[len(lines)-limit:]
+	}
+
+	events := make([]map[string]any, 0, len(lines))
+	for _, line := range lines {
+		event := map[string]any{}
+		if err := json.Unmarshal(line, &event); err != nil {
+			event = map[string]any{
+				"raw":         string(line),
+				"parse_error": err.Error(),
+			}
+		}
+		events = append(events, event)
+	}
+
+	return events, nil
+}
+
+func filterJSONEventsSince(events []map[string]any, since time.Time) ([]map[string]any, int) {
+	if since.IsZero() || len(events) == 0 {
+		return events, 0
+	}
+
+	filtered := make([]map[string]any, 0, len(events))
+	suppressed := 0
+	for _, event := range events {
+		rawTS, ok := event["ts"].(string)
+		if !ok || rawTS == "" {
+			filtered = append(filtered, event)
+			continue
+		}
+		ts, err := time.Parse(time.RFC3339Nano, rawTS)
+		if err != nil {
+			filtered = append(filtered, event)
+			continue
+		}
+		if ts.Before(since) {
+			suppressed++
+			continue
+		}
+		filtered = append(filtered, event)
+	}
+	return filtered, suppressed
+}
+
+func presentLatencySnapshot(lat presenter.PresentLatency) map[string]any {
+	const cyclesPerUs = 3000.0
+
+	var avgCyc uint64
+	if lat.Count > 0 {
+		avgCyc = lat.SumCyc / lat.Count
+	}
+
+	pathsActive := []string{}
+	if lat.PathsLast&presenter.PathSnapshotEnabled != 0 {
+		pathsActive = append(pathsActive, "snapshot_enabled")
+	}
+	if lat.PathsLast&presenter.PathSnifferRan != 0 {
+		pathsActive = append(pathsActive, "sniffer_ran")
+	}
+	if lat.PathsLast&presenter.PathWalkerFullScan != 0 {
+		pathsActive = append(pathsActive, "walker_full_scan")
+	}
+	if lat.PathsLast&presenter.PathBatchHadWork != 0 {
+		pathsActive = append(pathsActive, "batch_had_work")
+	}
+	if lat.PathsLast&presenter.PathCmdDispatched != 0 {
+		pathsActive = append(pathsActive, "cmd_dispatched")
+	}
+
+	cmdTypeLast := (lat.PathsLast >> 8) & 0xFF
+
+	return map[string]any{
+		"available": true,
+		"count":     lat.Count,
+		"cycles": map[string]uint64{
+			"last": lat.LastCyc,
+			"min":  lat.MinCyc,
+			"max":  lat.MaxCyc,
+			"avg":  avgCyc,
+			"sum":  lat.SumCyc,
+		},
+		"us_approx_3ghz": map[string]float64{
+			"last": float64(lat.LastCyc) / cyclesPerUs,
+			"min":  float64(lat.MinCyc) / cyclesPerUs,
+			"max":  float64(lat.MaxCyc) / cyclesPerUs,
+			"avg":  float64(avgCyc) / cyclesPerUs,
+		},
+		"paths_last": map[string]any{
+			"raw":           fmt.Sprintf("0x%08X", lat.PathsLast),
+			"active":        pathsActive,
+			"cmd_type_last": fmt.Sprintf("0x%02X", cmdTypeLast),
+		},
+	}
+}
+
+func (s *HttpServer) buildLiveDebugData(character string, traceLimit int) map[string]any {
+	status := s.manager.Status(character)
+	tracePath := resolveLiveTracePath()
+	absTracePath, _ := filepath.Abs(tracePath)
+
+	liveData := map[string]any{
+		"ok":        true,
+		"ts":        time.Now().Format(time.RFC3339Nano),
+		"character": character,
+		"status":    status,
+		"links": map[string]string{
+			"gamestate":          fmt.Sprintf("/debug/gamestate?character=%s", url.QueryEscape(character)),
+			"screenshot":         fmt.Sprintf("/debug/screenshot?character=%s", url.QueryEscape(character)),
+			"read_trace":         fmt.Sprintf("/debug/read-trace?character=%s", url.QueryEscape(character)),
+			"read_trace_stats":   fmt.Sprintf("/debug/read-trace-stats?character=%s", url.QueryEscape(character)),
+			"rpm_counter":        fmt.Sprintf("/debug/rpm-counter?character=%s", url.QueryEscape(character)),
+			"rmod_state":         fmt.Sprintf("/debug/rmod-state?character=%s", url.QueryEscape(character)),
+			"present_latency":    fmt.Sprintf("/debug/present-latency?character=%s", url.QueryEscape(character)),
+			"capture_stats":      fmt.Sprintf("/debug/capture/stats?character=%s", url.QueryEscape(character)),
+			"packettrace_status": fmt.Sprintf("/debug/packettrace/status?character=%s", url.QueryEscape(character)),
+		},
+		"livetrace": map[string]any{
+			"enabled_config":     config.App.Debug.LiveTrace.Enabled,
+			"enabled_runtime":    livetrace.Get().IsEnabled(),
+			"file":               absTracePath,
+			"trace_packets":      config.App.Debug.LiveTrace.TracePackets,
+			"trace_clicks":       config.App.Debug.LiveTrace.TraceClicks,
+			"trace_actions":      config.App.Debug.LiveTrace.TraceActions,
+			"trace_state_diffs":  config.App.Debug.LiveTrace.TraceStateDiffs,
+			"state_poll_ms":      config.App.Debug.LiveTrace.StatePollMs,
+			"max_events_per_sec": config.App.Debug.LiveTrace.MaxEventsPerSec,
+		},
+	}
+
+	if st, err := os.Stat(tracePath); err == nil {
+		liveData["livetrace"].(map[string]any)["exists"] = true
+		liveData["livetrace"].(map[string]any)["size_bytes"] = st.Size()
+		liveData["livetrace"].(map[string]any)["modified_at"] = st.ModTime().Format(time.RFC3339Nano)
+	} else {
+		liveData["livetrace"].(map[string]any)["exists"] = false
+		if !errors.Is(err, os.ErrNotExist) {
+			liveData["livetrace"].(map[string]any)["stat_error"] = err.Error()
+		}
+	}
+
+	if recent, err := tailJSONLog(tracePath, traceLimit, 128*1024); err == nil {
+		if !status.StartedAt.IsZero() {
+			var suppressed int
+			recent, suppressed = filterJSONEventsSince(recent, status.StartedAt)
+			liveData["livetrace"].(map[string]any)["recent_since"] = status.StartedAt.Format(time.RFC3339Nano)
+			liveData["livetrace"].(map[string]any)["stale_suppressed"] = suppressed
+		}
+		liveData["livetrace"].(map[string]any)["recent"] = recent
+	} else if !errors.Is(err, os.ErrNotExist) {
+		liveData["livetrace"].(map[string]any)["tail_error"] = err.Error()
+	}
+
+	ctx := s.manager.GetContext(character)
+	if ctx == nil {
+		liveData["running"] = false
+		liveData["runtime_error"] = "no running supervisor"
+		return liveData
+	}
+	liveData["running"] = true
+
+	if ctx.GameReader != nil && ctx.GameReader.Process != nil {
+		proc := ctx.GameReader.Process
+		reads, uints, strs, bufs, bytesTotal := proc.RPMStats()
+		liveData["rpm_counter"] = map[string]any{
+			"reader_source": ctx.GameReader.ReaderSource(),
+			"pid":           proc.PID(),
+			"handle_open":   proc.HandleOpen(),
+			"rpm": map[string]uint64{
+				"read_bytes_calls":  reads,
+				"read_uint_calls":   uints,
+				"read_string_calls": strs,
+				"read_buffer_calls": bufs,
+				"bytes_total":       bytesTotal,
+			},
+		}
+
+		if tr := proc.ReadTrace(); tr != nil {
+			bcalls, bfail, bentries := proc.BatchStats()
+			liveData["read_trace"] = map[string]any{
+				"available": true,
+				"enabled":   tr.Enabled(),
+				"counters":  tr.Stats(),
+				"batch": map[string]uint64{
+					"calls":   bcalls,
+					"failed":  bfail,
+					"entries": bentries,
+				},
+			}
+		} else {
+			liveData["read_trace"] = map[string]any{
+				"available": false,
+			}
+		}
+	}
+
+	if ctx.Data != nil {
+		d := ctx.Data
+		liveData["game"] = map[string]any{
+			"area":         int(d.PlayerUnit.Area),
+			"area_name":    d.PlayerUnit.Area.Area().Name,
+			"in_town":      d.PlayerUnit.Area.IsTown(),
+			"can_teleport": d.CanTeleport(),
+			"player_pos": map[string]int{
+				"x": d.PlayerUnit.Position.X,
+				"y": d.PlayerUnit.Position.Y,
+			},
+			"world_pos": map[string]int{
+				"x": d.PlayerUnit.Position.X + d.AreaOrigin.X,
+				"y": d.PlayerUnit.Position.Y + d.AreaOrigin.Y,
+			},
+			"weapon_slot":     d.ActiveWeaponSlot,
+			"right_skill":     int(d.PlayerUnit.RightSkill),
+			"left_skill":      int(d.PlayerUnit.LeftSkill),
+			"monsters_nearby": len(d.Monsters),
+			"objects_nearby":  len(d.Objects),
+			"npcs_nearby":     len(d.NPCs),
+		}
+	}
+
+	if ctx.MemoryInjector != nil {
+		pres := ctx.MemoryInjector.GetPresenter()
+		if pres != nil {
+			liveData["rmod_state"] = map[string]any{
+				"available": true,
+				"state":     pres.ReadRuntimeState(),
+			}
+			liveData["present_latency"] = presentLatencySnapshot(pres.ReadPresentLatency())
+		} else {
+			liveData["rmod_state"] = map[string]any{
+				"available": false,
+				"reason":    "presenter not initialized",
+			}
+			liveData["present_latency"] = map[string]any{
+				"available": false,
+				"reason":    "presenter not initialized",
+			}
+		}
+	}
+
+	if activeSniffer != nil {
+		total, dropped, frame := activeSniffer.Stats()
+		liveData["capture"] = map[string]any{
+			"available": true,
+			"enabled":   activeSniffer.IsEnabled(),
+			"total":     total,
+			"dropped":   dropped,
+			"frame":     frame,
+		}
+	} else {
+		liveData["capture"] = map[string]any{
+			"available": false,
+			"enabled":   false,
+		}
+	}
+
+	if activeTracer != nil {
+		st := activeTracer.Status()
+		liveData["packettrace"] = map[string]any{
+			"available":       true,
+			"enabled":         st.Enabled,
+			"head":            st.Head,
+			"tail":            st.Tail,
+			"total":           st.Total,
+			"dropped":         st.Dropped,
+			"installed_flags": st.InstalledFlags,
+			"last_error_code": st.LastErrorCode,
+			"game_tid":        st.GameThreadID,
+			"d2r_base":        fmt.Sprintf("0x%X", st.D2RBase),
+			"send_va":         fmt.Sprintf("0x%X", st.SendFnVA),
+			"dual_path_va":    fmt.Sprintf("0x%X", st.DualSendWrapVA),
+			"stub_addr":       fmt.Sprintf("0x%X", st.StubAddr),
+			"orig_send":       hex.EncodeToString(st.OrigSendFn),
+			"orig_dual_path":  hex.EncodeToString(st.OrigDualSendWrap),
+		}
+	} else {
+		liveData["packettrace"] = map[string]any{
+			"available": false,
+		}
+	}
+
+	return liveData
+}
+
+func (s *HttpServer) debugLive(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+
+	character := r.URL.Query().Get("character")
+	if character == "" {
+		w.WriteHeader(http.StatusBadRequest)
+		fmt.Fprintf(w, `{"error":"missing character parameter"}`)
+		return
+	}
+
+	traceLimit := 25
+	if raw := r.URL.Query().Get("traceLimit"); raw != "" {
+		if parsed, err := strconv.Atoi(raw); err == nil && parsed > 0 && parsed <= 200 {
+			traceLimit = parsed
+		}
+	}
+
+	_ = json.NewEncoder(w).Encode(s.buildLiveDebugData(character, traceLimit))
+}
+
 func (s *HttpServer) debugHandler(w http.ResponseWriter, r *http.Request) {
 	s.templates.ExecuteTemplate(w, "debug.gohtml", nil)
 }
@@ -1304,6 +1710,11 @@ func (s *HttpServer) startSupervisor(w http.ResponseWriter, r *http.Request) {
 	manualMode := r.URL.Query().Get("manualMode") == "true"
 	claudeMode := r.URL.Query().Get("claudeMode") == "true"
 
+	if os.Getenv("DISABLE_GAME_LAUNCH") == "1" {
+		http.Error(w, "game launch disabled via DISABLE_GAME_LAUNCH=1; use /claude-attach for existing D2R", http.StatusForbidden)
+		return
+	}
+
 	if supervisor == "" {
 		http.Error(w, "missing characterName", http.StatusBadRequest)
 		return
@@ -1335,7 +1746,6 @@ func (s *HttpServer) startSupervisor(w http.ResponseWriter, r *http.Request) {
 
 	s.initialData(w, r)
 }
-
 
 func (s *HttpServer) reorderSupervisors(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
@@ -1846,6 +2256,11 @@ func (s *HttpServer) toggleAutoStart(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *HttpServer) runAutoStartOnce(w http.ResponseWriter, r *http.Request) {
+	if os.Getenv("DISABLE_AUTOSTART") == "1" {
+		http.Error(w, "auto-start disabled via DISABLE_AUTOSTART=1", http.StatusForbidden)
+		return
+	}
+
 	if err := s.autoStartOnceInternal(); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
@@ -1953,6 +2368,11 @@ func (s *HttpServer) autoStartOnceInternal() error {
 // AutoStartOnStartup triggers a one-off Auto Start sequence if it is enabled
 // in the global configuration. This is intended to be called when application starts.
 func (s *HttpServer) AutoStartOnStartup() {
+	if os.Getenv("DISABLE_AUTOSTART") == "1" {
+		s.logger.Warn("Auto-start on startup disabled via DISABLE_AUTOSTART=1")
+		return
+	}
+
 	if !config.App.AutoStart.Enabled {
 		return
 	}
@@ -1993,10 +2413,10 @@ func (s *HttpServer) index(w http.ResponseWriter) {
 	}
 
 	s.templates.ExecuteTemplate(w, "index.gohtml", IndexData{
-		Version:   config.Version,
+		Version:     config.Version,
 		Supervisors: supervisors,
-		Status:    status,
-		DropCount: drops,
+		Status:      status,
+		DropCount:   drops,
 	})
 }
 
@@ -2202,7 +2622,7 @@ func (s *HttpServer) config(w http.ResponseWriter, r *http.Request) {
 		err := r.ParseForm()
 		if err != nil {
 			s.templates.ExecuteTemplate(w, "config.gohtml", ConfigData{
-				AppCfg:       config.App,
+				AppCfg:         config.App,
 				ErrorMessage:   "Error parsing form",
 				CurrentVersion: s.getVersionData(),
 			})
@@ -2259,7 +2679,7 @@ func (s *HttpServer) config(w http.ResponseWriter, r *http.Request) {
 		telegramChatId, err := strconv.ParseInt(r.Form.Get("telegram_chat_id"), 10, 64)
 		if err != nil {
 			s.templates.ExecuteTemplate(w, "config.gohtml", ConfigData{
-				AppCfg:       &newConfig,
+				AppCfg:         &newConfig,
 				ErrorMessage:   "Invalid Telegram Chat ID",
 				CurrentVersion: s.getVersionData(),
 			})
@@ -2276,7 +2696,7 @@ func (s *HttpServer) config(w http.ResponseWriter, r *http.Request) {
 		newConfig.Ngrok.BasicAuthPass = strings.TrimSpace(r.Form.Get("ngrok_basic_auth_pass"))
 		if newConfig.Ngrok.BasicAuthUser != "" && newConfig.Ngrok.BasicAuthPass == "" {
 			s.templates.ExecuteTemplate(w, "config.gohtml", ConfigData{
-				AppCfg:       &newConfig,
+				AppCfg:         &newConfig,
 				ErrorMessage:   "ngrok basic auth password is required when a username is set",
 				CurrentVersion: s.getVersionData(),
 			})
@@ -2284,7 +2704,7 @@ func (s *HttpServer) config(w http.ResponseWriter, r *http.Request) {
 		}
 		if newConfig.Ngrok.BasicAuthPass != "" && newConfig.Ngrok.BasicAuthUser == "" {
 			s.templates.ExecuteTemplate(w, "config.gohtml", ConfigData{
-				AppCfg:       &newConfig,
+				AppCfg:         &newConfig,
 				ErrorMessage:   "ngrok basic auth username is required when a password is set",
 				CurrentVersion: s.getVersionData(),
 			})
@@ -2292,7 +2712,7 @@ func (s *HttpServer) config(w http.ResponseWriter, r *http.Request) {
 		}
 		if newConfig.Ngrok.BasicAuthPass != "" && len(newConfig.Ngrok.BasicAuthPass) < 8 {
 			s.templates.ExecuteTemplate(w, "config.gohtml", ConfigData{
-				AppCfg:       &newConfig,
+				AppCfg:         &newConfig,
 				ErrorMessage:   "ngrok basic auth password must be at least 8 characters",
 				CurrentVersion: s.getVersionData(),
 			})
@@ -2324,7 +2744,7 @@ func (s *HttpServer) config(w http.ResponseWriter, r *http.Request) {
 		err = config.ValidateAndSaveConfig(newConfig)
 		if err != nil {
 			s.templates.ExecuteTemplate(w, "config.gohtml", ConfigData{
-				AppCfg:       &newConfig,
+				AppCfg:         &newConfig,
 				ErrorMessage:   err.Error(),
 				CurrentVersion: s.getVersionData(),
 			})
@@ -2348,7 +2768,7 @@ func (s *HttpServer) config(w http.ResponseWriter, r *http.Request) {
 	}
 
 	s.templates.ExecuteTemplate(w, "config.gohtml", ConfigData{
-		AppCfg:       config.App,
+		AppCfg:         config.App,
 		ErrorMessage:   "",
 		CurrentVersion: versionData,
 	})
@@ -2360,7 +2780,6 @@ type ConfigUpdateOptions struct {
 	Identity            bool `json:"identity"` // Name, Auth, etc.
 	Health              bool `json:"health"`
 	Runs                bool `json:"runs"`
-	PacketCasting       bool `json:"packetCasting"`
 	CubeRecipes         bool `json:"cubeRecipes"`
 	RunewordMaker       bool `json:"runewordMaker"`
 	Merc                bool `json:"merc"`
@@ -2677,26 +3096,6 @@ func (s *HttpServer) updateConfigFromForm(values url.Values, cfg *config.Charact
 		if sections.Identity {
 			s.updateClassSpecificConfig(values, cfg)
 		}
-	}
-
-	// Packet Casting
-	if sections.PacketCasting {
-		cfg.PacketCasting.UseForEntranceInteraction = values.Has("packetCastingUseForEntranceInteraction")
-		cfg.PacketCasting.UseForItemPickup = values.Has("packetCastingUseForItemPickup")
-		cfg.PacketCasting.UseForTpInteraction = values.Has("packetCastingUseForTpInteraction")
-		cfg.PacketCasting.UseForTeleport = values.Has("packetCastingUseForTeleport")
-		cfg.PacketCasting.UseForEntitySkills = values.Has("packetCastingUseForEntitySkills")
-		cfg.PacketCasting.UseForNPCInteraction = values.Has("packetCastingUseForNPCInteraction")
-		cfg.PacketCasting.UseForWeaponSwap = values.Has("packetCastingUseForWeaponSwap")
-		cfg.PacketCasting.UseForMovement = values.Has("packetCastingUseForMovement")
-		cfg.PacketCasting.UseForBuySell = values.Has("packetCastingUseForBuySell")
-		cfg.PacketCasting.UseForCubeTransmute = values.Has("packetCastingUseForCubeTransmute")
-		cfg.PacketCasting.UseForGamble = values.Has("packetCastingUseForGamble")
-		cfg.PacketCasting.UseForRepair = values.Has("packetCastingUseForRepair")
-		cfg.PacketCasting.UseForIdentify = values.Has("packetCastingUseForIdentify")
-		cfg.PacketCasting.UseForPotionUse = values.Has("packetCastingUseForPotionUse")
-		cfg.PacketCasting.UseForStashManagement = values.Has("packetCastingUseForStashManagement")
-		cfg.PacketCasting.UseForInventoryManagement = values.Has("packetCastingUseForInventoryManagement")
 	}
 
 	// Cube Recipes
@@ -3481,23 +3880,6 @@ func (s *HttpServer) characterSettings(w http.ResponseWriter, r *http.Request) {
 			cfg.MaxGameLength, _ = strconv.Atoi(v)
 		}
 
-		// Packet Casting
-		cfg.PacketCasting.UseForEntranceInteraction = r.Form.Has("packetCastingUseForEntranceInteraction")
-		cfg.PacketCasting.UseForItemPickup = r.Form.Has("packetCastingUseForItemPickup")
-		cfg.PacketCasting.UseForTpInteraction = r.Form.Has("packetCastingUseForTpInteraction")
-		cfg.PacketCasting.UseForTeleport = r.Form.Has("packetCastingUseForTeleport")
-		cfg.PacketCasting.UseForEntitySkills = r.Form.Has("packetCastingUseForEntitySkills")
-		cfg.PacketCasting.UseForNPCInteraction = r.Form.Has("packetCastingUseForNPCInteraction")
-		cfg.PacketCasting.UseForWeaponSwap = r.Form.Has("packetCastingUseForWeaponSwap")
-		cfg.PacketCasting.UseForMovement = r.Form.Has("packetCastingUseForMovement")
-		cfg.PacketCasting.UseForBuySell = r.Form.Has("packetCastingUseForBuySell")
-		cfg.PacketCasting.UseForCubeTransmute = r.Form.Has("packetCastingUseForCubeTransmute")
-		cfg.PacketCasting.UseForGamble = r.Form.Has("packetCastingUseForGamble")
-		cfg.PacketCasting.UseForRepair = r.Form.Has("packetCastingUseForRepair")
-		cfg.PacketCasting.UseForIdentify = r.Form.Has("packetCastingUseForIdentify")
-		cfg.PacketCasting.UseForPotionUse = r.Form.Has("packetCastingUseForPotionUse")
-		cfg.PacketCasting.UseForStashManagement = r.Form.Has("packetCastingUseForStashManagement")
-		cfg.PacketCasting.UseForInventoryManagement = r.Form.Has("packetCastingUseForInventoryManagement")
 		cfg.Game.Difficulty = difficulty.Difficulty(r.Form.Get("gameDifficulty"))
 		cfg.Game.RandomizeRuns = r.Form.Has("gameRandomizeRuns")
 
@@ -5103,8 +5485,9 @@ func (s *HttpServer) generateBattleNetToken(w http.ResponseWriter, r *http.Reque
 // supervisor's PacketSender. Used for live experimentation.
 //
 // Usage:
-//   GET /debug/sendpacket?character=Blizzard&hex=60
-//   GET /debug/sendpacket?character=Blizzard&hex=0C0A001500
+//
+//	GET /debug/sendpacket?character=Blizzard&hex=60
+//	GET /debug/sendpacket?character=Blizzard&hex=0C0A001500
 //
 // Returns JSON with: ok, elapsed_ms, error (if any), bytes_sent, opcode.
 func (s *HttpServer) debugSendPacket(w http.ResponseWriter, r *http.Request) {
@@ -5168,11 +5551,26 @@ func (s *HttpServer) debugSendPacket(w http.ResponseWriter, r *http.Request) {
 		slog.String("opcode", fmt.Sprintf("0x%02X", pkt[0])),
 		slog.String("path", pathParam))
 
+	if isUnsafeDebugDualWrapVendorPath(pathParam, pkt[0]) {
+		w.WriteHeader(http.StatusBadRequest)
+		fmt.Fprintf(w, `{"ok":false,"opcode":"0x%02X","bytes_sent":%d,"error":"path %s is blocked for vendor/trade opcode 0x%02X; use apc or dual-apc"}`,
+			pkt[0], len(pkt), pathParam, pkt[0])
+		return
+	}
+	if isUnsafeDebugCubeTransmutePath(pathParam, pkt) {
+		w.WriteHeader(http.StatusBadRequest)
+		fmt.Fprintf(w, `{"ok":false,"opcode":"0x%02X","bytes_sent":%d,"error":"cube transmute 0x18/0x88 is blocked on path %s; use ui"}`,
+			pkt[0], len(pkt), pathParam)
+		return
+	}
+
 	start := time.Now()
 	var sendErr error
 	switch pathParam {
 	case "ui":
 		sendErr = ctx.PacketSender.SendUIPacket(pkt)
+	case "ui-dual":
+		sendErr = ctx.GameReader.Process.SendUIDualPacket(pkt)
 	case "dual":
 		sendErr = ctx.PacketSender.SendDualPacket(pkt)
 	case "dualwrap":
@@ -5194,7 +5592,7 @@ func (s *HttpServer) debugSendPacket(w http.ResponseWriter, r *http.Request) {
 		sendErr = ctx.GameReader.Process.SendDualPacketAPC(pkt)
 	default:
 		w.WriteHeader(http.StatusBadRequest)
-		fmt.Fprintf(w, `{"error":"invalid path: %s (use game/ui/dual/apc/dual-apc)"}`, pathParam)
+		fmt.Fprintf(w, `{"error":"invalid path: %s (use game/ui/ui-dual/dual/apc/dual-apc)"}`, pathParam)
 		return
 	}
 	elapsed := time.Since(start)
@@ -5214,14 +5612,285 @@ func (s *HttpServer) debugSendPacket(w http.ResponseWriter, r *http.Request) {
 		pkt[0], len(pkt), elapsed.Milliseconds())
 }
 
+// debugNPCAction selects an option from an already-open NPC dialog through the
+// same PacketSender path used by production NPCTrade/NPCIdentify flows.
+//
+// Usage:
+//
+//	GET /debug/npc-action?character=Blizzard&action=1&npc=8
+func (s *HttpServer) debugNPCAction(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	defer func() {
+		if rec := recover(); rec != nil {
+			s.logger.Error("debugNPCAction PANIC", slog.Any("panic", rec))
+			fmt.Fprintf(w, `{"error":"panic: %v"}`, rec)
+		}
+	}()
+
+	character := r.URL.Query().Get("character")
+	actionStr := r.URL.Query().Get("action")
+	npcStr := r.URL.Query().Get("npc")
+	if character == "" || actionStr == "" || npcStr == "" {
+		w.WriteHeader(http.StatusBadRequest)
+		fmt.Fprintf(w, `{"error":"missing character, action, or npc parameter"}`)
+		return
+	}
+
+	actionValue, err := strconv.ParseUint(actionStr, 0, 32)
+	if err != nil || actionValue == 0 {
+		w.WriteHeader(http.StatusBadRequest)
+		fmt.Fprintf(w, `{"error":"invalid action: %s"}`, actionStr)
+		return
+	}
+	npcValue, err := strconv.ParseUint(npcStr, 0, 32)
+	if err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		fmt.Fprintf(w, `{"error":"invalid npc: %s"}`, npcStr)
+		return
+	}
+
+	ctx := s.manager.GetContext(character)
+	if ctx == nil || ctx.PacketSender == nil {
+		w.WriteHeader(http.StatusServiceUnavailable)
+		fmt.Fprintf(w, `{"error":"no running supervisor or packet sender for character %s"}`, character)
+		return
+	}
+
+	s.logger.Info("DEBUG: selecting NPC dialog action",
+		slog.String("character", character),
+		slog.Uint64("action", actionValue),
+		slog.Uint64("npc", npcValue))
+
+	start := time.Now()
+	sendErr := ctx.PacketSender.NPCAction(uint32(actionValue), data.UnitID(npcValue))
+	elapsed := time.Since(start)
+	if sendErr != nil {
+		s.logger.Warn("DEBUG: NPC dialog action failed",
+			slog.String("error", sendErr.Error()),
+			slog.Duration("elapsed", elapsed))
+		fmt.Fprintf(w, `{"ok":false,"action":%d,"npc":%d,"elapsed_ms":%d,"error":%q}`,
+			actionValue, npcValue, elapsed.Milliseconds(), sendErr.Error())
+		return
+	}
+
+	fmt.Fprintf(w, `{"ok":true,"action":%d,"npc":%d,"elapsed_ms":%d}`,
+		actionValue, npcValue, elapsed.Milliseconds())
+}
+
+// debugOpenShop opens an NPC trade/shop panel through the same production
+// packet/action path, but without starting the configured run workflow.
+//
+// Usage:
+//
+//	GET /debug/open-shop?character=Blizzard&npc=148
+func (s *HttpServer) debugOpenShop(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	defer func() {
+		if rec := recover(); rec != nil {
+			s.logger.Error("debugOpenShop PANIC", slog.Any("panic", rec))
+			fmt.Fprintf(w, `{"ok":false,"error":"panic: %v"}`, rec)
+		}
+	}()
+
+	character := r.URL.Query().Get("character")
+	if character == "" {
+		w.WriteHeader(http.StatusBadRequest)
+		fmt.Fprintf(w, `{"ok":false,"error":"missing character"}`)
+		return
+	}
+	npcID := npc.Akara
+	if npcStr := r.URL.Query().Get("npc"); npcStr != "" {
+		parsed, err := strconv.ParseUint(npcStr, 0, 32)
+		if err != nil {
+			w.WriteHeader(http.StatusBadRequest)
+			fmt.Fprintf(w, `{"ok":false,"error":"invalid npc: %s"}`, npcStr)
+			return
+		}
+		npcID = npc.ID(parsed)
+	}
+
+	c := s.manager.GetContext(character)
+	if c == nil || c.PacketSender == nil || c.GameReader == nil {
+		w.WriteHeader(http.StatusServiceUnavailable)
+		fmt.Fprintf(w, `{"ok":false,"error":"no running supervisor/context for character %s"}`, character)
+		return
+	}
+
+	c.AttachRoutine(ctx.PriorityNormal)
+	defer c.Detach()
+	c.RefreshGameData()
+
+	start := time.Now()
+	interactErr := action.InteractNPC(npcID)
+	if interactErr == nil && !action.SelectNPCTradeOption(npcID) {
+		interactErr = fmt.Errorf("trade option did not open shop")
+	}
+	for i := 0; i < 10; i++ {
+		c.RefreshGameData()
+		if c.Data.OpenMenus.NPCShop {
+			break
+		}
+		utils.Sleep(100)
+	}
+
+	if interactErr != nil || !c.Data.OpenMenus.NPCShop {
+		errText := ""
+		if interactErr != nil {
+			errText = interactErr.Error()
+		}
+		fmt.Fprintf(w, `{"ok":false,"npc":%d,"elapsed_ms":%d,"error":%q,"npc_interact":%t,"npc_shop":%t}`,
+			npcID, time.Since(start).Milliseconds(), errText, c.Data.OpenMenus.NPCInteract, c.Data.OpenMenus.NPCShop)
+		return
+	}
+
+	fmt.Fprintf(w, `{"ok":true,"npc":%d,"elapsed_ms":%d,"npc_interact":%t,"npc_shop":%t}`,
+		npcID, time.Since(start).Milliseconds(), c.Data.OpenMenus.NPCInteract, c.Data.OpenMenus.NPCShop)
+}
+
+// debugOpenShopPacket opens an NPC shop without movement/pathing. It sends the
+// AMB NPCInit + NPCTradeFor packet sequence against the live NPC unit currently
+// loaded in town.
+func (s *HttpServer) debugOpenShopPacket(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	defer func() {
+		if rec := recover(); rec != nil {
+			s.logger.Error("debugOpenShopPacket PANIC", slog.Any("panic", rec))
+			fmt.Fprintf(w, `{"ok":false,"error":"panic: %v"}`, rec)
+		}
+	}()
+
+	character := r.URL.Query().Get("character")
+	if character == "" {
+		w.WriteHeader(http.StatusBadRequest)
+		fmt.Fprintf(w, `{"ok":false,"error":"missing character"}`)
+		return
+	}
+	npcClass := uint32(npc.Akara)
+	if npcStr := r.URL.Query().Get("npc"); npcStr != "" {
+		parsed, err := strconv.ParseUint(npcStr, 0, 32)
+		if err != nil {
+			w.WriteHeader(http.StatusBadRequest)
+			fmt.Fprintf(w, `{"ok":false,"error":"invalid npc: %s"}`, npcStr)
+			return
+		}
+		npcClass = uint32(parsed)
+	}
+	npcUnit := parseDebugUnitID(r.URL.Query().Get("unit"))
+
+	c := s.manager.GetContext(character)
+	if c == nil || c.PacketSender == nil || c.GameReader == nil {
+		w.WriteHeader(http.StatusServiceUnavailable)
+		fmt.Fprintf(w, `{"ok":false,"error":"no running supervisor/context for character %s"}`, character)
+		return
+	}
+
+	c.AttachRoutine(ctx.PriorityNormal)
+	defer c.Detach()
+	c.RefreshGameData()
+
+	if npcUnit == 0 {
+		bestDist := int(^uint(0) >> 1)
+		for _, m := range c.Data.Monsters {
+			if m.Type != data.MonsterTypeNone || uint32(m.Name) != npcClass {
+				continue
+			}
+			dx := m.Position.X - c.Data.PlayerUnit.Position.X
+			dy := m.Position.Y - c.Data.PlayerUnit.Position.Y
+			dist := dx*dx + dy*dy
+			if dist < bestDist {
+				bestDist = dist
+				npcUnit = m.UnitID
+			}
+		}
+	}
+	if npcUnit == 0 {
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"ok":        false,
+			"npc_class": npcClass,
+			"error":     "NPC unit not found in current data",
+		})
+		return
+	}
+
+	start := time.Now()
+	initErr := c.PacketSender.NPCInit(npcUnit)
+	utils.Sleep(150)
+	tradeErr := c.PacketSender.NPCTradeFor(npcClass, npcUnit)
+	for i := 0; i < 12; i++ {
+		c.RefreshGameData()
+		if c.Data.OpenMenus.NPCShop {
+			break
+		}
+		utils.Sleep(100)
+	}
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"ok":           initErr == nil && tradeErr == nil && c.Data.OpenMenus.NPCShop,
+		"npc_class":    npcClass,
+		"npc_unit":     fmt.Sprintf("0x%X", npcUnit),
+		"elapsed_ms":   time.Since(start).Milliseconds(),
+		"init_error":   errorString(initErr),
+		"trade_error":  errorString(tradeErr),
+		"npc_interact": c.Data.OpenMenus.NPCInteract,
+		"npc_shop":     c.Data.OpenMenus.NPCShop,
+	})
+}
+
+// debugNPCCancel closes an NPC dialog/shop through PacketSender.NPCCancel.
+//
+// Usage:
+//
+//	GET /debug/npc-cancel?character=Blizzard&npc=8
+func (s *HttpServer) debugNPCCancel(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	defer func() {
+		if rec := recover(); rec != nil {
+			s.logger.Error("debugNPCCancel PANIC", slog.Any("panic", rec))
+			fmt.Fprintf(w, `{"error":"panic: %v"}`, rec)
+		}
+	}()
+
+	character := r.URL.Query().Get("character")
+	npcStr := r.URL.Query().Get("npc")
+	if character == "" || npcStr == "" {
+		w.WriteHeader(http.StatusBadRequest)
+		fmt.Fprintf(w, `{"error":"missing character or npc parameter"}`)
+		return
+	}
+	npcValue, err := strconv.ParseUint(npcStr, 0, 32)
+	if err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		fmt.Fprintf(w, `{"error":"invalid npc: %s"}`, npcStr)
+		return
+	}
+
+	ctx := s.manager.GetContext(character)
+	if ctx == nil || ctx.PacketSender == nil {
+		w.WriteHeader(http.StatusServiceUnavailable)
+		fmt.Fprintf(w, `{"error":"no running supervisor or packet sender for character %s"}`, character)
+		return
+	}
+
+	start := time.Now()
+	sendErr := ctx.PacketSender.NPCCancel(data.UnitID(npcValue))
+	elapsed := time.Since(start)
+	if sendErr != nil {
+		fmt.Fprintf(w, `{"ok":false,"npc":%d,"elapsed_ms":%d,"error":%q}`,
+			npcValue, elapsed.Milliseconds(), sendErr.Error())
+		return
+	}
+
+	fmt.Fprintf(w, `{"ok":true,"npc":%d,"elapsed_ms":%d}`, npcValue, elapsed.Milliseconds())
+}
+
 // debugPressKey simulates pressing a keybinding via the bot's HID layer.
 // Used to trigger in-game actions (weapon swap, show items, open panels) without
 // requiring the user to physically press a key.
 //
 // Usage:
-//   GET /debug/presskey?character=Blizzard&bind=SwapWeapons
-//   GET /debug/presskey?character=Blizzard&bind=ShowItems
-//   GET /debug/presskey?character=Blizzard&bind=ForceMove
+//
+//	GET /debug/presskey?character=Blizzard&bind=SwapWeapons
+//	GET /debug/presskey?character=Blizzard&bind=ShowItems
+//	GET /debug/presskey?character=Blizzard&bind=ForceMove
 func (s *HttpServer) debugPressKey(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	defer func() {
@@ -5399,7 +6068,8 @@ func (s *HttpServer) debugClickWorld(w http.ResponseWriter, r *http.Request) {
 // debugMoveToCoords walks the player to the given world coordinates using the
 // bot's own action.MoveToCoords (pathfinder + proper screen-coord conversion).
 // Blocks until movement completes or times out. Usage:
-//   /debug/movetocoords?character=Blizzard&x=4466&y=4629
+//
+//	/debug/movetocoords?character=Blizzard&x=4466&y=4629
 func (s *HttpServer) debugMoveToCoords(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	character := r.URL.Query().Get("character")
@@ -5661,6 +6331,697 @@ func (s *HttpServer) debugClickItem(w http.ResponseWriter, r *http.Request) {
 		pos.X, pos.Y, modifier, btnStr)
 }
 
+// debugCursorItem positions D2R's in-process cursor override over an item
+// without clicking. This is for packet-move experiments where 0x54/0x55 need
+// the same hover/cursor context that the native UI worker would normally set.
+func (s *HttpServer) debugCursorItem(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	character := r.URL.Query().Get("character")
+	gidStr := r.URL.Query().Get("itemGID")
+	if character == "" || gidStr == "" {
+		fmt.Fprintf(w, `{"error":"missing character or itemGID"}`)
+		return
+	}
+	gid, err := strconv.ParseUint(strings.TrimPrefix(strings.TrimPrefix(gidStr, "0x"), "0X"), 16, 64)
+	if err != nil {
+		gid, err = strconv.ParseUint(gidStr, 10, 64)
+		if err != nil {
+			fmt.Fprintf(w, `{"error":"bad itemGID"}`)
+			return
+		}
+	}
+	c := s.manager.GetContext(character)
+	if c == nil || c.MemoryInjector == nil || c.GameReader == nil {
+		fmt.Fprintf(w, `{"error":"no context"}`)
+		return
+	}
+	c.AttachRoutine(ctx.PriorityNormal)
+	defer c.Detach()
+	c.RefreshGameData()
+
+	var found *data.Item
+	for _, it := range c.Data.Inventory.AllItems {
+		if uint64(it.UnitID) == gid {
+			found = &it
+			break
+		}
+	}
+	if found == nil {
+		fmt.Fprintf(w, `{"error":"item gid 0x%X not in inventory","searched":%d}`, gid, len(c.Data.Inventory.AllItems))
+		return
+	}
+
+	pos := ui.GetScreenCoordsForItem(*found)
+	screenX := c.GameReader.WindowLeftX + pos.X
+	screenY := c.GameReader.WindowTopY + pos.Y
+	if err := c.MemoryInjector.PostMoveQueued(uintptr(c.GameReader.HWND), int32(pos.X), int32(pos.Y), int32(screenX), int32(screenY)); err != nil {
+		fmt.Fprintf(w, `{"ok":false,"error":%q,"item":{"name":%q,"gid":"0x%X","loc":%q,"grid":{"x":%d,"y":%d}},"client":{"x":%d,"y":%d},"screen":{"x":%d,"y":%d}}`,
+			err.Error(), found.Name, gid, found.Location.LocationType, found.Position.X, found.Position.Y, pos.X, pos.Y, screenX, screenY)
+		return
+	}
+	var nativeCursor any
+	if pres := c.MemoryInjector.GetPresenter(); pres != nil {
+		nativeCursor = pres.ReadD2RCursorResult()
+	}
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"ok": true,
+		"item": map[string]any{
+			"name": found.Name,
+			"gid":  fmt.Sprintf("0x%X", gid),
+			"loc":  found.Location.LocationType,
+			"grid": map[string]int{"x": found.Position.X, "y": found.Position.Y},
+		},
+		"client":        map[string]int{"x": pos.X, "y": pos.Y},
+		"screen":        map[string]int{"x": screenX, "y": screenY},
+		"native_cursor": nativeCursor,
+	})
+}
+
+// debugCursorAt runs the same scoped hover primitive as debugCursorItem, but
+// with explicit client coordinates. It is for live sweeps around inventory
+// cells without moving the OS cursor or foregrounding D2R.
+func (s *HttpServer) debugCursorAt(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	character := r.URL.Query().Get("character")
+	xStr := r.URL.Query().Get("x")
+	yStr := r.URL.Query().Get("y")
+	method := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("method")))
+	if method == "" {
+		method = "queued"
+	}
+	if character == "" || xStr == "" || yStr == "" {
+		fmt.Fprintf(w, `{"error":"missing character, x, or y"}`)
+		return
+	}
+	x, err := strconv.Atoi(xStr)
+	if err != nil {
+		fmt.Fprintf(w, `{"error":"bad x"}`)
+		return
+	}
+	y, err := strconv.Atoi(yStr)
+	if err != nil {
+		fmt.Fprintf(w, `{"error":"bad y"}`)
+		return
+	}
+	c := s.manager.GetContext(character)
+	if c == nil || c.MemoryInjector == nil || c.GameReader == nil {
+		fmt.Fprintf(w, `{"error":"no context"}`)
+		return
+	}
+	screenX := c.GameReader.WindowLeftX + x
+	screenY := c.GameReader.WindowTopY + y
+	err = nil
+	switch method {
+	case "queued", "rmod":
+		err = c.MemoryInjector.PostMoveQueued(uintptr(c.GameReader.HWND), int32(x), int32(y), int32(screenX), int32(screenY))
+	case "window":
+		err = c.MemoryInjector.MoveCursorWindowMessages(uintptr(c.GameReader.HWND), int32(screenX), int32(screenY), int32(x), int32(y))
+	case "koolo":
+		err = c.MemoryInjector.MoveCursorMessages(uintptr(c.GameReader.HWND), int32(screenX), int32(screenY))
+	default:
+		fmt.Fprintf(w, `{"ok":false,"error":"bad method %q; use queued, window, or koolo"}`, method)
+		return
+	}
+	if err != nil {
+		fmt.Fprintf(w, `{"ok":false,"error":%q,"client":{"x":%d,"y":%d},"screen":{"x":%d,"y":%d}}`,
+			err.Error(), x, y, screenX, screenY)
+		return
+	}
+	var nativeCursor any
+	if pres := c.MemoryInjector.GetPresenter(); pres != nil {
+		nativeCursor = pres.ReadD2RCursorResult()
+	}
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"ok":            true,
+		"method":        method,
+		"client":        map[string]int{"x": x, "y": y},
+		"screen":        map[string]int{"x": screenX, "y": screenY},
+		"native_cursor": nativeCursor,
+	})
+}
+
+// debugD2RCursor writes D2R's own MouseXY globals and returns the immediate
+// rmod readback. It intentionally does not post any window message.
+func (s *HttpServer) debugD2RCursor(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	character := r.URL.Query().Get("character")
+	xStr := r.URL.Query().Get("x")
+	yStr := r.URL.Query().Get("y")
+	if character == "" || xStr == "" || yStr == "" {
+		fmt.Fprintf(w, `{"error":"missing character, x, or y"}`)
+		return
+	}
+	x, err := strconv.Atoi(xStr)
+	if err != nil {
+		fmt.Fprintf(w, `{"error":"bad x"}`)
+		return
+	}
+	y, err := strconv.Atoi(yStr)
+	if err != nil {
+		fmt.Fprintf(w, `{"error":"bad y"}`)
+		return
+	}
+	c := s.manager.GetContext(character)
+	if c == nil || c.MemoryInjector == nil {
+		fmt.Fprintf(w, `{"error":"no context"}`)
+		return
+	}
+	pres := c.MemoryInjector.GetPresenter()
+	if pres == nil {
+		fmt.Fprintf(w, `{"error":"presenter not initialized"}`)
+		return
+	}
+	if err := pres.SetD2RCursor(int32(x), int32(y)); err != nil {
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"ok":    false,
+			"error": err.Error(),
+		})
+		return
+	}
+	result := pres.ReadD2RCursorResult()
+	var mouse any
+	if c.GameReader != nil {
+		c.RefreshGameData()
+		mx, my, raw := c.GameReader.MouseXY()
+		mouse = map[string]any{
+			"x":       mx,
+			"y":       my,
+			"raw_hex": hex.EncodeToString(raw),
+		}
+	}
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"ok":            true,
+		"native_cursor": result,
+		"mouse":         mouse,
+	})
+}
+
+func (s *HttpServer) debugResolveHover(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	if os.Getenv("D2R_ENABLE_UNSAFE_HOVER_RESOLVER") != "1" {
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"ok":    false,
+			"error": "native hover resolver is disabled because direct UI resolver dispatch restarts D2R; set D2R_ENABLE_UNSAFE_HOVER_RESOLVER=1 only for diagnostics",
+		})
+		return
+	}
+	character := r.URL.Query().Get("character")
+	xStr := r.URL.Query().Get("x")
+	yStr := r.URL.Query().Get("y")
+	if character == "" || xStr == "" || yStr == "" {
+		fmt.Fprintf(w, `{"error":"missing character, x, or y"}`)
+		return
+	}
+	x, err := strconv.Atoi(xStr)
+	if err != nil {
+		fmt.Fprintf(w, `{"error":"bad x"}`)
+		return
+	}
+	y, err := strconv.Atoi(yStr)
+	if err != nil {
+		fmt.Fprintf(w, `{"error":"bad y"}`)
+		return
+	}
+	c := s.manager.GetContext(character)
+	if c == nil || c.MemoryInjector == nil {
+		fmt.Fprintf(w, `{"error":"no context"}`)
+		return
+	}
+	pres := c.MemoryInjector.GetPresenter()
+	if pres == nil {
+		fmt.Fprintf(w, `{"error":"presenter not initialized"}`)
+		return
+	}
+	if err := pres.ResolveD2RHover(int32(x), int32(y)); err != nil {
+		_ = json.NewEncoder(w).Encode(map[string]any{"ok": false, "error": err.Error()})
+		return
+	}
+	result := pres.ReadD2RCursorResult()
+	var mouse any
+	var hover any
+	var renderTexts any
+	if c.GameReader != nil {
+		c.RefreshGameData()
+		mx, my, raw := c.GameReader.MouseXY()
+		mouse = map[string]any{"x": mx, "y": my, "raw_hex": hex.EncodeToString(raw)}
+		hover = map[string]any{
+			"is_hovered": c.Data.HoverData.IsHovered,
+			"unit_type":  c.Data.HoverData.UnitType,
+			"unit_id":    int(c.Data.HoverData.UnitID),
+		}
+		renderTexts = c.GameReader.TooltipRenderTextsFast()
+	}
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"ok":            true,
+		"native_cursor": result,
+		"mouse":         mouse,
+		"hover":         hover,
+		"render_texts":  renderTexts,
+	})
+}
+
+func (s *HttpServer) debugVendorSell(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	defer func() {
+		if rec := recover(); rec != nil {
+			s.logger.Error("debugVendorSell PANIC", slog.Any("panic", rec))
+			_ = json.NewEncoder(w).Encode(map[string]any{"ok": false, "error": fmt.Sprintf("panic: %v", rec)})
+		}
+	}()
+	character := r.URL.Query().Get("character")
+	gidStr := r.URL.Query().Get("itemGID")
+	if character == "" || gidStr == "" {
+		fmt.Fprintf(w, `{"error":"missing character or itemGID"}`)
+		return
+	}
+	gid, err := strconv.ParseUint(strings.TrimPrefix(strings.TrimPrefix(gidStr, "0x"), "0X"), 16, 64)
+	if err != nil {
+		gid, err = strconv.ParseUint(gidStr, 10, 64)
+		if err != nil {
+			fmt.Fprintf(w, `{"error":"bad itemGID"}`)
+			return
+		}
+	}
+	c := s.manager.GetContext(character)
+	if c == nil || c.GameReader == nil {
+		fmt.Fprintf(w, `{"error":"no context"}`)
+		return
+	}
+	c.AttachRoutine(ctx.PriorityNormal)
+	defer c.Detach()
+	c.RefreshGameData()
+	if !c.Data.OpenMenus.NPCShop {
+		fmt.Fprintf(w, `{"ok":false,"error":"NPCShop is not open"}`)
+		return
+	}
+	var found data.Item
+	foundOK := false
+	for _, it := range c.Data.Inventory.AllItems {
+		if uint64(it.UnitID) == gid {
+			found = it
+			foundOK = true
+			break
+		}
+	}
+	if !foundOK {
+		fmt.Fprintf(w, `{"ok":false,"error":"item gid 0x%X not in inventory","searched":%d}`, gid, len(c.Data.Inventory.AllItems))
+		return
+	}
+	beforeLoc := found.Location.LocationType
+	if beforeLoc != item.LocationInventory && beforeLoc != item.LocationCursor {
+		fmt.Fprintf(w, `{"ok":false,"error":"item is not player-held","item":{"name":%q,"gid":"0x%X","location":%q}}`,
+			found.Name, found.UnitID, beforeLoc)
+		return
+	}
+	town.SellItem(found)
+	c.RefreshGameData()
+	if it, stillFound := c.Data.Inventory.FindByID(found.UnitID); stillFound && (it.Location.LocationType == item.LocationInventory || it.Location.LocationType == item.LocationCursor) {
+		fmt.Fprintf(w, `{"ok":false,"item":{"name":%q,"gid":"0x%X","before_loc":%q,"after_loc":%q},"result":"still_player_held"}`,
+			found.Name, found.UnitID, beforeLoc, it.Location.LocationType)
+		return
+	}
+	fmt.Fprintf(w, `{"ok":true,"item":{"name":%q,"gid":"0x%X","before_loc":%q},"result":"gone"}`,
+		found.Name, found.UnitID, beforeLoc)
+}
+
+func (s *HttpServer) debugVendorPriceLive(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	defer func() {
+		if rec := recover(); rec != nil {
+			s.logger.Error("debugVendorPriceLive PANIC", slog.Any("panic", rec))
+			_ = json.NewEncoder(w).Encode(map[string]any{"ok": false, "error": fmt.Sprintf("panic: %v", rec)})
+		}
+	}()
+
+	character := r.URL.Query().Get("character")
+	gidStr := r.URL.Query().Get("itemGID")
+	if character == "" || gidStr == "" {
+		w.WriteHeader(http.StatusBadRequest)
+		_ = json.NewEncoder(w).Encode(map[string]any{"ok": false, "error": "missing character or itemGID"})
+		return
+	}
+
+	gid := parseDebugUnitID(gidStr)
+	if gid == 0 {
+		w.WriteHeader(http.StatusBadRequest)
+		_ = json.NewEncoder(w).Encode(map[string]any{"ok": false, "error": "bad itemGID"})
+		return
+	}
+
+	c := s.manager.GetContext(character)
+	if c == nil || c.GameReader == nil {
+		w.WriteHeader(http.StatusServiceUnavailable)
+		_ = json.NewEncoder(w).Encode(map[string]any{"ok": false, "error": "no context"})
+		return
+	}
+
+	c.AttachRoutine(ctx.PriorityNormal)
+	defer c.Detach()
+	c.RefreshGameData()
+	if !c.Data.OpenMenus.NPCShop {
+		_ = json.NewEncoder(w).Encode(map[string]any{"ok": false, "error": "NPCShop is not open"})
+		return
+	}
+
+	found, foundOK := c.Data.Inventory.FindByID(gid)
+	if !foundOK {
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"ok":       false,
+			"error":    fmt.Sprintf("item gid 0x%X not found", gid),
+			"searched": len(c.Data.Inventory.AllItems),
+		})
+		return
+	}
+
+	intent := strings.ToLower(r.URL.Query().Get("intent"))
+	if intent == "" {
+		intent = "sell"
+	}
+	var price uint32
+	var priceOK bool
+	start := time.Now()
+	switch intent {
+	case "sell":
+		price, priceOK = town.DebugVendorSellPrice(found)
+	case "buy":
+		price, priceOK = town.DebugVendorBuyPrice(found)
+	default:
+		w.WriteHeader(http.StatusBadRequest)
+		_ = json.NewEncoder(w).Encode(map[string]any{"ok": false, "error": "intent must be sell or buy"})
+		return
+	}
+	priceElapsed := time.Since(start)
+
+	c.RefreshGameData()
+	response := map[string]any{
+		"ok":               priceOK,
+		"character":        character,
+		"intent":           intent,
+		"price":            price,
+		"price_elapsed_ms": priceElapsed.Milliseconds(),
+		"elapsed_ms":       time.Since(start).Milliseconds(),
+		"npc_shop":         c.Data.OpenMenus.NPCShop,
+		"hover_gid":        fmt.Sprintf("0x%X", c.Data.HoverData.UnitID),
+		"hovered":          c.Data.HoverData.IsHovered,
+		"item":             map[string]any{"name": string(found.Name), "identified_name": found.IdentifiedName, "gid": fmt.Sprintf("0x%X", found.UnitID), "location": string(found.Location.LocationType), "grid_x": found.Position.X, "grid_y": found.Position.Y},
+	}
+	if r.URL.Query().Get("texts") == "1" {
+		response["panel_texts"] = c.GameReader.VisiblePanelTexts()
+		response["render_texts"] = c.GameReader.TooltipRenderTextsFast()
+	}
+	if r.URL.Query().Get("near_texts") == "1" {
+		response["item_near_render_texts"] = c.GameReader.TooltipRenderTextsNearItemUnit(found.UnitPtr)
+		response["elapsed_ms"] = time.Since(start).Milliseconds()
+	}
+	_ = json.NewEncoder(w).Encode(response)
+}
+
+func (s *HttpServer) debugVendorPriceNative(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+
+	character := r.URL.Query().Get("character")
+	gid := parseDebugUnitID(r.URL.Query().Get("itemGID"))
+	if character == "" || gid == 0 {
+		w.WriteHeader(http.StatusBadRequest)
+		_ = json.NewEncoder(w).Encode(map[string]any{"ok": false, "error": "missing character or bad itemGID"})
+		return
+	}
+
+	c := s.manager.GetContext(character)
+	if c == nil || c.GameReader == nil || c.MemoryInjector == nil {
+		w.WriteHeader(http.StatusServiceUnavailable)
+		_ = json.NewEncoder(w).Encode(map[string]any{"ok": false, "error": "no context"})
+		return
+	}
+	pres := c.MemoryInjector.GetPresenter()
+	if pres == nil {
+		w.WriteHeader(http.StatusServiceUnavailable)
+		_ = json.NewEncoder(w).Encode(map[string]any{"ok": false, "error": "no presenter"})
+		return
+	}
+
+	c.AttachRoutine(ctx.PriorityNormal)
+	defer c.Detach()
+	c.RefreshGameData()
+	if !c.Data.OpenMenus.NPCShop {
+		_ = json.NewEncoder(w).Encode(map[string]any{"ok": false, "error": "NPCShop is not open"})
+		return
+	}
+	found, foundOK := c.Data.Inventory.FindByID(gid)
+	if !foundOK {
+		_ = json.NewEncoder(w).Encode(map[string]any{"ok": false, "error": fmt.Sprintf("item gid 0x%X not found", gid)})
+		return
+	}
+	merchantGID := debugActiveMerchant(c)
+	if merchantGID == 0 {
+		_ = json.NewEncoder(w).Encode(map[string]any{"ok": false, "error": "active merchant not found"})
+		return
+	}
+	merchantPtr := c.GameReader.FindUnitPtrByID(1, merchantGID)
+	if merchantPtr == 0 {
+		_ = json.NewEncoder(w).Encode(map[string]any{"ok": false, "error": "merchant pointer not found", "merchant": fmt.Sprintf("0x%X", merchantGID)})
+		return
+	}
+	mode := int32(0)
+	if modeStr := r.URL.Query().Get("mode"); modeStr != "" {
+		v, parseErr := strconv.ParseInt(modeStr, 0, 32)
+		if parseErr != nil {
+			w.WriteHeader(http.StatusBadRequest)
+			_ = json.NewEncoder(w).Encode(map[string]any{"ok": false, "error": "bad mode"})
+			return
+		}
+		mode = int32(v)
+	}
+	costDiff := int32(-1)
+	if diffStr := r.URL.Query().Get("costDiff"); diffStr != "" {
+		v, parseErr := strconv.ParseInt(diffStr, 0, 32)
+		if parseErr != nil {
+			w.WriteHeader(http.StatusBadRequest)
+			_ = json.NewEncoder(w).Encode(map[string]any{"ok": false, "error": "bad costDiff"})
+			return
+		}
+		costDiff = int32(v)
+	}
+	var costCtx uintptr
+	if ctxStr := r.URL.Query().Get("costCtx"); ctxStr != "" {
+		v, parseErr := strconv.ParseUint(ctxStr, 0, 64)
+		if parseErr != nil {
+			w.WriteHeader(http.StatusBadRequest)
+			_ = json.NewEncoder(w).Encode(map[string]any{"ok": false, "error": "bad costCtx"})
+			return
+		}
+		costCtx = uintptr(v)
+	}
+	npcTxtID := int32(-1)
+	if npcStr := r.URL.Query().Get("npcTxtID"); npcStr != "" {
+		v, parseErr := strconv.ParseInt(npcStr, 0, 32)
+		if parseErr != nil {
+			w.WriteHeader(http.StatusBadRequest)
+			_ = json.NewEncoder(w).Encode(map[string]any{"ok": false, "error": "bad npcTxtID"})
+			return
+		}
+		npcTxtID = int32(v)
+	}
+	playerPtr := uintptr(c.Data.PlayerUnit.Address)
+	if playerStr := r.URL.Query().Get("playerPtr"); playerStr != "" {
+		v, parseErr := strconv.ParseUint(playerStr, 0, 64)
+		if parseErr != nil {
+			w.WriteHeader(http.StatusBadRequest)
+			_ = json.NewEncoder(w).Encode(map[string]any{"ok": false, "error": "bad playerPtr"})
+			return
+		}
+		playerPtr = uintptr(v)
+	}
+	result, err := pres.VendorNativePriceMode(found.UnitPtr, merchantPtr, mode, costDiff, costCtx, npcTxtID, playerPtr)
+	if err != nil {
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"ok":           false,
+			"error":        err.Error(),
+			"item_ptr":     fmt.Sprintf("0x%X", found.UnitPtr),
+			"merchant":     fmt.Sprintf("0x%X", merchantGID),
+			"merchant_ptr": fmt.Sprintf("0x%X", merchantPtr),
+		})
+		return
+	}
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"ok":           result.PriceA != 0 || result.NativeCost != 0,
+		"character":    character,
+		"item":         map[string]any{"name": string(found.Name), "identified_name": found.IdentifiedName, "gid": fmt.Sprintf("0x%X", found.UnitID), "location": string(found.Location.LocationType), "grid_x": found.Position.X, "grid_y": found.Position.Y, "unit_ptr": fmt.Sprintf("0x%X", found.UnitPtr)},
+		"merchant":     fmt.Sprintf("0x%X", merchantGID),
+		"merchant_ptr": fmt.Sprintf("0x%X", merchantPtr),
+		"player_ptr":   fmt.Sprintf("0x%X", playerPtr),
+		"result":       result,
+	})
+}
+
+func (s *HttpServer) debugVendorPriceProbe(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+
+	character := r.URL.Query().Get("character")
+	c := s.manager.GetContext(character)
+	if c == nil && character == "" {
+		for _, name := range s.manager.AvailableSupervisors() {
+			c = s.manager.GetContext(name)
+			if c != nil {
+				character = name
+				break
+			}
+		}
+	}
+	if c == nil || c.GameReader == nil {
+		w.WriteHeader(http.StatusServiceUnavailable)
+		_ = json.NewEncoder(w).Encode(map[string]any{"ok": false, "error": "no supervisor/context"})
+		return
+	}
+
+	c.AttachRoutine(ctx.PriorityNormal)
+	defer c.Detach()
+	c.RefreshGameData()
+
+	merchantGID := parseDebugUnitID(r.URL.Query().Get("merchantGID"))
+	if merchantGID == 0 {
+		merchantGID = debugActiveMerchant(c)
+	}
+	if merchantGID == 0 {
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"ok":        false,
+			"character": character,
+			"npc_shop":  c.Data.OpenMenus.NPCShop,
+			"error":     "active merchant not found",
+		})
+		return
+	}
+	var contextOverride uintptr
+	if rawContext := r.URL.Query().Get("contextPtr"); rawContext != "" {
+		v, err := strconv.ParseUint(rawContext, 0, 64)
+		if err != nil {
+			w.WriteHeader(http.StatusBadRequest)
+			_ = json.NewEncoder(w).Encode(map[string]any{"ok": false, "error": "invalid contextPtr"})
+			return
+		}
+		contextOverride = uintptr(v)
+	}
+
+	var items []data.Item
+	if gid := parseDebugUnitID(r.URL.Query().Get("itemGID")); gid != 0 {
+		if it, found := c.Data.Inventory.FindByID(gid); found {
+			items = append(items, it)
+		} else {
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"ok":        false,
+				"character": character,
+				"merchant":  fmt.Sprintf("0x%X", merchantGID),
+				"error":     fmt.Sprintf("item gid 0x%X not found", gid),
+			})
+			return
+		}
+	} else {
+		limit := 40
+		if rawLimit := r.URL.Query().Get("limit"); rawLimit != "" {
+			if n, err := strconv.Atoi(rawLimit); err == nil && n > 0 && n <= 200 {
+				limit = n
+			}
+		}
+		for _, it := range c.Data.Inventory.AllItems {
+			if it.UnitPtr == 0 || it.UnitDataPtr == 0 {
+				continue
+			}
+			if it.Location.LocationType != item.LocationInventory && it.Location.LocationType != item.LocationVendor {
+				continue
+			}
+			items = append(items, it)
+			if len(items) >= limit {
+				break
+			}
+		}
+	}
+
+	type itemResult struct {
+		OK       bool                    `json:"ok"`
+		Error    string                  `json:"error,omitempty"`
+		Name     string                  `json:"name"`
+		GID      string                  `json:"gid"`
+		Location string                  `json:"location"`
+		GridX    int                     `json:"grid_x"`
+		GridY    int                     `json:"grid_y"`
+		Probe    memory.VendorPriceProbe `json:"probe,omitempty"`
+	}
+
+	results := make([]itemResult, 0, len(items))
+	for _, it := range items {
+		res := itemResult{
+			Name:     string(it.Name),
+			GID:      fmt.Sprintf("0x%X", it.UnitID),
+			Location: string(it.Location.LocationType),
+			GridX:    it.Position.X,
+			GridY:    it.Position.Y,
+		}
+		probe, err := c.GameReader.VendorPriceProbeForItemWithContextOverride(it, merchantGID, contextOverride, c.Data.PlayerUnit.ID)
+		if err != nil {
+			res.Error = err.Error()
+		} else {
+			res.OK = true
+			res.Probe = probe
+		}
+		results = append(results, res)
+	}
+
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"ok":        true,
+		"character": character,
+		"npc_shop":  c.Data.OpenMenus.NPCShop,
+		"merchant":  fmt.Sprintf("0x%X", merchantGID),
+		"context":   fmt.Sprintf("0x%X", contextOverride),
+		"count":     len(results),
+		"items":     results,
+	})
+}
+
+func parseDebugUnitID(raw string) data.UnitID {
+	if raw == "" {
+		return 0
+	}
+	base := 10
+	if strings.HasPrefix(raw, "0x") || strings.HasPrefix(raw, "0X") {
+		base = 0
+	}
+	v, err := strconv.ParseUint(raw, base, 32)
+	if err != nil {
+		return 0
+	}
+	return data.UnitID(v)
+}
+
+func errorString(err error) string {
+	if err == nil {
+		return ""
+	}
+	return err.Error()
+}
+
+func debugActiveMerchant(c *ctx.Context) data.UnitID {
+	if c == nil {
+		return 0
+	}
+	const maxDistanceSq = 20 * 20
+	playerPos := c.Data.PlayerUnit.Position
+	bestDistSq := maxDistanceSq + 1
+	var best data.UnitID
+	for _, m := range c.Data.Monsters {
+		if m.Type != data.MonsterTypeNone {
+			continue
+		}
+		dx := m.Position.X - playerPos.X
+		dy := m.Position.Y - playerPos.Y
+		distSq := dx*dx + dy*dy
+		if distSq < bestDistSq {
+			bestDistSq = distSq
+			best = m.UnitID
+		}
+	}
+	return best
+}
+
 func (s *HttpServer) debugHIDClick(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	character := r.URL.Query().Get("character")
@@ -5815,6 +7176,11 @@ func (s *HttpServer) debugPostClickInProcess(w http.ResponseWriter, r *http.Requ
 	if btnStr == "" {
 		btnStr = "L"
 	}
+	modeStr := strings.ToLower(r.URL.Query().Get("mode"))
+	if modeStr == "" {
+		modeStr = "native"
+	}
+	modStr := strings.ToLower(r.URL.Query().Get("mod"))
 	xVal, xErr := strconv.ParseInt(xStr, 10, 32)
 	if xErr != nil {
 		fmt.Fprintf(w, `{"error":"bad x: %s"}`, xErr.Error())
@@ -5826,13 +7192,17 @@ func (s *HttpServer) debugPostClickInProcess(w http.ResponseWriter, r *http.Requ
 		return
 	}
 	var btn byte
+	var apcBtn byte
 	switch btnStr {
 	case "L":
-		btn = 0
-	case "R":
 		btn = 1
+		apcBtn = 0
+	case "R":
+		btn = 4
+		apcBtn = 1
 	case "M":
 		btn = 2
+		apcBtn = 2
 	default:
 		fmt.Fprintf(w, `{"error":"bad btn: %s (want L|R|M)"}`, btnStr)
 		return
@@ -5860,11 +7230,77 @@ func (s *HttpServer) debugPostClickInProcess(w http.ResponseWriter, r *http.Requ
 	screenX := int32(gr.WindowLeftX) + int32(xVal)
 	screenY := int32(gr.WindowTopY) + int32(yVal)
 	hwnd := uintptr(gr.HWND)
-	if err := c.MemoryInjector.PostClickInProcess(hwnd, screenX, screenY, btn); err != nil {
-		fmt.Fprintf(w, `{"error":"PostClickInProcess: %s"}`, err.Error())
+	pres := c.MemoryInjector.GetPresenter()
+	if pres == nil {
+		fmt.Fprintf(w, `{"error":"no presenter"}`)
 		return
 	}
-	fmt.Fprintf(w, `{"ok":true,"client":{"x":%d,"y":%d},"screen":{"x":%d,"y":%d},"btn":"%s","hwnd":"0x%X","path":"PostMessageW"}`, xVal, yVal, screenX, screenY, btnStr, hwnd)
+	if err := c.MemoryInjector.CursorPos(int(screenX), int(screenY)); err != nil {
+		fmt.Fprintf(w, `{"error":"CursorPos: %s"}`, err.Error())
+		return
+	}
+	var modVK byte
+	switch modStr {
+	case "", "none":
+	case "ctrl", "control":
+		modVK = 0x11
+	case "shift":
+		modVK = 0x10
+	default:
+		fmt.Fprintf(w, `{"error":"bad mod: %s (want ctrl|shift|none)"}`, modStr)
+		return
+	}
+	switch modeStr {
+	case "native":
+		if modVK != 0 {
+			if err := c.MemoryInjector.OverrideGetKeyState(modVK); err != nil {
+				fmt.Fprintf(w, `{"error":"OverrideGetKeyState: %s"}`, err.Error())
+				return
+			}
+			defer c.MemoryInjector.RestoreGetKeyState()
+			time.Sleep(20 * time.Millisecond)
+		}
+		if err := pres.NativeClick(int32(xVal), int32(yVal), btn); err != nil {
+			fmt.Fprintf(w, `{"error":"NativeClick: %s"}`, err.Error())
+			return
+		}
+	case "post":
+		if modVK != 0 {
+			if err := c.MemoryInjector.OverrideGetKeyState(modVK); err != nil {
+				fmt.Fprintf(w, `{"error":"OverrideGetKeyState: %s"}`, err.Error())
+				return
+			}
+			pres.SetKeyState(modVK, true)
+			defer pres.SetKeyState(modVK, false)
+			defer c.MemoryInjector.RestoreGetKeyState()
+			time.Sleep(20 * time.Millisecond)
+		}
+		if err := pres.PostClick(int32(xVal), int32(yVal), btn); err != nil {
+			fmt.Fprintf(w, `{"error":"PostClick: %s"}`, err.Error())
+			return
+		}
+	case "apc-screen", "apc-client":
+		if modVK != 0 {
+			if err := c.MemoryInjector.OverrideGetKeyState(modVK); err != nil {
+				fmt.Fprintf(w, `{"error":"OverrideGetKeyState: %s"}`, err.Error())
+				return
+			}
+			defer c.MemoryInjector.RestoreGetKeyState()
+			time.Sleep(20 * time.Millisecond)
+		}
+		clickX, clickY := screenX, screenY
+		if modeStr == "apc-client" {
+			clickX, clickY = int32(xVal), int32(yVal)
+		}
+		if err := c.MemoryInjector.PostClickInProcess(hwnd, clickX, clickY, apcBtn); err != nil {
+			fmt.Fprintf(w, `{"error":"PostClickInProcess: %s"}`, err.Error())
+			return
+		}
+	default:
+		fmt.Fprintf(w, `{"error":"bad mode: %s (want native|post|apc-screen|apc-client)"}`, modeStr)
+		return
+	}
+	fmt.Fprintf(w, `{"ok":true,"client":{"x":%d,"y":%d},"screen":{"x":%d,"y":%d},"btn":"%s","mod":"%s","mode":"%s","hwnd":"0x%X"}`, xVal, yVal, screenX, screenY, btnStr, modStr, modeStr, hwnd)
 }
 
 // debugSwapTest executes D2R's internal widget_toggle function (RVA 0x102220)
@@ -5911,8 +7347,8 @@ func (s *HttpServer) debugSwapTest(w http.ResponseWriter, r *http.Request) {
 	// packets to mirror+0). Use mirror+0x80 for the action-ID byte so it does
 	// not overlap any in-flight packet.
 	const (
-		mirrorBufRVA uintptr = 0x1F51330
-		scratchOff   uintptr = 0x80
+		mirrorBufRVA    uintptr = 0x1F51330
+		scratchOff      uintptr = 0x80
 		widgetToggleRVA uintptr = 0x102220
 	)
 	scratchAddr := base + mirrorBufRVA + scratchOff
@@ -6020,7 +7456,8 @@ func (s *HttpServer) debugSetGameTID(w http.ResponseWriter, r *http.Request) {
 // wndproc-bypass walk strategy.
 //
 // Usage: GET /debug/click?character=Blizzard&x=400&y=300
-//        GET /debug/click?character=Blizzard&x=400&y=300&btn=right
+//
+//	GET /debug/click?character=Blizzard&x=400&y=300&btn=right
 //
 // btn defaults to "left". The call lands at the same vtable[1] dispatch a
 // real wndproc click would have hit — for a left click on a walkable tile
@@ -6141,11 +7578,10 @@ func (s *HttpServer) shutdown(w http.ResponseWriter, r *http.Request) {
 		if ctx == nil || ctx.MemoryInjector == nil {
 			continue
 		}
-		pres := ctx.MemoryInjector.GetPresenter()
-		if pres == nil {
+		if ctx.MemoryInjector.GetPresenter() == nil {
 			continue
 		}
-		if err := pres.UninstallDetour(); err != nil {
+		if err := ctx.MemoryInjector.UninstallPresenter(); err != nil {
 			results = append(results, fmt.Sprintf("%s: %v", name, err))
 		} else {
 			results = append(results, fmt.Sprintf("%s: ok", name))
@@ -6278,15 +7714,76 @@ func (s *HttpServer) debugGameState(w http.ResponseWriter, r *http.Request) {
 		"weapon_slot":  d.ActiveWeaponSlot,
 		"in_town":      d.PlayerUnit.Area.IsTown(),
 		"can_teleport": d.CanTeleport(),
-		"monsters_nearby": len(d.Monsters),
-		"objects_nearby":  len(d.Objects),
-		"npcs_nearby":     len(d.NPCs),
-		"right_skill":    int(d.PlayerUnit.RightSkill),
-		"left_skill":     int(d.PlayerUnit.LeftSkill),
+		"open_menus": map[string]bool{
+			"inventory":    d.OpenMenus.Inventory,
+			"stash":        d.OpenMenus.Stash,
+			"cube":         d.OpenMenus.Cube,
+			"npc_interact": d.OpenMenus.NPCInteract,
+			"npc_shop":     d.OpenMenus.NPCShop,
+			"loading":      d.OpenMenus.LoadingScreen,
+		},
+		"monsters_nearby":  len(d.Monsters),
+		"objects_nearby":   len(d.Objects),
+		"npcs_nearby":      len(d.NPCs),
+		"right_skill":      int(d.PlayerUnit.RightSkill),
+		"left_skill":       int(d.PlayerUnit.LeftSkill),
 		"player_unit_addr": fmt.Sprintf("0x%X", playerUnitAddr),
 		"path_addr":        fmt.Sprintf("0x%X", pathAddr),
 	}
 	json.NewEncoder(w).Encode(resp)
+}
+
+// debugMouse reads the D2R client mouse coordinate global and current hover
+// struct. This is diagnostic-only: it does not move the OS cursor or inject
+// input.
+func (s *HttpServer) debugMouse(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+
+	defer func() {
+		if rec := recover(); rec != nil {
+			s.logger.Error("debugMouse PANIC", slog.Any("panic", rec))
+			fmt.Fprintf(w, `{"error":"panic: %v"}`, rec)
+		}
+	}()
+
+	character := r.URL.Query().Get("character")
+	if character == "" {
+		w.WriteHeader(http.StatusBadRequest)
+		fmt.Fprintf(w, `{"error":"missing character parameter"}`)
+		return
+	}
+
+	ctx := s.manager.GetContext(character)
+	if ctx == nil || ctx.GameReader == nil {
+		w.WriteHeader(http.StatusServiceUnavailable)
+		fmt.Fprintf(w, `{"error":"no running supervisor for character %s"}`, character)
+		return
+	}
+
+	ctx.RefreshGameData()
+	x, y, raw := ctx.GameReader.MouseXY()
+	hover := ctx.Data.HoverData
+
+	json.NewEncoder(w).Encode(map[string]any{
+		"mouse": map[string]any{
+			"x":       x,
+			"y":       y,
+			"raw_hex": hex.EncodeToString(raw),
+		},
+		"hover": map[string]any{
+			"is_hovered": hover.IsHovered,
+			"unit_type":  hover.UnitType,
+			"unit_id":    int(hover.UnitID),
+		},
+		"open_menus": map[string]bool{
+			"inventory":    ctx.Data.OpenMenus.Inventory,
+			"stash":        ctx.Data.OpenMenus.Stash,
+			"cube":         ctx.Data.OpenMenus.Cube,
+			"npc_interact": ctx.Data.OpenMenus.NPCInteract,
+			"npc_shop":     ctx.Data.OpenMenus.NPCShop,
+			"loading":      ctx.Data.OpenMenus.LoadingScreen,
+		},
+	})
 }
 
 // debugNPCs lists nearby NPCs (monsters with type none = town NPCs / interactable units)
@@ -6336,7 +7833,7 @@ func (s *HttpServer) debugNPCs(w http.ResponseWriter, r *http.Request) {
 		dy := m.Position.Y - playerPos.Y
 		dist := dx*dx + dy*dy
 		info := npcInfo{
-			Name:   string(m.Name),
+			Name:   fmt.Sprint(m.Name),
 			UnitID: int(m.UnitID),
 			NpcID:  int(m.Name),
 		}
@@ -6391,6 +7888,9 @@ func (s *HttpServer) debugInventory(w http.ResponseWriter, r *http.Request) {
 		IdentifiedName string `json:"identified_name,omitempty"`
 		UnitID         int    `json:"gid"`
 		HexGID         string `json:"hex_gid"`
+		UnitAddr       string `json:"unit_addr,omitempty"`
+		UnitDataAddr   string `json:"unit_data_addr,omitempty"`
+		PathAddr       string `json:"path_addr,omitempty"`
 		Quality        string `json:"quality"`
 		Location       string `json:"location"`
 		PosX           int    `json:"x"`
@@ -6407,6 +7907,9 @@ func (s *HttpServer) debugInventory(w http.ResponseWriter, r *http.Request) {
 			IdentifiedName: itm.IdentifiedName,
 			UnitID:         int(itm.UnitID),
 			HexGID:         fmt.Sprintf("0x%X", uint32(itm.UnitID)),
+			UnitAddr:       fmt.Sprintf("0x%X", itm.UnitPtr),
+			UnitDataAddr:   fmt.Sprintf("0x%X", itm.UnitDataPtr),
+			PathAddr:       fmt.Sprintf("0x%X", itm.PathPtr),
 			Quality:        itm.Quality.ToString(),
 			Location:       string(itm.Location.LocationType),
 			PosX:           itm.Position.X,
@@ -6455,26 +7958,36 @@ func (s *HttpServer) debugPanels(w http.ResponseWriter, r *http.Request) {
 	panels := ctx.GameReader.ReadAllPanels()
 
 	type panelInfo struct {
+		Ptr         string `json:"ptr"`
 		Name        string `json:"name"`
 		Parent      string `json:"parent"`
+		ChildPtr    string `json:"child_ptr,omitempty"`
 		Depth       int    `json:"depth"`
 		Enabled     bool   `json:"enabled"`
 		Visible     bool   `json:"visible"`
 		NumChildren int    `json:"num_children"`
 		Extra       string `json:"extra,omitempty"`
+		Extra2      string `json:"extra2,omitempty"`
+		Extra3      string `json:"extra3,omitempty"`
+		Text        string `json:"text,omitempty"`
 	}
 
 	var out []panelInfo
 	var walk func(p data.Panel)
 	walk = func(p data.Panel) {
 		out = append(out, panelInfo{
+			Ptr:         fmt.Sprintf("0x%X", p.PanelPtr),
 			Name:        p.PanelName,
 			Parent:      p.PanelParent,
+			ChildPtr:    fmt.Sprintf("0x%X", p.PtrChild),
 			Depth:       p.Depth,
 			Enabled:     p.PanelEnabled,
 			Visible:     p.PanelVisible,
 			NumChildren: p.NumChildren,
 			Extra:       p.ExtraText,
+			Extra2:      p.ExtraText2,
+			Extra3:      p.ExtraText3,
+			Text:        memory.GetText(p),
 		})
 		for _, c := range p.PanelChildren {
 			walk(c)
@@ -6487,6 +8000,70 @@ func (s *HttpServer) debugPanels(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(map[string]any{
 		"count":  len(out),
 		"panels": out,
+	})
+}
+
+// debugPanelTexts returns only readable visible panel text. This is the low
+// noise view for vendor tooltip price capture after hovering an item.
+func (s *HttpServer) debugPanelTexts(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+
+	defer func() {
+		if rec := recover(); rec != nil {
+			s.logger.Error("debugPanelTexts PANIC", slog.Any("panic", rec))
+			fmt.Fprintf(w, `{"error":"panic: %v"}`, rec)
+		}
+	}()
+
+	character := r.URL.Query().Get("character")
+	if character == "" {
+		w.WriteHeader(http.StatusBadRequest)
+		fmt.Fprintf(w, `{"error":"missing character parameter"}`)
+		return
+	}
+
+	ctx := s.manager.GetContext(character)
+	if ctx == nil || ctx.GameReader == nil {
+		w.WriteHeader(http.StatusServiceUnavailable)
+		fmt.Fprintf(w, `{"error":"no running supervisor for character %s"}`, character)
+		return
+	}
+
+	texts := ctx.GameReader.VisiblePanelTexts()
+	json.NewEncoder(w).Encode(map[string]any{
+		"count": len(texts),
+		"texts": texts,
+	})
+}
+
+func (s *HttpServer) debugTooltipRenderTexts(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+
+	defer func() {
+		if rec := recover(); rec != nil {
+			s.logger.Error("debugTooltipRenderTexts PANIC", slog.Any("panic", rec))
+			fmt.Fprintf(w, `{"error":"panic: %v"}`, rec)
+		}
+	}()
+
+	character := r.URL.Query().Get("character")
+	if character == "" {
+		w.WriteHeader(http.StatusBadRequest)
+		fmt.Fprintf(w, `{"error":"missing character parameter"}`)
+		return
+	}
+
+	ctx := s.manager.GetContext(character)
+	if ctx == nil || ctx.GameReader == nil {
+		w.WriteHeader(http.StatusServiceUnavailable)
+		fmt.Fprintf(w, `{"error":"no running supervisor for character %s"}`, character)
+		return
+	}
+
+	texts := ctx.GameReader.TooltipRenderTexts()
+	json.NewEncoder(w).Encode(map[string]any{
+		"count": len(texts),
+		"texts": texts,
 	})
 }
 
@@ -6557,8 +8134,9 @@ func (s *HttpServer) debugScreenshot(w http.ResponseWriter, r *http.Request) {
 // module base unless &abs=1 is provided). Returns hex-encoded bytes.
 //
 // Usage:
-//   GET /debug/readmem?character=Blizzard&offset=0x146600&len=32
-//   GET /debug/readmem?character=Blizzard&addr=0x7FF712345678&len=64&abs=1
+//
+//	GET /debug/readmem?character=Blizzard&offset=0x146600&len=32
+//	GET /debug/readmem?character=Blizzard&addr=0x7FF712345678&len=64&abs=1
 func (s *HttpServer) debugReadMem(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 
@@ -6632,8 +8210,9 @@ func (s *HttpServer) debugReadMem(w http.ResponseWriter, r *http.Request) {
 // (offset 0x1F21330) and other known outgoing-packet staging areas.
 //
 // Usage:
-//   GET /debug/memdiff?character=Blizzard&offset=0x1F21330&len=256&duration_ms=5000
-//   GET /debug/memdiff?character=Blizzard&addr=0x7FF7624F1330&len=256&duration_ms=5000&abs=1
+//
+//	GET /debug/memdiff?character=Blizzard&offset=0x1F21330&len=256&duration_ms=5000
+//	GET /debug/memdiff?character=Blizzard&addr=0x7FF7624F1330&len=256&duration_ms=5000&abs=1
 //
 // Optional `samples=N` takes N intermediate snapshots spaced evenly across
 // the window and returns the union of all bytes that ever changed. Default
@@ -6785,8 +8364,9 @@ func (s *HttpServer) debugMemDiff(w http.ResponseWriter, r *http.Request) {
 // VM_WRITE permission. Debug/RE only — can crash D2R if used carelessly.
 //
 // Usage:
-//   GET /debug/writemem?character=Blizzard&offset=0x146600&hex=4889d8
-//   GET /debug/writemem?character=Blizzard&addr=0x7FF712345678&hex=DEADBEEF&abs=1
+//
+//	GET /debug/writemem?character=Blizzard&offset=0x146600&hex=4889d8
+//	GET /debug/writemem?character=Blizzard&addr=0x7FF712345678&hex=DEADBEEF&abs=1
 func (s *HttpServer) debugWriteMem(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 
@@ -6862,7 +8442,8 @@ func (s *HttpServer) debugWriteMem(w http.ResponseWriter, r *http.Request) {
 // build/dumps/. Used to grab large slices of .text for offline analysis.
 //
 // Usage:
-//   GET /debug/dumprange?character=Blizzard&offset=0x5C000&size=0x800000&out=text.bin
+//
+//	GET /debug/dumprange?character=Blizzard&offset=0x5C000&size=0x800000&out=text.bin
 func (s *HttpServer) debugDumpRange(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	defer func() {
@@ -6954,8 +8535,9 @@ func (s *HttpServer) debugDumpRange(w http.ResponseWriter, r *http.Request) {
 // no breakpoints — cannot crash the game. Returns up to max matches.
 //
 // Usage:
-//   GET /debug/scanmem?character=Blizzard&pattern=05DEADBEEF&start=0x7FF79D3D0000&size=0x4000000&max=20
-//   start defaults to D2R module base; size defaults to 0x4000000 (64 MB).
+//
+//	GET /debug/scanmem?character=Blizzard&pattern=05DEADBEEF&start=0x7FF79D3D0000&size=0x4000000&max=20
+//	start defaults to D2R module base; size defaults to 0x4000000 (64 MB).
 func (s *HttpServer) debugScanMem(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	defer func() {
@@ -7189,13 +8771,279 @@ func (s *HttpServer) debugSniffLog(w http.ResponseWriter, r *http.Request) {
 			"path":                pathName,
 		},
 		"hwbp_worker": map[string]any{
-			"tick_count":     diag.HwbpTickCount,
-			"alive":          diag.HwbpWorkerAlive,
-			"new_armed":      diag.HwbpNewArmed,
-			"last_tick_new":  diag.HwbpLastTickNew,
-			"last_new_tid":   diag.HwbpLastNewTid,
+			"tick_count":    diag.HwbpTickCount,
+			"alive":         diag.HwbpWorkerAlive,
+			"new_armed":     diag.HwbpNewArmed,
+			"last_tick_new": diag.HwbpLastTickNew,
+			"last_new_tid":  diag.HwbpLastNewTid,
 		},
 	})
+}
+
+// debugPresentLatency reads the TSC-cycle counters filled by rmod's
+// record_present_latency on each Present frame. Used to decide whether the
+// Present hook body is expensive enough to justify a worker-thread redesign
+// (see Desktop/reports/TODO_2026_04_22.md P0 Step 1).
+//
+// Raw rdtsc cycles are converted to microseconds assuming ~3 GHz (1 µs ≈
+// 3000 cycles) — caller should treat this as an order-of-magnitude estimate,
+// not a precision measurement. The shape of the distribution (min/avg/max)
+// and the PATHS_LAST bitmask tell the operator whether specific sub-phases
+// (snapshot walker / sniffer / batch / cmd) drive the cost.
+//
+// Usage: GET /debug/present-latency?character=Blizzard
+func (s *HttpServer) debugPresentLatency(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+
+	defer func() {
+		if rec := recover(); rec != nil {
+			s.logger.Error("debugPresentLatency PANIC", slog.Any("panic", rec))
+			fmt.Fprintf(w, `{"error":"panic: %v"}`, rec)
+		}
+	}()
+
+	character := r.URL.Query().Get("character")
+	if character == "" {
+		w.WriteHeader(http.StatusBadRequest)
+		fmt.Fprintf(w, `{"error":"missing character"}`)
+		return
+	}
+
+	ctx := s.manager.GetContext(character)
+	if ctx == nil || ctx.MemoryInjector == nil {
+		w.WriteHeader(http.StatusServiceUnavailable)
+		fmt.Fprintf(w, `{"error":"no running supervisor"}`)
+		return
+	}
+
+	pres := ctx.MemoryInjector.GetPresenter()
+	if pres == nil {
+		w.WriteHeader(http.StatusServiceUnavailable)
+		fmt.Fprintf(w, `{"error":"presenter not initialized"}`)
+		return
+	}
+
+	lat := pres.ReadPresentLatency()
+
+	const cyclesPerUs = 3000.0 // assume ~3 GHz host CPU
+	var avgCyc uint64
+	if lat.Count > 0 {
+		avgCyc = lat.SumCyc / lat.Count
+	}
+
+	pathsActive := []string{}
+	if lat.PathsLast&presenter.PathSnapshotEnabled != 0 {
+		pathsActive = append(pathsActive, "snapshot_enabled")
+	}
+	if lat.PathsLast&presenter.PathSnifferRan != 0 {
+		pathsActive = append(pathsActive, "sniffer_ran")
+	}
+	if lat.PathsLast&presenter.PathWalkerFullScan != 0 {
+		pathsActive = append(pathsActive, "walker_full_scan")
+	}
+	if lat.PathsLast&presenter.PathBatchHadWork != 0 {
+		pathsActive = append(pathsActive, "batch_had_work")
+	}
+	if lat.PathsLast&presenter.PathCmdDispatched != 0 {
+		pathsActive = append(pathsActive, "cmd_dispatched")
+	}
+	cmdTypeLast := (lat.PathsLast >> 8) & 0xFF
+
+	out := map[string]any{
+		"ok":    true,
+		"count": lat.Count,
+		"cycles": map[string]uint64{
+			"last": lat.LastCyc,
+			"min":  lat.MinCyc,
+			"max":  lat.MaxCyc,
+			"avg":  avgCyc,
+			"sum":  lat.SumCyc,
+		},
+		"us_approx_3ghz": map[string]float64{
+			"last": float64(lat.LastCyc) / cyclesPerUs,
+			"min":  float64(lat.MinCyc) / cyclesPerUs,
+			"max":  float64(lat.MaxCyc) / cyclesPerUs,
+			"avg":  float64(avgCyc) / cyclesPerUs,
+		},
+		"paths_last": map[string]any{
+			"raw":           fmt.Sprintf("0x%08X", lat.PathsLast),
+			"active":        pathsActive,
+			"cmd_type_last": fmt.Sprintf("0x%02X", cmdTypeLast),
+		},
+	}
+	_ = json.NewEncoder(w).Encode(out)
+}
+
+// debugRmodState returns the raw Go<->rmod shared-memory state. This is the
+// diagnostic source for "what rmod actually acknowledged"; bot flow logs are
+// intentionally not used as proof of in-process execution.
+func (s *HttpServer) debugRmodState(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+
+	character := r.URL.Query().Get("character")
+	if character == "" {
+		w.WriteHeader(http.StatusBadRequest)
+		fmt.Fprintf(w, `{"error":"missing character"}`)
+		return
+	}
+
+	ctx := s.manager.GetContext(character)
+	if ctx == nil || ctx.MemoryInjector == nil {
+		w.WriteHeader(http.StatusServiceUnavailable)
+		fmt.Fprintf(w, `{"error":"no running supervisor"}`)
+		return
+	}
+
+	pres := ctx.MemoryInjector.GetPresenter()
+	if pres == nil {
+		w.WriteHeader(http.StatusServiceUnavailable)
+		fmt.Fprintf(w, `{"error":"presenter not initialized"}`)
+		return
+	}
+
+	st := pres.ReadRuntimeState()
+	out := map[string]any{
+		"ok":    true,
+		"state": st,
+		"hex": map[string]string{
+			"command_type":       fmt.Sprintf("0x%02X", st.CommandType),
+			"status_flag":        fmt.Sprintf("0x%08X", st.StatusFlag),
+			"error_code":         fmt.Sprintf("0x%08X", st.ErrorCode),
+			"debug_step":         fmt.Sprintf("0x%08X", st.DebugStep),
+			"gtc64_install_diag": fmt.Sprintf("0x%08X", st.Gtc64InstallDiag),
+			"timer_queue_ticks":  fmt.Sprintf("0x%08X", st.TimerQueueTicks),
+			"timer_command_runs": fmt.Sprintf("0x%08X", st.TimerCommandRuns),
+			"timer_command_diag": fmt.Sprintf("0x%08X", st.TimerCommandDiag),
+			"timer_last_status":  fmt.Sprintf("0x%08X", st.TimerLastStatus),
+			"timer_last_flag":    fmt.Sprintf("0x%08X", st.TimerLastFlag),
+			"original_present":   fmt.Sprintf("0x%X", st.OriginalPresent),
+			"remote_view_addr":   fmt.Sprintf("0x%X", st.RemoteViewAddr),
+			"fn_send_packet":     fmt.Sprintf("0x%X", st.FnSendPacket),
+			"ui_netman_addr":     fmt.Sprintf("0x%X", st.UINetManAddr),
+			"fn_real_click":      fmt.Sprintf("0x%X", st.FnRealClick),
+			"hwnd_d2r":           fmt.Sprintf("0x%X", st.HwndD2R),
+			"mirror_buf_addr":    fmt.Sprintf("0x%X", st.MirrorBufAddr),
+			"dual_path":          fmt.Sprintf("0x%X", st.DualSendWrap),
+			"present_paths_last": fmt.Sprintf("0x%08X", st.PresentPathsLast),
+		},
+	}
+	_ = json.NewEncoder(w).Encode(out)
+}
+
+// debugRmodClear is a recovery-only endpoint for stale shared-memory commands.
+// It does not execute anything in D2R; it only clears Go's command slot so the
+// next packet/native command is not blocked by a previous timeout.
+func (s *HttpServer) debugRmodClear(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+
+	character := r.URL.Query().Get("character")
+	if character == "" {
+		w.WriteHeader(http.StatusBadRequest)
+		fmt.Fprintf(w, `{"error":"missing character"}`)
+		return
+	}
+
+	ctx := s.manager.GetContext(character)
+	if ctx == nil || ctx.MemoryInjector == nil {
+		w.WriteHeader(http.StatusServiceUnavailable)
+		fmt.Fprintf(w, `{"error":"no running supervisor"}`)
+		return
+	}
+
+	pres := ctx.MemoryInjector.GetPresenter()
+	if pres == nil {
+		w.WriteHeader(http.StatusServiceUnavailable)
+		fmt.Fprintf(w, `{"error":"presenter not initialized"}`)
+		return
+	}
+
+	before := pres.ReadRuntimeState()
+	after := pres.ForceClearCommand()
+	out := map[string]any{
+		"ok":     true,
+		"before": before,
+		"after":  after,
+		"hex": map[string]string{
+			"before_command_type": fmt.Sprintf("0x%02X", before.CommandType),
+			"before_status_flag":  fmt.Sprintf("0x%08X", before.StatusFlag),
+			"after_command_type":  fmt.Sprintf("0x%02X", after.CommandType),
+			"after_status_flag":   fmt.Sprintf("0x%08X", after.StatusFlag),
+		},
+	}
+	_ = json.NewEncoder(w).Encode(out)
+}
+
+func (s *HttpServer) debugPacketRuntime(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+
+	character := r.URL.Query().Get("character")
+	if character == "" {
+		w.WriteHeader(http.StatusBadRequest)
+		fmt.Fprintf(w, `{"error":"missing character"}`)
+		return
+	}
+
+	ctx := s.manager.GetContext(character)
+	if ctx == nil {
+		w.WriteHeader(http.StatusServiceUnavailable)
+		fmt.Fprintf(w, `{"error":"no running supervisor"}`)
+		return
+	}
+
+	out := map[string]any{
+		"ok":        true,
+		"character": character,
+		"env": map[string]string{
+			"CLAUDE_MODE":              os.Getenv("CLAUDE_MODE"),
+			"CLAUDE_USE_SNIFFER":       os.Getenv("CLAUDE_USE_SNIFFER"),
+			"PRESENTER_DLL":            os.Getenv("PRESENTER_DLL"),
+			"DISABLE_CLAUDE_PRESENTER": os.Getenv("DISABLE_CLAUDE_PRESENTER"),
+			"DISABLE_NORMAL_PRESENTER": os.Getenv("DISABLE_NORMAL_PRESENTER"),
+		},
+		"context_flags": map[string]bool{
+			"claude_mode_active":     ctx.ClaudeModeActive,
+			"claude_attach_existing": ctx.ClaudeAttachExisting,
+			"manual_mode_active":     ctx.ManualModeActive,
+		},
+	}
+
+	if ctx.PacketSender != nil {
+		routes := ctx.PacketSender.RouteAvailability()
+		out["packet_routes"] = routes
+		out["debug_sendpacket_paths"] = map[string]bool{
+			"game":        routes.Game,
+			"ui":          routes.UI,
+			"ui-dual":     routes.UIDual,
+			"dual":        routes.Dual,
+			"apc":         routes.APC,
+			"dual-apc":    routes.DualAPC,
+			"dualwrap":    routes.DualWrap,
+			"dualwrap-gt": ctx.MemoryInjector != nil && ctx.MemoryInjector.GetPresenter() != nil,
+		}
+	} else {
+		out["packet_routes"] = map[string]any{"available": false}
+	}
+
+	if ctx.GameReader != nil && ctx.GameReader.Process != nil {
+		out["process_packet_runtime"] = ctx.GameReader.Process.PacketRuntimeSnapshot(true)
+	} else {
+		out["process_packet_runtime"] = map[string]any{"available": false}
+	}
+
+	if ctx.MemoryInjector != nil {
+		if pres := ctx.MemoryInjector.GetPresenter(); pres != nil {
+			out["rmod"] = map[string]any{
+				"available": true,
+				"state":     pres.ReadRuntimeState(),
+			}
+		} else {
+			out["rmod"] = map[string]any{"available": false, "reason": "presenter not initialized"}
+		}
+	} else {
+		out["rmod"] = map[string]any{"available": false, "reason": "memory injector nil"}
+	}
+
+	_ = json.NewEncoder(w).Encode(out)
 }
 
 func (s *HttpServer) debugSniffInstall(w http.ResponseWriter, r *http.Request) {
@@ -7218,7 +9066,7 @@ func (s *HttpServer) debugSniffInstall(w http.ResponseWriter, r *http.Request) {
 		fmt.Fprintf(w, `{"error":%q}`, err.Error())
 		return
 	}
-	fmt.Fprintf(w, `{"ok":true,"message":"sniff hook installed (INT3 at send_fn)"}`)
+	fmt.Fprintf(w, `{"ok":true,"message":"sniff hook installed"}`)
 }
 
 func (s *HttpServer) debugSniffUninstall(w http.ResponseWriter, r *http.Request) {
@@ -7330,6 +9178,30 @@ func (s *HttpServer) stopHwbpReenumLoop(character string) {
 		if cancel, ok := prev.(context.CancelFunc); ok {
 			cancel()
 		}
+	}
+}
+
+func isUnsafeDebugDualWrapVendorPath(path string, opcode byte) bool {
+	if path != "dualwrap" {
+		return false
+	}
+	switch opcode {
+	case 0x32, 0x33, 0x35:
+		return true
+	default:
+		return false
+	}
+}
+
+func isUnsafeDebugCubeTransmutePath(path string, pkt []byte) bool {
+	if path == "ui" || len(pkt) < 7 || pkt[0] != 0x18 || pkt[6] != 0x88 {
+		return false
+	}
+	switch path {
+	case "game", "", "apc", "dual-apc", "dual", "dualwrap", "dualwrap-gt":
+		return true
+	default:
+		return false
 	}
 }
 
@@ -7546,7 +9418,7 @@ func (s *HttpServer) debugHwbpDrain(w http.ResponseWriter, r *http.Request) {
 }
 
 // debugCallFn calls an arbitrary function inside D2R via CMD_CALL_FN.
-// Usage: /debug/callfn?character=Blizzard&addr=0x7FF760716600&a0=0&a1=0&a2=0&a3=0
+// Usage: /debug/callfn?character=Blizzard&addr=0x7FF760716600&a0=0&a1=0&a2=0&a3=0&a4=0&a5=0
 func (s *HttpServer) debugCallFn(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	character := r.URL.Query().Get("character")
@@ -7565,8 +9437,8 @@ func (s *HttpServer) debugCallFn(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var args [4]uintptr
-	for i := 0; i < 4; i++ {
+	var args [6]uintptr
+	for i := 0; i < 6; i++ {
 		s := r.URL.Query().Get(fmt.Sprintf("a%d", i))
 		if s != "" {
 			v, _ := strconv.ParseUint(s, 0, 64)
@@ -7574,7 +9446,97 @@ func (s *HttpServer) debugCallFn(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	ret, err := ctx.GameReader.Process.CallFn(uintptr(fnAddr), args[0], args[1], args[2], args[3])
+	ret, err := ctx.GameReader.Process.CallFn(uintptr(fnAddr), args[0], args[1], args[2], args[3], args[4], args[5])
+	if err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		fmt.Fprintf(w, `{"error":%q}`, err.Error())
+		return
+	}
+	fmt.Fprintf(w, `{"ok":true,"return_value":"0x%X","return_dec":%d}`, ret, ret)
+}
+
+// debugCallFnAPC calls a D2R function through Process.CallFn3Args, the same
+// main-thread APC route used by native NPC dialog handlers.
+// Usage: /debug/callfn-apc?character=Blizzard&addr=0x7FF760716600&a0=0&a1=0&a2=0
+func (s *HttpServer) debugCallFnAPC(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	character := r.URL.Query().Get("character")
+	ctx := s.manager.GetContext(character)
+	if ctx == nil || ctx.GameReader == nil || ctx.GameReader.Process == nil {
+		w.WriteHeader(http.StatusServiceUnavailable)
+		fmt.Fprintf(w, `{"error":"no supervisor"}`)
+		return
+	}
+
+	addrStr := r.URL.Query().Get("addr")
+	fnAddr, err := strconv.ParseUint(addrStr, 0, 64)
+	if err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		fmt.Fprintf(w, `{"error":"invalid addr"}`)
+		return
+	}
+
+	var args [3]uintptr
+	for i := 0; i < 3; i++ {
+		arg := r.URL.Query().Get(fmt.Sprintf("a%d", i))
+		if arg != "" {
+			v, err := strconv.ParseUint(arg, 0, 64)
+			if err != nil {
+				w.WriteHeader(http.StatusBadRequest)
+				fmt.Fprintf(w, `{"error":"invalid a%d"}`, i)
+				return
+			}
+			args[i] = uintptr(v)
+		}
+	}
+
+	err = ctx.GameReader.Process.CallFn3Args(uintptr(fnAddr), args[0], args[1], args[2])
+	if err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		fmt.Fprintf(w, `{"error":%q}`, err.Error())
+		return
+	}
+	fmt.Fprintf(w, `{"ok":true}`)
+}
+
+// debugCallFnAPC6 calls a D2R function through Process.CallFn6Args. This is
+// the APC route to use when Present is intentionally not hooked and the target
+// native handler needs stack arguments.
+// Usage: /debug/callfn-apc6?character=Blizzard&addr=0x7FF760716600&a0=0&a1=0&a2=0&a3=0&a4=0&a5=0
+func (s *HttpServer) debugCallFnAPC6(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	character := r.URL.Query().Get("character")
+	ctx := s.manager.GetContext(character)
+	if ctx == nil || ctx.GameReader == nil || ctx.GameReader.Process == nil {
+		w.WriteHeader(http.StatusServiceUnavailable)
+		fmt.Fprintf(w, `{"error":"no supervisor"}`)
+		return
+	}
+
+	addrStr := r.URL.Query().Get("addr")
+	fnAddr, err := strconv.ParseUint(addrStr, 0, 64)
+	if err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		fmt.Fprintf(w, `{"error":"invalid addr"}`)
+		return
+	}
+
+	var args [6]uintptr
+	for i := 0; i < 6; i++ {
+		arg := r.URL.Query().Get(fmt.Sprintf("a%d", i))
+		if arg == "" {
+			continue
+		}
+		v, err := strconv.ParseUint(arg, 0, 64)
+		if err != nil {
+			w.WriteHeader(http.StatusBadRequest)
+			fmt.Fprintf(w, `{"error":"invalid a%d"}`, i)
+			return
+		}
+		args[i] = uintptr(v)
+	}
+
+	ret, err := ctx.GameReader.Process.CallFn6Args(uintptr(fnAddr), args[0], args[1], args[2], args[3], args[4], args[5])
 	if err != nil {
 		w.WriteHeader(http.StatusInternalServerError)
 		fmt.Fprintf(w, `{"error":%q}`, err.Error())
@@ -7586,7 +9548,7 @@ func (s *HttpServer) debugCallFn(w http.ResponseWriter, r *http.Request) {
 // debugCallFnGT calls an arbitrary function inside D2R via CMD_CALL_FN_GT
 // (game thread APC). Unlike /debug/callfn which runs on the render thread
 // (deadlocks game-logic functions), this queues the call on the game thread.
-// Usage: /debug/callfn-gt?character=Blizzard&addr=0x7FF7606D2220&a0=0x7FF7625213B0
+// Usage: /debug/callfn-gt?character=Blizzard&addr=0x7FF7606D2220&a0=0x7FF7625213B0&a1=0&a2=0&a3=0&a4=0&a5=0
 func (s *HttpServer) debugCallFnGT(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	character := r.URL.Query().Get("character")
@@ -7611,8 +9573,8 @@ func (s *HttpServer) debugCallFnGT(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var args [4]uintptr
-	for i := 0; i < 4; i++ {
+	var args [6]uintptr
+	for i := 0; i < 6; i++ {
 		s := r.URL.Query().Get(fmt.Sprintf("a%d", i))
 		if s != "" {
 			v, _ := strconv.ParseUint(s, 0, 64)
@@ -7620,7 +9582,7 @@ func (s *HttpServer) debugCallFnGT(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	ret, err := pres.CallFnGameThread(uintptr(fnAddr), args[0], args[1], args[2], args[3])
+	ret, err := pres.CallFnGameThread(uintptr(fnAddr), args[0], args[1], args[2], args[3], args[4], args[5])
 	if err != nil {
 		w.WriteHeader(http.StatusInternalServerError)
 		fmt.Fprintf(w, `{"error":%q}`, err.Error())
@@ -7789,10 +9751,16 @@ func (s *HttpServer) debugTraceInstall(w http.ResponseWriter, r *http.Request) {
 	}
 	pid := ctx.GameReader.GetPID()
 	d2rBase := ctx.GameReader.Process.ModuleBaseAddress()
-	// Resolve send_fn / dual_send_wrap RVAs via known offsets (same as DLL uses).
-	const sendFnRVA uintptr = 0x146600
+	sendFn, err := ctx.GameReader.Process.GetD2GSSendPacketFn()
+	if err != nil {
+		fmt.Fprintf(w, `{"error":"resolve send path: %s"}`, err.Error())
+		return
+	}
+	// dual_send_wrap still has no reliable resolver in this tree. Keep the
+	// stale fallback only as a secondary RIP range; tracer_external now reads
+	// payload directly from RCX/RDX when it catches send_fn, so vendor capture
+	// no longer depends on the dual mirror buffer RVAs.
 	const dualWrapRVA uintptr = 0x147110
-	sendFn := d2rBase + sendFnRVA
 	dual := d2rBase + dualWrapRVA
 
 	tr, err := s.getOrOpenTracer(character)
@@ -7807,7 +9775,7 @@ func (s *HttpServer) debugTraceInstall(w http.ResponseWriter, r *http.Request) {
 	}
 	_ = ext
 	st := tr.Status()
-	fmt.Fprintf(w, `{"ok":true,"mode":"external","pid":%d,"d2r_base":"0x%X","send_fn_va":"0x%X","dual_send_wrap_va":"0x%X","installed_flags":%d}`,
+	fmt.Fprintf(w, `{"ok":true,"mode":"external","pid":%d,"d2r_base":"0x%X","send_va":"0x%X","dual_path_va":"0x%X","installed_flags":%d}`,
 		pid, d2rBase, st.SendFnVA, st.DualSendWrapVA, st.InstalledFlags)
 }
 
@@ -7827,9 +9795,9 @@ func (s *HttpServer) debugTraceStatus(w http.ResponseWriter, r *http.Request) {
 	}
 	st := tr.Status()
 	fmt.Fprintf(w, `{"magic":"0x%08X","enabled":%d,"head":%d,"tail":%d,"total":%d,"dropped":%d,`+
-		`"send_fn_va":"0x%X","dual_send_wrap_va":"0x%X","stub_addr":"0x%X",`+
+		`"send_va":"0x%X","dual_path_va":"0x%X","stub_addr":"0x%X",`+
 		`"installed_flags":%d,"last_err":%d,"d2r_base":"0x%X","d2r_text_end":"0x%X","game_tid":%d,`+
-		`"orig_send_fn":%q,"orig_dual_send_wrap":%q}`,
+		`"orig_send":%q,"orig_dual_path":%q}`,
 		st.Magic, st.Enabled, st.Head, st.Tail, st.Total, st.Dropped,
 		st.SendFnVA, st.DualSendWrapVA, st.StubAddr,
 		st.InstalledFlags, st.LastErrorCode, st.D2RBase, st.D2RTextEnd, st.GameThreadID,
@@ -7837,6 +9805,139 @@ func (s *HttpServer) debugTraceStatus(w http.ResponseWriter, r *http.Request) {
 }
 
 // === Capture hook endpoints (inline send_fn hook, zero-miss) ===
+
+func (s *HttpServer) debugArgTraceInstall(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	character := r.URL.Query().Get("character")
+	ctx := s.manager.GetContext(character)
+	if ctx == nil || ctx.MemoryInjector == nil {
+		w.WriteHeader(http.StatusServiceUnavailable)
+		fmt.Fprintf(w, `{"error":"no supervisor"}`)
+		return
+	}
+	pres := ctx.MemoryInjector.GetPresenter()
+	if pres == nil {
+		w.WriteHeader(http.StatusServiceUnavailable)
+		fmt.Fprintf(w, `{"error":"no presenter"}`)
+		return
+	}
+	addrStr := r.URL.Query().Get("addr")
+	if addrStr == "" {
+		addrStr = r.URL.Query().Get("target")
+	}
+	addr, err := strconv.ParseUint(addrStr, 0, 64)
+	if err != nil || addr == 0 {
+		w.WriteHeader(http.StatusBadRequest)
+		fmt.Fprintf(w, `{"error":"missing or invalid addr"}`)
+		return
+	}
+	offset := uint64(0)
+	if offStr := r.URL.Query().Get("offset"); offStr != "" {
+		offset, err = strconv.ParseUint(offStr, 0, 32)
+		if err != nil {
+			w.WriteHeader(http.StatusBadRequest)
+			fmt.Fprintf(w, `{"error":"invalid offset"}`)
+			return
+		}
+	}
+	if ctx.GameReader != nil && ctx.GameReader.Process != nil {
+		base := uint64(ctx.GameReader.Process.ModuleBaseAddress())
+		hook := addr + offset
+		if base != 0 && hook >= base+0x14DB90 && hook < base+0x14DC00 {
+			w.WriteHeader(http.StatusBadRequest)
+			fmt.Fprintf(w, `{"error":"refusing argtrace on vendor 24-byte wrapper; live test crashed D2R at hook 0x%X"}`, hook)
+			return
+		}
+	}
+	if err := pres.ArgTraceInstall(addr, uint32(offset)); err != nil {
+		st := pres.ReadRuntimeState()
+		w.WriteHeader(http.StatusInternalServerError)
+		fmt.Fprintf(w, `{"error":%q,"command_flag":"0x%08X","status_flag":"0x%08X","command_type":"0x%02X","timer_queue_ticks":"0x%08X","timer_command_runs":"0x%08X","timer_command_diag":"0x%08X"}`,
+			err.Error(), st.CommandFlag, st.StatusFlag, st.CommandType, st.TimerQueueTicks, st.TimerCommandRuns, st.TimerCommandDiag)
+		return
+	}
+	fmt.Fprintf(w, `{"ok":true,"addr":"0x%X","offset":"0x%X","hook":"0x%X"}`, addr, offset, addr+offset)
+}
+
+func (s *HttpServer) debugArgTraceUninstall(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	character := r.URL.Query().Get("character")
+	ctx := s.manager.GetContext(character)
+	if ctx == nil || ctx.MemoryInjector == nil {
+		w.WriteHeader(http.StatusServiceUnavailable)
+		fmt.Fprintf(w, `{"error":"no supervisor"}`)
+		return
+	}
+	pres := ctx.MemoryInjector.GetPresenter()
+	if pres == nil {
+		w.WriteHeader(http.StatusServiceUnavailable)
+		fmt.Fprintf(w, `{"error":"no presenter"}`)
+		return
+	}
+	if err := pres.ArgTraceUninstall(); err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		fmt.Fprintf(w, `{"error":%q}`, err.Error())
+		return
+	}
+	fmt.Fprintf(w, `{"ok":true}`)
+}
+
+func (s *HttpServer) debugArgTraceStatus(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	character := r.URL.Query().Get("character")
+	ctx := s.manager.GetContext(character)
+	if ctx == nil || ctx.MemoryInjector == nil {
+		w.WriteHeader(http.StatusServiceUnavailable)
+		fmt.Fprintf(w, `{"error":"no supervisor"}`)
+		return
+	}
+	pres := ctx.MemoryInjector.GetPresenter()
+	if pres == nil {
+		w.WriteHeader(http.StatusServiceUnavailable)
+		fmt.Fprintf(w, `{"error":"no presenter"}`)
+		return
+	}
+	st := pres.HwbpReadStatus()
+	fmt.Fprintf(w, `{"installed":%d,"target":"0x%X","fires":%d,"ring_head":%d,"ring_tail":%d,"ring_total":%d,"ring_dropped":%d}`,
+		st.Installed, st.Target, st.Fires, st.RingHead, st.RingTail, st.RingTotal, st.RingDropped)
+}
+
+func (s *HttpServer) debugArgTraceDrain(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	character := r.URL.Query().Get("character")
+	ctx := s.manager.GetContext(character)
+	if ctx == nil || ctx.MemoryInjector == nil {
+		w.WriteHeader(http.StatusServiceUnavailable)
+		fmt.Fprintf(w, `{"error":"no supervisor"}`)
+		return
+	}
+	pres := ctx.MemoryInjector.GetPresenter()
+	if pres == nil {
+		w.WriteHeader(http.StatusServiceUnavailable)
+		fmt.Fprintf(w, `{"error":"no presenter"}`)
+		return
+	}
+	entries := pres.HwbpDrain()
+	fmt.Fprintf(w, `{"count":%d,"entries":[`, len(entries))
+	for i, e := range entries {
+		if i > 0 {
+			fmt.Fprint(w, ",")
+		}
+		fmt.Fprintf(w, `{"ts":%d,"tid":%d,"hook":"0x%X","rsp":"0x%X",`, e.Ts, e.TID, e.RIP, e.RSP)
+		fmt.Fprintf(w, `"regs":{"rax":"0x%X","rcx":"0x%X","rdx":"0x%X","r8":"0x%X","r9":"0x%X","r10":"0x%X","r11":"0x%X"},`,
+			e.RAX, e.RCX, e.RDX, e.R8, e.R9, e.R10, e.R11)
+		fmt.Fprintf(w, `"payload":"%s",`, hex.EncodeToString(e.Payload))
+		fmt.Fprint(w, `"stack":[`)
+		for j, v := range e.Callstack {
+			if j > 0 {
+				fmt.Fprint(w, ",")
+			}
+			fmt.Fprintf(w, `"0x%X"`, v)
+		}
+		fmt.Fprint(w, `]}`)
+	}
+	fmt.Fprint(w, `]}`)
+}
 
 func (s *HttpServer) debugCaptureHookInstall(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
@@ -7858,7 +9959,7 @@ func (s *HttpServer) debugCaptureHookInstall(w http.ResponseWriter, r *http.Requ
 		fmt.Fprintf(w, `{"error":%q}`, err.Error())
 		return
 	}
-	fmt.Fprintf(w, `{"ok":true,"message":"inline hook armed on send_fn — /debug/capture/drain to read"}`)
+	fmt.Fprintf(w, `{"ok":true,"message":"inline hook armed; /debug/capture/drain to read"}`)
 }
 
 func (s *HttpServer) debugCaptureHookUninstall(w http.ResponseWriter, r *http.Request) {
@@ -7903,6 +10004,30 @@ func (s *HttpServer) debugCaptureHookStatus(w http.ResponseWriter, r *http.Reque
 		st.Fires, st.RingHead, st.RingTail, st.RingTotal, st.RingDropped)
 }
 
+func (s *HttpServer) debugCaptureHookSuppressVendor(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	character := r.URL.Query().Get("character")
+	ctx := s.manager.GetContext(character)
+	if ctx == nil || ctx.MemoryInjector == nil {
+		w.WriteHeader(http.StatusServiceUnavailable)
+		fmt.Fprintf(w, `{"error":"no supervisor"}`)
+		return
+	}
+	pres := ctx.MemoryInjector.GetPresenter()
+	if pres == nil {
+		w.WriteHeader(http.StatusServiceUnavailable)
+		fmt.Fprintf(w, `{"error":"no presenter"}`)
+		return
+	}
+	enabled := r.URL.Query().Get("enabled") == "1" || r.URL.Query().Get("enabled") == "true"
+	if err := pres.CapHookSuppressVendor(enabled); err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		fmt.Fprintf(w, `{"error":%q}`, err.Error())
+		return
+	}
+	fmt.Fprintf(w, `{"ok":true,"enabled":%t}`, enabled)
+}
+
 func (s *HttpServer) debugCaptureHookDrain(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	character := r.URL.Query().Get("character")
@@ -7927,7 +10052,13 @@ func (s *HttpServer) debugCaptureHookDrain(w http.ResponseWriter, r *http.Reques
 		}
 		fmt.Fprintf(w, `{"ts":%d,"tid":%d,"size":%d,"pkt_ptr":"0x%X","opcode":"0x%02X","hex":"%s"}`,
 			e.TsMs, e.TID, e.Size, e.PktPtr,
-			func() byte { if len(e.Payload) > 0 { return e.Payload[0] } else { return 0 } }(),
+			func() byte {
+				if len(e.Payload) > 0 {
+					return e.Payload[0]
+				} else {
+					return 0
+				}
+			}(),
 			hex.EncodeToString(e.Payload))
 	}
 	fmt.Fprintf(w, `]}`)
@@ -8055,8 +10186,9 @@ func (s *HttpServer) debugCrashInfo(w http.ResponseWriter, r *http.Request) {
 // GetData() still falls through to RPM vs the SnapshotReader).
 //
 // Query params:
-//   character — required
-//   reset=1   — zero counters after reporting (useful between audit windows)
+//
+//	character — required
+//	reset=1   — zero counters after reporting (useful between audit windows)
 //
 // Response: JSON with per-path call counts + total RPM bytes + reader source
 // (snapshot vs rpm) + D2R handle state.
@@ -8355,7 +10487,9 @@ func (s *HttpServer) debugReadTrace(w http.ResponseWriter, r *http.Request) {
 	}
 	fmt.Fprintf(w, `{"ok":true,"enabled":%t,"count":%d,"entries":[`, tr.Enabled(), len(entries))
 	for i, e := range entries {
-		if i > 0 { w.Write([]byte(",")) }
+		if i > 0 {
+			w.Write([]byte(","))
+		}
 		fmt.Fprintf(w, `{"tick":%d,"t_ms":%d,"addr":"0x%X","size":%d,"src":"%s","result":"%s","lat_ns":%d}`,
 			e.Tick, e.Timestamp.UnixMilli(), e.Address, e.Size, e.Source, e.Result, e.LatencyNs)
 	}

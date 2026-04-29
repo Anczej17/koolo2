@@ -1,10 +1,10 @@
 package action
 
 import (
-	"local/internal/svc/internal/gamelib/data/item"
-	"local/internal/svc/internal/gamelib/data/stat"
 	"local/internal/svc/internal/action/step"
 	botCtx "local/internal/svc/internal/context"
+	"local/internal/svc/internal/gamelib/data/item"
+	"local/internal/svc/internal/gamelib/data/stat"
 	"local/internal/svc/internal/town"
 	"local/internal/svc/internal/utils"
 )
@@ -22,7 +22,7 @@ func ReviveMerc() {
 
 		InteractNPC(mercNPC)
 
-		// Resurrect option + close dialog
+		// Resurrect option + close dialog.
 		SelectNPCTradeOption(mercNPC) // "resurrect" is same position as "trade" for merc NPCs
 		utils.Sleep(200)
 		step.CloseAllMenus()

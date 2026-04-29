@@ -110,7 +110,7 @@ func Init(path string, tracePackets, traceClicks, traceActions, traceStateDiffs 
 		t.mu.Unlock()
 		return fmt.Errorf("livetrace: mkdir %s: %w", filepath.Dir(path), err)
 	}
-	f, err := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o644)
 	if err != nil {
 		t.mu.Unlock()
 		return fmt.Errorf("livetrace: open %s: %w", path, err)

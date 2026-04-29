@@ -37,15 +37,23 @@ const pointerReleaseDelay = 150 * time.Millisecond
 // MovePointer moves the mouse to the requested position, x and y should be the final position based on
 // pixels shown in the screen. Top-left corner is 0,0
 func (hid *HID) MovePointer(x, y int) {
+	if !hid.guard("MovePointer") {
+		return
+	}
 	hid.gr.updateWindowPositionData()
-	x = hid.gr.WindowLeftX + x
-	y = hid.gr.WindowTopY + y
+	screenX := hid.gr.WindowLeftX + x
+	screenY := hid.gr.WindowTopY + y
 
-	hid.gi.CursorPos(x, y)
-	lParam := calculateLparam(x, y)
-	win.SendMessage(hid.gr.HWND, win.WM_NCHITTEST, 0, lParam)
+	if hid.gi != nil && hid.gi.CursorOverrideActive() {
+		_ = hid.gi.CursorPos(screenX, screenY)
+	} else {
+		win.SetCursorPos(int32(screenX), int32(screenY))
+	}
+	screenLParam := calculateLparam(screenX, screenY)
+	clientLParam := calculateLparam(x, y)
+	win.SendMessage(hid.gr.HWND, win.WM_NCHITTEST, 0, screenLParam)
 	win.SendMessage(hid.gr.HWND, win.WM_SETCURSOR, 0x000105A8, 0x2010001)
-	win.PostMessage(hid.gr.HWND, win.WM_MOUSEMOVE, 0, lParam)
+	win.PostMessage(hid.gr.HWND, win.WM_MOUSEMOVE, 0, clientLParam)
 }
 
 // Click just does a single mouse click at current pointer position.
@@ -55,6 +63,9 @@ func (hid *HID) MovePointer(x, y int) {
 // cross-process win.SendMessage until a safer in-process path is designed
 // (e.g. inline hook + retaddr forge in D2R .text).
 func (hid *HID) Click(btn MouseButton, x, y int) {
+	if !hid.guard("Click") {
+		return
+	}
 	livetrace.Get().Click(traceClickLabel(btn), x, y, "")
 	hid.MovePointer(x, y)
 	lParam := calculateLparam(x, y)
@@ -70,7 +81,35 @@ func (hid *HID) Click(btn MouseButton, x, y int) {
 	win.SendMessage(hid.gr.HWND, buttonUp, 1, lParam)
 }
 
+// ClickPost is the menu-safe analogue of Click: it queues the click through
+// PostMessage instead of synchronously blocking on SendMessage. This is meant
+// for char-select / lobby / create-game UI where a wedged D2R window would
+// otherwise trap the caller inside SendMessage and prevent higher-level
+// watchdogs from recovering.
+func (hid *HID) ClickPost(btn MouseButton, x, y int) {
+	if !hid.guard("ClickPost") {
+		return
+	}
+	livetrace.Get().Click(traceClickLabel(btn), x, y, "Post")
+	lParam := calculateLparam(x, y)
+	buttonDown := uint32(win.WM_LBUTTONDOWN)
+	buttonUp := uint32(win.WM_LBUTTONUP)
+	if btn == RightButton {
+		buttonDown = win.WM_RBUTTONDOWN
+		buttonUp = win.WM_RBUTTONUP
+	}
+
+	win.PostMessage(hid.gr.HWND, win.WM_MOUSEMOVE, 0, lParam)
+	win.PostMessage(hid.gr.HWND, buttonDown, 1, lParam)
+	sleepTime := rand.Intn(keyPressMaxTime-keyPressMinTime) + keyPressMinTime
+	time.Sleep(time.Duration(sleepTime) * time.Millisecond)
+	win.PostMessage(hid.gr.HWND, buttonUp, 1, lParam)
+}
+
 func (hid *HID) ClickWithModifier(btn MouseButton, x, y int, modifier ModifierKey) {
+	if !hid.guard("ClickWithModifier") {
+		return
+	}
 	modLabel := "Ctrl"
 	if modifier == ShiftKey {
 		modLabel = "Shift"

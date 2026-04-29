@@ -6,51 +6,45 @@ import (
 	"local/internal/svc/internal/gamelib/data"
 )
 
-// NewWeaponSwap creates a weapon swap packet (0x50).
+// NewWeaponSwap builds packet 0x50 (SwapWeaponSlots) per AMB's authoritative
+// layout. 30 bytes, fixed.
 //
-// D2R format (30 bytes) from ground truth (logs/sec_swap.log, 48 captures):
+//	[0]       0x50
+//	[1..5]    slot-0 left-hand GID  (primary main-hand)
+//	[5..9]    slot-0 right-hand GID (primary off-hand)
+//	[9..13]   slot-1 left-hand GID  (alt main-hand)
+//	[13..17]  slot-1 right-hand GID (alt off-hand)
+//	[17..25]  zeros (u64 — AMB calls them Unknown1/Unknown2)
+//	[25..27]  currently-active LeftSkillId (u16 LE) from PlayerUnit.LeftSkill
+//	[27..29]  currently-active RightSkillId (u16 LE) from PlayerUnit.RightSkill
+//	[29]      TARGET slot id — the slot to swap TO (active_slot ^ 1)
 //
-//	50 [fromL:u32] [fromR:u32] [toL:u32] [toR:u32] [FFFFFFFFFFFFFFFF] [anim:u8] [00] [tick:u8] [00] [dir:u8]
+// Supersedes 2026-04-21 builder that wrote FF*8 at [17..25] and a hand-picked
+// "anim byte 0x37" at [25]. Per live sniff + AMB docs, [17..25] is eight
+// zeroes and [25..29] encodes the player's currently-selected skills + the
+// destination slot — never a constant anim. The earlier 0x37 almost certainly
+// worked-sometimes only because 0x0037 happens to be a valid skill id the
+// server tolerated, not because the server parsed it as an animation byte.
 //
-// fromL/fromR = weapon GIDs of the currently active slot (being swapped FROM).
-// toL/toR = weapon GIDs of the inactive slot (being swapped TO).
-// Pass 0 for empty hand slots. fromSlot = 0 or 1 (the currently-active slot).
-//
-// Live captures (project_0x50_live_test_results 04-13):
-//   slot0→1 (fromSlot=0): ...FF 00 00 36 00 00   (anim=0x00, tick=0x36, dir=0x00)
-//   slot1→0 (fromSlot=1): ...FF 37 00 95 00 01   (anim=0x37, tick=0x95, dir=0x01)
-//
-// Live test23 04-19 confirmed: server rejects a swap with all-zero trailer
-// OR with wrong-direction trailer (e.g. 37/0/0/0/0 for a 0→1 swap). The
-// anim + dir bytes must match the direction; tick is a low byte of game
-// state (~0x36/0x95 observed) but server tolerance is unknown — use the
-// observed typical value as a best-match default.
-func NewWeaponSwap(fromLeftGID, fromRightGID, toLeftGID, toRightGID data.UnitID, fromSlot uint8) []byte {
+// Slot ordering note: regardless of which slot is currently active, the
+// builder expects slot-0 weapons at [1..9] and slot-1 weapons at [9..17].
+// The server tracks the two sets by physical slot index, not by "source" /
+// "destination" role — callers pass fixed slots, builder passes the TARGET
+// slot at [29] to tell the server which set becomes active.
+func NewWeaponSwap(
+	slot0Left, slot0Right, slot1Left, slot1Right data.UnitID,
+	leftSkillID, rightSkillID uint16,
+	targetSlot byte,
+) []byte {
 	buf := make([]byte, 30)
 	buf[0] = 0x50
-	binary.LittleEndian.PutUint32(buf[1:5], uint32(fromLeftGID))
-	binary.LittleEndian.PutUint32(buf[5:9], uint32(fromRightGID))
-	binary.LittleEndian.PutUint32(buf[9:13], uint32(toLeftGID))
-	binary.LittleEndian.PutUint32(buf[13:17], uint32(toRightGID))
-	binary.LittleEndian.PutUint64(buf[17:25], 0xFFFFFFFFFFFFFFFF)
-	// Trailer layout, corrected 2026-04-21 from live capture of user's
-	// manual CTA pre-buff sequence in Outer Cloister:
-	//   slot 0->1: ...FF FF FF FF FF FF FF FF 37 00 95 00 01
-	//   slot 1->0: ...FF FF FF FF FF FF FF FF 37 00 28 00 00
-	// So:
-	//   [25] = 0x37 anim byte, CONSTANT for both directions
-	//   [26] = 0x00 constant
-	//   [27:29] = u16 session seq counter (observed 95/28/36/9b — varies;
-	//             server appears not to strict-validate, 0 works)
-	//   [29] = target weapon slot = fromSlot XOR 1
-	// Old builder wrote [25]=0x00 for fromSlot==0 AND set [29]=fromSlot
-	// (not target slot). Both wrong — server silent-drops an all-zero-anim
-	// trailer, and a dir byte matching the current slot means "swap to
-	// where I already am" which the server treats as no-op.
-	buf[25] = 0x37
-	buf[26] = 0x00
-	buf[27] = 0x00
-	buf[28] = 0x00
-	buf[29] = fromSlot ^ 1
+	binary.LittleEndian.PutUint32(buf[1:5], uint32(slot0Left))
+	binary.LittleEndian.PutUint32(buf[5:9], uint32(slot0Right))
+	binary.LittleEndian.PutUint32(buf[9:13], uint32(slot1Left))
+	binary.LittleEndian.PutUint32(buf[13:17], uint32(slot1Right))
+	// [17..25] stay zero (make default).
+	binary.LittleEndian.PutUint16(buf[25:27], leftSkillID)
+	binary.LittleEndian.PutUint16(buf[27:29], rightSkillID)
+	buf[29] = targetSlot
 	return buf
 }

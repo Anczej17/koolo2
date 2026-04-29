@@ -13,6 +13,7 @@ type Inventory struct {
 	Gold             int
 	StashedGold      [6]int // [0]=personal, [1..5]=shared stash pages
 	SharedStashPages int    // Number of shared stash units detected (3=non-DLC, 5+=DLC)
+	StashTabUnitIDs  []UnitID
 }
 
 func (i Inventory) Find(name item.Name, locations ...item.LocationType) (Item, bool) {
@@ -87,6 +88,9 @@ type ItemAffixes struct {
 type Item struct {
 	ID int
 	UnitID
+	UnitPtr              uintptr
+	UnitDataPtr          uintptr
+	PathPtr              uintptr
 	Name                 item.Name
 	Quality              item.Quality
 	IdentifiedName       string

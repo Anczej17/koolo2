@@ -4,11 +4,12 @@ import (
 	"fmt"
 	"time"
 
+	"local/internal/svc/internal/context"
 	"local/internal/svc/internal/gamelib/data"
 	"local/internal/svc/internal/gamelib/data/area"
 	"local/internal/svc/internal/gamelib/data/mode"
 	"local/internal/svc/internal/gamelib/data/object"
-	"local/internal/svc/internal/context"
+	"local/internal/svc/internal/packet/amb"
 	"local/internal/svc/internal/town"
 	"local/internal/svc/internal/utils"
 )
@@ -128,9 +129,9 @@ func InteractObjectPacket(obj data.Object, isCompletedFn func() bool) error {
 				continue
 			}
 
-			// Send packet interaction
-			ctx.Logger.Debug("Attempting TP interaction via packet method")
-			if err := ctx.PacketSender.InteractWithTp(o); err != nil {
+			// Send packet interaction (AMB 0x41 portal-interact, 13 B)
+			ctx.Logger.Debug("Attempting TP interaction via AMB 0x41 PortalInteract")
+			if err := ctx.PacketSender.PortalInteract(o); err != nil {
 				ctx.Logger.Error("Packet TP interaction failed", "error", err)
 				return fmt.Errorf("failed to interact with portal via packet: %w", err)
 			}
@@ -160,11 +161,75 @@ func InteractObjectPacket(obj data.Object, isCompletedFn func() bool) error {
 				}
 				return fmt.Errorf("portal sync timeout - expected area: %v, current: %v", expectedArea, ctx.Data.PlayerUnit.Area)
 			}
+		} else if o.IsWaypoint() {
+			ctx.Logger.Debug("Attempting waypoint interaction via AMB object packet",
+				"object", o.Name,
+				"objectID", o.ID,
+				"attempt", interactionAttempts+1)
+			if err := sendObjectInteractionPacket(ctx, o, interactionAttempts); err != nil {
+				ctx.Logger.Error("Packet object interaction failed", "error", err, "object", o.Name, "objectID", o.ID)
+				return fmt.Errorf("failed to interact with object via packet: %w", err)
+			}
+
+			waitingForInteraction = true
+			interactionAttempts++
+			utils.Sleep(250)
 		} else {
-			// For non-portal objects, packets are not supported yet
-			return fmt.Errorf("packet interaction only supported for portals currently")
+			if ctx.PathFinder != nil {
+				if distance := ctx.PathFinder.DistanceFromMe(o.Position); distance > 5 {
+					playerPos := ctx.Data.PlayerUnit.Position
+					ctx.Logger.Debug("Packet object interaction: AMB 0x04 RunToUnit prime",
+						"object", o.Name,
+						"objectID", o.ID,
+						"distance", distance,
+						"playerX", playerPos.X,
+						"playerY", playerPos.Y)
+					if err := ctx.PacketSender.RunToUnit(2, o.ID, uint16(playerPos.X), uint16(playerPos.Y)); err != nil {
+						return fmt.Errorf("move to object via AMB 0x04: %w", err)
+					}
+					utils.Sleep(250)
+					ctx.RefreshGameData()
+					continue
+				}
+			}
+
+			ctx.Logger.Debug("Attempting object interaction via AMB object packet",
+				"object", o.Name,
+				"objectID", o.ID,
+				"mode", o.Mode,
+				"attempt", interactionAttempts+1)
+			if err := sendObjectInteractionPacket(ctx, o, interactionAttempts); err != nil {
+				ctx.Logger.Error("Packet object interaction failed", "error", err, "object", o.Name, "objectID", o.ID)
+				return fmt.Errorf("failed to interact with object via packet: %w", err)
+			}
+
+			waitingForInteraction = true
+			interactionAttempts++
+			utils.Sleep(250)
 		}
 	}
 
 	return nil
+}
+
+func sendObjectInteractionPacket(ctx *context.Status, o data.Object, attempt int) error {
+	preferSimple := amb.ShouldUseSimpleInteraction(o)
+
+	switch {
+	case attempt == 0 && preferSimple:
+		ctx.Logger.Debug("Object interaction packet: AMB 0x40 SimpleObjectInteract", "object", o.Name, "objectID", o.ID)
+		return ctx.PacketSender.SimpleObjectInteract(o)
+	case attempt == 0:
+		ctx.Logger.Debug("Object interaction packet: AMB 0x41 ObjectInteractEx", "object", o.Name, "objectID", o.ID)
+		return ctx.PacketSender.ObjectInteractEx(o)
+	case attempt == 1 && preferSimple:
+		ctx.Logger.Debug("Object interaction retry packet: AMB 0x41 ObjectInteractEx", "object", o.Name, "objectID", o.ID)
+		return ctx.PacketSender.ObjectInteractEx(o)
+	case attempt == 1:
+		ctx.Logger.Debug("Object interaction retry packet: AMB 0x40 SimpleObjectInteract", "object", o.Name, "objectID", o.ID)
+		return ctx.PacketSender.SimpleObjectInteract(o)
+	default:
+		ctx.Logger.Debug("Object interaction retry packet: AMB 0x13 ObjectInteract", "object", o.Name, "objectID", o.ID)
+		return ctx.PacketSender.ObjectInteract0x13(o, ctx.Data.PlayerUnit.ID)
+	}
 }

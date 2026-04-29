@@ -7,8 +7,8 @@
 //! Runtime graphics module - frame-synchronized command dispatch via shared memory.
 //! no_std — zero CRT dependency, works with manual PE mapping.
 
-use core::sync::atomic::{AtomicU32, Ordering};
 use core::panic::PanicInfo;
+use core::sync::atomic::{AtomicU32, Ordering};
 
 /// Minimal x86-64 encoder/decoder for GID-style AssembleInsteadOfBytes
 /// Present hook + ROP chain builder. no_std, handcrafted, no external crate.
@@ -53,6 +53,20 @@ type DWORD = u32;
 type ATOM = u16;
 type WNDPROC = Option<unsafe extern "system" fn(HWND, UINT, WPARAM, LPARAM) -> LRESULT>;
 
+#[repr(C)]
+struct POINT {
+    x: i32,
+    y: i32,
+}
+
+#[repr(C)]
+struct RECT {
+    left: i32,
+    top: i32,
+    right: i32,
+    bottom: i32,
+}
+
 const TRUE: BOOL = 1;
 const FALSE: BOOL = 0;
 const DLL_PROCESS_ATTACH: DWORD = 1;
@@ -61,7 +75,11 @@ const DLL_PROCESS_DETACH: DWORD = 0;
 // Memory constants
 const MEM_COMMIT: DWORD = 0x1000;
 const MEM_RESERVE: DWORD = 0x2000;
+const MEM_RELEASE: DWORD = 0x8000;
+const PAGE_EXECUTE: DWORD = 0x10;
+const PAGE_EXECUTE_READ: DWORD = 0x20;
 const PAGE_EXECUTE_READWRITE: DWORD = 0x40;
+const PAGE_EXECUTE_WRITECOPY: DWORD = 0x80;
 const FILE_MAP_ALL_ACCESS: DWORD = 0xF001F;
 
 // Window styles
@@ -161,16 +179,9 @@ extern "system" {
         Period: DWORD,
         Flags: u32,
     ) -> BOOL;
-    fn DeleteTimerQueueTimer(
-        TimerQueue: HANDLE,
-        Timer: HANDLE,
-        CompletionEvent: HANDLE,
-    ) -> BOOL;
-    fn OpenFileMappingW(
-        dwDesiredAccess: DWORD,
-        bInheritHandle: BOOL,
-        lpName: *const u16,
-    ) -> HANDLE;
+    fn DeleteTimerQueueTimer(TimerQueue: HANDLE, Timer: HANDLE, CompletionEvent: HANDLE) -> BOOL;
+    fn OpenFileMappingW(dwDesiredAccess: DWORD, bInheritHandle: BOOL, lpName: *const u16)
+        -> HANDLE;
     fn MapViewOfFile(
         hFileMappingObject: HANDLE,
         dwDesiredAccess: DWORD,
@@ -178,6 +189,7 @@ extern "system" {
         dwFileOffsetLow: DWORD,
         dwNumberOfBytesToMap: usize,
     ) -> *mut core::ffi::c_void;
+    fn UnmapViewOfFile(lpBaseAddress: *const core::ffi::c_void) -> BOOL;
 }
 
 #[link(name = "ntdll")]
@@ -222,19 +234,19 @@ extern "system" {
 /// MEMORY_BASIC_INFORMATION (subset — we only read State/Protect).
 #[repr(C)]
 struct MemoryBasicInformation {
-    base_address:       *const core::ffi::c_void,
-    allocation_base:    *const core::ffi::c_void,
+    base_address: *const core::ffi::c_void,
+    allocation_base: *const core::ffi::c_void,
     allocation_protect: u32,
-    partition_id:       u16, // x64 — actually 16 padding then RegionSize
-    _pad:               u16,
-    region_size:        usize,
-    state:              u32, // MEM_COMMIT/MEM_FREE/MEM_RESERVE
-    protect:            u32,
-    type_:              u32,
+    partition_id: u16, // x64 — actually 16 padding then RegionSize
+    _pad: u16,
+    region_size: usize,
+    state: u32, // MEM_COMMIT/MEM_FREE/MEM_RESERVE
+    protect: u32,
+    type_: u32,
 }
 
 const PAGE_NOACCESS: u32 = 0x01;
-const PAGE_GUARD:    u32 = 0x100;
+const PAGE_GUARD: u32 = 0x100;
 
 #[link(name = "user32")]
 extern "system" {
@@ -258,6 +270,17 @@ extern "system" {
     fn DestroyWindow(hWnd: HWND) -> BOOL;
     fn DefWindowProcW(hWnd: HWND, Msg: UINT, wParam: WPARAM, lParam: LPARAM) -> LRESULT;
     fn PostMessageW(hWnd: HWND, Msg: u32, wParam: usize, lParam: usize) -> BOOL;
+    fn SendMessageW(hWnd: HWND, Msg: u32, wParam: usize, lParam: usize) -> LRESULT;
+    fn SetWindowLongPtrW(hWnd: HWND, nIndex: i32, dwNewLong: isize) -> isize;
+    fn CallWindowProcW(
+        lpPrevWndFunc: isize,
+        hWnd: HWND,
+        Msg: UINT,
+        wParam: WPARAM,
+        lParam: LPARAM,
+    ) -> LRESULT;
+    fn GetClientRect(hWnd: HWND, lpRect: *mut RECT) -> BOOL;
+    fn ClientToScreen(hWnd: HWND, lpPoint: *mut POINT) -> BOOL;
     fn MapVirtualKeyW(uCode: u32, uMapType: u32) -> u32;
     fn AddVectoredExceptionHandler(
         First: u32,
@@ -354,8 +377,14 @@ impl RawContext {
 
     fn rip(&self) -> u64 {
         u64::from_le_bytes([
-            self.data[0xF8], self.data[0xF9], self.data[0xFA], self.data[0xFB],
-            self.data[0xFC], self.data[0xFD], self.data[0xFE], self.data[0xFF],
+            self.data[0xF8],
+            self.data[0xF9],
+            self.data[0xFA],
+            self.data[0xFB],
+            self.data[0xFC],
+            self.data[0xFD],
+            self.data[0xFE],
+            self.data[0xFF],
         ])
     }
 
@@ -365,17 +394,27 @@ impl RawContext {
     }
 
     fn reg64(&self, off: usize) -> u64 {
-        u64::from_le_bytes(self.data[off..off+8].try_into().unwrap())
+        u64::from_le_bytes(self.data[off..off + 8].try_into().unwrap())
     }
     fn set_reg64(&mut self, off: usize, val: u64) {
-        self.data[off..off+8].copy_from_slice(&val.to_le_bytes());
+        self.data[off..off + 8].copy_from_slice(&val.to_le_bytes());
     }
 
-    fn rax(&self) -> u64 { self.reg64(0x78) }
-    fn rcx(&self) -> u64 { self.reg64(0x80) }
-    fn rdx(&self) -> u64 { self.reg64(0x88) }
-    fn rsp(&self) -> u64 { self.reg64(0x98) }
-    fn set_rsp(&mut self, v: u64) { self.set_reg64(0x98, v); }
+    fn rax(&self) -> u64 {
+        self.reg64(0x78)
+    }
+    fn rcx(&self) -> u64 {
+        self.reg64(0x80)
+    }
+    fn rdx(&self) -> u64 {
+        self.reg64(0x88)
+    }
+    fn rsp(&self) -> u64 {
+        self.reg64(0x98)
+    }
+    fn set_rsp(&mut self, v: u64) {
+        self.set_reg64(0x98, v);
+    }
 
     fn set_context_flags(&mut self, flags: u32) {
         self.data[0x30..0x34].copy_from_slice(&flags.to_le_bytes());
@@ -396,52 +435,64 @@ const VERSION: u32 = 1;
 
 const CMD_NOP: u32 = 0;
 const CMD_SEND_PACKET: u32 = 1;
-const CMD_SEND_UI_PACKET: u32 = 9;  // vtable[5] via UI NetMan (buy/identify/cube/gamble)
-const CMD_SEND_DUAL: u32 = 11;      // memcpy mirror buf + send_fn (sell/trade dual-send)
-const CMD_CALL_FN: u32 = 13;    // call D2R function with up to 4 args (render thread — deadlocks on game-logic fns)
-const CMD_WRITE_MEM: u32 = 14;  // write bytes to D2R memory
+const CMD_SEND_UI_PACKET: u32 = 9; // vtable[5] via UI NetMan (buy/identify/cube/gamble)
+const CMD_SEND_DUAL: u32 = 11; // memcpy mirror buf + send_fn (sell/trade dual-send)
+const CMD_CALL_FN: u32 = 13; // call D2R function with up to 4 args (render thread — deadlocks on game-logic fns)
+const CMD_WRITE_MEM: u32 = 14; // write bytes to D2R memory
 const CMD_CALL_FN_GT: u32 = 15; // call D2R function on GAME THREAD via APC (no deadlock)
 const CMD_SEND_DUAL_GT: u32 = 16; // send packet via dual_send_wrap FROM GAME THREAD (GetTickCount64 hook)
-const CMD_PACKET_TRACE_INSTALL: u32 = 17;   // install trampoline JMP on send_fn + dual_send_wrap
+const CMD_PACKET_TRACE_INSTALL: u32 = 17; // install trampoline JMP on send_fn + dual_send_wrap
 const CMD_PACKET_TRACE_UNINSTALL: u32 = 18; // restore original bytes
-const CMD_DR_PROBE: u32 = 22;               // probe whether SetThreadContext persists DR0 on D2R threads (Arxan diagnostic)
-const CMD_SNAPSHOT_INIT: u32 = 24;          // Phase A P1-GID: enable per-Present PlayerUnit snapshot into SHM
-const CMD_UNINSTALL_DETOUR: u32 = 25;       // Graceful shutdown: restore Present prologue before app.exe exits
-const CMD_ROP_SCAN: u32 = 26;               // GID-4: scan .text region for ROP gadgets, populate G_ROP_GADGETS
-const CMD_ROP_READ: u32 = 27;               // GID-5: execute build_memcpy ROP chain — D2R reads own memory via its own gadgets
-const CMD_ROP_READ_BATCH: u32 = 29;         // batch N (src_va, len) tuples in one Present frame — amortises round-trip
+const CMD_DR_PROBE: u32 = 22; // probe whether SetThreadContext persists DR0 on D2R threads (Arxan diagnostic)
+const CMD_SNAPSHOT_INIT: u32 = 24; // Phase A P1-GID: enable per-Present PlayerUnit snapshot into SHM
+const CMD_UNINSTALL_DETOUR: u32 = 25; // Graceful shutdown: restore Present prologue before app.exe exits
+const CMD_ROP_SCAN: u32 = 26; // GID-4: scan .text region for ROP gadgets, populate G_ROP_GADGETS
+const CMD_ROP_READ: u32 = 27; // GID-5: execute build_memcpy ROP chain — D2R reads own memory via its own gadgets
+const CMD_POST_KEY: u32 = 28; // post WM_KEYDOWN/WM_KEYUP from inside rmod using D2R HWND
+const CMD_POST_CLICK: u32 = 31; // post WM_MOUSEMOVE/down/up from inside rmod using D2R HWND
+const CMD_NATIVE_CLICK: u32 = 32; // call D2R real_click_worker from the GTC64 game hook
+const CMD_ARG_TRACE_INSTALL: u32 = 33; // install inline argument capture hook at caller-supplied VA+offset
+const CMD_ARG_TRACE_UNINSTALL: u32 = 34; // restore argument capture hook
+const CMD_POST_MOVE: u32 = 35; // post hover mouse move from inside rmod using D2R HWND
+const CMD_SET_D2R_CURSOR: u32 = 36; // call D2R set_cursor_screen_xy(x,y)
+const CMD_RESOLVE_D2R_HOVER: u32 = 37; // set MouseXY, then call native UI hover resolver
+const CMD_CAP_SUPPRESS_VENDOR: u32 = 38; // toggle 0x32/0x33 send suppression after capture
+const CMD_VENDOR_PRICE: u32 = 39; // compute vendor price via D2R native item value helpers
+const WM_RMOD_RESOLVE_HOVER: u32 = 0x8000 + 0x525;
+const GWLP_WNDPROC: i32 = -4;
+const CMD_ROP_READ_BATCH: u32 = 29; // batch N (src_va, len) tuples in one Present frame — amortises round-trip
 
 // ROP command SHM layout (u64 args, u32 status) — placed in the 0x3000 free
 // band between HWBP (0x2000-0x2100) and snapshot header (0x4000).
-const OFF_ROP_SCAN_BASE:    usize = 0x3000;  // u64 — scan region base VA
-const OFF_ROP_SCAN_LEN:     usize = 0x3008;  // u64 — scan region length
-const OFF_ROP_SCAN_COUNT:   usize = 0x3010;  // u32 — out: gadgets harvested
-const OFF_ROP_READ_SRC:     usize = 0x3018;  // u64 — D2R VA to read from
-const OFF_ROP_READ_DST:     usize = 0x3020;  // u64 — SHM scratch VA to write into
-const OFF_ROP_READ_LEN:     usize = 0x3028;  // u64 — bytes to copy
-const OFF_ROP_READ_STATUS:  usize = 0x3030;  // u32 — out: 0=ok, 1=gadget-pool-missing, 2=exec-failed
-const OFF_ROP_READY:        usize = 0x3034;  // u32 — 1 when G_ROP_EXECUTOR/G_ROP_STACK/G_ROP_TRIGGER ready post-scan
-const OFF_ROP_DBG:          usize = 0x3038;  // u32 — step marker (0xAAAA00xx); Go reads on timeout to see where handler got stuck
-const OFF_ROP_KIND_COUNTS:  usize = 0x303C;  // u32[8] — GadgetKind breakdown: [Unknown,PopReg,MovRegMem,MovMemReg,RepMovsb,RepMovsq,XchgReg,Ret]
-const OFF_ROP_POPREG_MASK:  usize = 0x305C;  // u16 — bitmask of popable regs in pool (bit0=rax..bit15=r15)
-const OFF_ROP_WORKER_HB:    usize = 0x3060;  // u32 — ROP worker thread heartbeat counter (Plan B diagnostic)
-// GID-6 scratch buffer. Rmod's CMD_ROP_READ memcpys D2R VAs into this area;
-// app.exe reads back from the same SHM offset. 4 KB is enough for any single
-// D2R struct the bot reads per tick (PlayerUnit chain = ~0x200 B, inventory
-// rows ~0x100 B each). CMD_ROP_READ_BATCH reuses the same buffer — bot reads
-// concatenated bytes in entry order.
-const OFF_ROP_READ_BUFFER:  usize = 0x8000;  // u8[0x1000] — ROP-mirrored D2R bytes
+const OFF_ROP_SCAN_BASE: usize = 0x3000; // u64 — scan region base VA
+const OFF_ROP_SCAN_LEN: usize = 0x3008; // u64 — scan region length
+const OFF_ROP_SCAN_COUNT: usize = 0x3010; // u32 — out: gadgets harvested
+const OFF_ROP_READ_SRC: usize = 0x3018; // u64 — D2R VA to read from
+const OFF_ROP_READ_DST: usize = 0x3020; // u64 — SHM scratch VA to write into
+const OFF_ROP_READ_LEN: usize = 0x3028; // u64 — bytes to copy
+const OFF_ROP_READ_STATUS: usize = 0x3030; // u32 — out: 0=ok, 1=gadget-pool-missing, 2=exec-failed
+const OFF_ROP_READY: usize = 0x3034; // u32 — 1 when G_ROP_EXECUTOR/G_ROP_STACK/G_ROP_TRIGGER ready post-scan
+const OFF_ROP_DBG: usize = 0x3038; // u32 — step marker (0xAAAA00xx); Go reads on timeout to see where handler got stuck
+const OFF_ROP_KIND_COUNTS: usize = 0x303C; // u32[8] — GadgetKind breakdown: [Unknown,PopReg,MovRegMem,MovMemReg,RepMovsb,RepMovsq,XchgReg,Ret]
+const OFF_ROP_POPREG_MASK: usize = 0x305C; // u16 — bitmask of popable regs in pool (bit0=rax..bit15=r15)
+const OFF_ROP_WORKER_HB: usize = 0x3060; // u32 — ROP worker thread heartbeat counter (Plan B diagnostic)
+                                         // GID-6 scratch buffer. Rmod's CMD_ROP_READ memcpys D2R VAs into this area;
+                                         // app.exe reads back from the same SHM offset. 4 KB is enough for any single
+                                         // D2R struct the bot reads per tick (PlayerUnit chain = ~0x200 B, inventory
+                                         // rows ~0x100 B each). CMD_ROP_READ_BATCH reuses the same buffer — bot reads
+                                         // concatenated bytes in entry order.
+const OFF_ROP_READ_BUFFER: usize = 0x8000; // u8[0x1000] — ROP-mirrored D2R bytes
 const OFF_ROP_READ_BUFFER_SIZE: usize = 0x1000;
 
 // CMD_ROP_READ_BATCH protocol. Bot fills COUNT + ENTRIES, rmod loops
 // NtRVM for each entry writing contiguous bytes into OFF_ROP_READ_BUFFER
 // (order-preserved), writes per-entry u8 status into STATUS, sum of len
 // into TOTAL_LEN. One Present round-trip replaces N.
-const OFF_ROP_BATCH_COUNT:     usize = 0x3070;  // u32 — entries to process
-const OFF_ROP_BATCH_TOTAL_LEN: usize = 0x3074;  // u32 — out: bytes written to OFF_ROP_READ_BUFFER
-const OFF_ROP_BATCH_ENTRIES:   usize = 0x3080;  // BatchEntry[128], 16 B each — src_va u64, len u32, _pad u32
-const OFF_ROP_BATCH_STATUS:    usize = 0x3880;  // u8[128] — 0 ok, 1 partial/failed NtRVM, 2 invalid / oversize
-const ROP_BATCH_MAX:           usize = 128;
+const OFF_ROP_BATCH_COUNT: usize = 0x3070; // u32 — entries to process
+const OFF_ROP_BATCH_TOTAL_LEN: usize = 0x3074; // u32 — out: bytes written to OFF_ROP_READ_BUFFER
+const OFF_ROP_BATCH_ENTRIES: usize = 0x3080; // BatchEntry[128], 16 B each — src_va u64, len u32, _pad u32
+const OFF_ROP_BATCH_STATUS: usize = 0x3880; // u8[128] — 0 ok, 1 partial/failed NtRVM, 2 invalid / oversize
+const ROP_BATCH_MAX: usize = 128;
 
 // Multi-slot batch pool — flag-driven parallel dispatch. Rmod's Present
 // callback walks all ROP_BATCH_SLOT_COUNT slots every frame, processes
@@ -463,26 +514,26 @@ const ROP_BATCH_MAX:           usize = 128;
 // Slots start at 0x8200 (was snapshot data blob, unused when
 // SNAPSHOT_ENABLE=0). 8 slots × 8 KB = 64 KB, fits in the 98 KB free
 // window up to 0x20000.
-const ROP_BATCH_SLOT_COUNT:    usize = 8;
-const OFF_ROP_BATCH_SLOTS:     usize = 0x8200;
-const ROP_BATCH_SLOT_SIZE:     usize = 0x2000;
-const ROP_BATCH_SLOT_OFF_FLAG:       usize = 0x0000;
-const ROP_BATCH_SLOT_OFF_COUNT:      usize = 0x0004;
-const ROP_BATCH_SLOT_OFF_TOTAL_LEN:  usize = 0x0008;
-const ROP_BATCH_SLOT_OFF_ENTRIES:    usize = 0x0010;
-const ROP_BATCH_SLOT_OFF_STATUS:     usize = 0x0810;
-const ROP_BATCH_SLOT_OFF_OUTPUT:     usize = 0x1000;
-const ROP_BATCH_SLOT_OUTPUT_SIZE:    usize = 0x1000;
+const ROP_BATCH_SLOT_COUNT: usize = 8;
+const OFF_ROP_BATCH_SLOTS: usize = 0x8200;
+const ROP_BATCH_SLOT_SIZE: usize = 0x2000;
+const ROP_BATCH_SLOT_OFF_FLAG: usize = 0x0000;
+const ROP_BATCH_SLOT_OFF_COUNT: usize = 0x0004;
+const ROP_BATCH_SLOT_OFF_TOTAL_LEN: usize = 0x0008;
+const ROP_BATCH_SLOT_OFF_ENTRIES: usize = 0x0010;
+const ROP_BATCH_SLOT_OFF_STATUS: usize = 0x0810;
+const ROP_BATCH_SLOT_OFF_OUTPUT: usize = 0x1000;
+const ROP_BATCH_SLOT_OUTPUT_SIZE: usize = 0x1000;
 
 // HWBP commands — match Go protocol.go (CmdHwbpInstall=6 etc).
-const CMD_HWBP_INSTALL:   u32 = 6;          // install DR0=target on every D2R thread
-const CMD_HWBP_UNINSTALL: u32 = 7;          // clear DR0/DR7 on every D2R thread
-const CMD_HWBP_VERIFY:    u32 = 8;          // re-enum and count threads where DR0 still == target
-const CMD_HWBP_REENUM:    u32 = 23;         // install on threads created since last install (idempotent)
+const CMD_HWBP_INSTALL: u32 = 6; // install DR0=target on every D2R thread
+const CMD_HWBP_UNINSTALL: u32 = 7; // clear DR0/DR7 on every D2R thread
+const CMD_HWBP_VERIFY: u32 = 8; // re-enum and count threads where DR0 still == target
+const CMD_HWBP_REENUM: u32 = 23; // install on threads created since last install (idempotent)
 
 const STATUS_DONE: u32 = 1;
 const STATUS_ERROR: u32 = 2;
-const STATUS_BUSY: u32 = 3; // pending, waiting for game thread tick
+const STATUS_BUSY: u32 = 0; // must match Go protocol.go StatusBusy
 
 /// Size of the inline detour (absolute indirect JMP: FF 25 00 00 00 00 + 8-byte addr).
 const DETOUR_SIZE: usize = 14;
@@ -540,6 +591,7 @@ const DXGI_FORMAT_R8G8B8A8_UNORM: u32 = 28;
 const DXGI_USAGE_RENDER_TARGET_OUTPUT: u32 = 0x20;
 const DXGI_SWAP_EFFECT_DISCARD: u32 = 0;
 const D3D_DRIVER_TYPE_HARDWARE: u32 = 1;
+const D3D_DRIVER_TYPE_WARP: u32 = 5;
 const D3D11_SDK_VERSION: u32 = 7;
 
 /// Signature for D3D11CreateDeviceAndSwapChain resolved at runtime.
@@ -600,78 +652,161 @@ struct SharedBuffer {
 }
 
 // Named offsets — must match Go protocol.go exactly.
-const OFF_MAGIC: usize           = 0x00;
-const OFF_VERSION: usize         = 0x04;
-const OFF_READY_FLAG: usize      = 0x08;
-const OFF_COMMAND_FLAG: usize    = 0x0C;
-const OFF_STATUS_FLAG: usize     = 0x10;
-const OFF_COMMAND_TYPE: usize    = 0x14;
-const OFF_PACKET_SIZE: usize     = 0x18;
-const OFF_ERROR_CODE: usize      = 0x1C;
-const OFF_FN_SEND_PACKET: usize  = 0x20;
-#[allow(dead_code)] const OFF_CURSOR_X: usize    = 0x28; // Phase 8C: in-process input
-#[allow(dead_code)] const OFF_CURSOR_Y: usize    = 0x2C;
-#[allow(dead_code)] const OFF_TARGET_KEY: usize  = 0x30;
-#[allow(dead_code)] const OFF_KEY_ACTIVE: usize  = 0x31;
+const OFF_MAGIC: usize = 0x00;
+const OFF_VERSION: usize = 0x04;
+const OFF_READY_FLAG: usize = 0x08;
+const OFF_COMMAND_FLAG: usize = 0x0C;
+const OFF_STATUS_FLAG: usize = 0x10;
+const OFF_COMMAND_TYPE: usize = 0x14;
+const OFF_PACKET_SIZE: usize = 0x18;
+const OFF_ERROR_CODE: usize = 0x1C;
+const OFF_FN_SEND_PACKET: usize = 0x20;
+#[allow(dead_code)]
+const OFF_CURSOR_X: usize = 0x28; // Phase 8C: in-process input
+#[allow(dead_code)]
+const OFF_CURSOR_Y: usize = 0x2C;
+#[allow(dead_code)]
+const OFF_TARGET_KEY: usize = 0x30;
+#[allow(dead_code)]
+const OFF_KEY_ACTIVE: usize = 0x31;
 const OFF_ORIGINAL_PRESENT: usize = 0x34;
-const OFF_DEBUG_STEP: usize      = 0x3C; // debug: tracks init progress (Go reads on timeout)
-const OFF_GAME_THREAD_ID: usize  = 0x40; // u32: game thread ID for APC dispatch
-const OFF_UI_NET_MAN_ADDR: usize = 0x50; // u64: D2R UI NetMan global VA (CMD_SEND_UI_PACKET)
-const OFF_HWND_D2R: usize        = 0x60; // u64: D2R window handle
+const OFF_DEBUG_STEP: usize = 0x3C; // debug: tracks init progress (Go reads on timeout)
+const OFF_GAME_THREAD_ID: usize = 0x40; // u32: game thread ID for APC dispatch
+const OFF_UI_NET_MAN_ADDR: usize = 0x50; // u64: D2R UI NetMan global/instance VA (CMD_SEND_UI_PACKET)
+const OFF_FN_REAL_CLICK: usize = 0x58; // u64: D2R real_click_worker VA
+const OFF_HWND_D2R: usize = 0x60; // u64: D2R window handle
 const OFF_MIRROR_BUF_ADDR: usize = 0x68; // u64: D2R mirror buffer VA (CMD_SEND_DUAL)
-const OFF_DUAL_SEND_WRAP: usize  = 0x78; // u64: dual_send_wrap VA (game thread send)
-const OFF_PACKET_DATA: usize     = 0x100;
+const OFF_DUAL_SEND_WRAP: usize = 0x78; // u64: dual_send_wrap VA (game thread send)
+const OFF_SKIP_PRESENT_HOOK: usize = 0x94; // u32: 1 = skip Present detour install
+const OFF_CAPABILITIES: usize = 0x98; // u32: runtime feature bits
+const CAP_POST_MOVE_NO_SET_CURSOR_POS: u32 = 1 << 0;
+const CAP_POST_CLICK_NO_SET_CURSOR_POS: u32 = 1 << 1;
+const CAP_SET_D2R_CURSOR: u32 = 1 << 2;
+const CAP_VENDOR_SEND_SUPPRESS: u32 = 1 << 3;
+const CAP_VENDOR_NATIVE_PRICE: u32 = 1 << 4;
+// Header band layout — see also Go internal/presenter/protocol.go.
+//   0x80..0x92  OFF_SESSION_PREFIX    (u16[9], 18 B)
+//   0x94..0x98  OFF_SKIP_PRESENT_HOOK (u32)
+//   0xA0..0xB0  crash-diag counters   (CountAV/SO/SBO/LastCode — installed by
+//                                      crash_diag_veh, read by Go ReadCrashDiag)
+//   0xB0..0xC8  crash RIP/fault_va/fault_type/marker
+// Present-detour instrumentation band — 0xD0..0x100 (6 × u64 = 48 B, was the
+// only contiguous free slot in the header). Raw rdtsc cycle deltas wrapping
+// dispatch_commands_inner so operators can answer "is the Present hook
+// expensive enough to justify offloading?" with live data. ~3 GHz CPU ⇒
+// 1 µs ≈ 3000 cycles.
+const OFF_PRESENT_LAT_LAST_CYC: usize = 0xD0; // u64 — cycles in most recent dispatch
+const OFF_PRESENT_LAT_MIN_CYC: usize = 0xD8; // u64 — running min since Init
+const OFF_PRESENT_LAT_MAX_CYC: usize = 0xE0; // u64 — running max since Init
+const OFF_PRESENT_LAT_SUM_CYC: usize = 0xE8; // u64 — running sum (Go: avg = sum/count)
+const OFF_PRESENT_LAT_COUNT: usize = 0xF0; // u64 — sample count
+const OFF_PRESENT_LAT_PATHS: usize = 0xF8; // u32 — bitmask of paths taken in LAST sample
+
+// Bits of OFF_PRESENT_LAT_PATHS — which sub-phases ran during the measured frame.
+const PATH_SNAPSHOT_ENABLED: u32 = 1 << 0;
+const PATH_SNIFFER_RAN: u32 = 1 << 1;
+const PATH_WALKER_FULL_SCAN: u32 = 1 << 2;
+const PATH_BATCH_HAD_WORK: u32 = 1 << 3;
+const PATH_CMD_DISPATCHED: u32 = 1 << 4;
+// bits 8..15 = OFF_COMMAND_TYPE when CMD_DISPATCHED set (for correlating cost to cmd kind).
+
+const OFF_PACKET_DATA: usize = 0x100;
+
+#[inline(always)]
+unsafe fn page_executable(va: usize) -> bool {
+    if !is_user_va(va) {
+        return false;
+    }
+    let mut mbi: MemoryBasicInformation = core::mem::zeroed();
+    let got = VirtualQuery(
+        va as *const core::ffi::c_void,
+        &mut mbi as *mut MemoryBasicInformation as *mut core::ffi::c_void,
+        core::mem::size_of::<MemoryBasicInformation>(),
+    );
+    if got == 0 || mbi.state != MEM_COMMIT || (mbi.protect & (PAGE_NOACCESS | PAGE_GUARD)) != 0 {
+        return false;
+    }
+    (mbi.protect
+        & (PAGE_EXECUTE | PAGE_EXECUTE_READ | PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY))
+        != 0
+}
+
+#[inline(always)]
+unsafe fn resolve_ui_netman_send(candidate: usize) -> (usize, usize, usize, u32) {
+    let vtable = d2r_read_u64(candidate) as usize;
+    let send_fn = d2r_read_u64(vtable.wrapping_add(0x28)) as usize;
+    if vtable != 0 && send_fn != 0 && page_executable(send_fn) {
+        return (candidate, vtable, send_fn, 1);
+    }
+
+    let instance = d2r_read_u64(candidate) as usize;
+    let vtable = d2r_read_u64(instance) as usize;
+    let send_fn = d2r_read_u64(vtable.wrapping_add(0x28)) as usize;
+    if instance != 0 && vtable != 0 && send_fn != 0 && page_executable(send_fn) {
+        return (instance, vtable, send_fn, 2);
+    }
+
+    (0, 0, 0, 0)
+}
+const OFF_GTC64_HOOK_COUNT: usize = 0x2080; // u32: IAT hook trampoline calls
+const OFF_GTC64_INSTALL_DIAG: usize = 0x2084; // u32: GTC64 install progress/result
+                                              // 0x2088..0x20C8 is reserved for dump_first_iat_entries diagnostics.
+const OFF_TIMER_QUEUE_TICKS: usize = 0x20D0; // u32: TimerQueue callbacks observed
+const OFF_TIMER_COMMAND_RUNS: usize = 0x20D4; // u32: commands dispatched by TimerQueue
+const OFF_TIMER_COMMAND_DIAG: usize = 0x20D8; // u32: TimerQueue command progress marker
+const OFF_TIMER_LAST_STATUS: usize = 0x20DC; // u32: status after last TimerQueue command
+const OFF_TIMER_LAST_COMMAND_FLAG: usize = 0x20E0; // u32: command flag after last TimerQueue command
 
 const _: () = assert!(core::mem::size_of::<SharedBuffer>() == 131072);
 
 // ---------------------------------------------------------------------------
 // Snapshot region (Phase A of P1-GID). Rmod mirrors D2R memory into SHM so
-// the bot can read in-process — no cross-process RPM. See PLAYER_UNIT_FIELDS.md.
+// the bot can read in-process — no cross-process RPM. See docs/archive/PLAYER_UNIT_FIELDS.md.
 // ---------------------------------------------------------------------------
-const OFF_SNAPSHOT_HEADER: usize       = 0x4000;
+const OFF_SNAPSHOT_HEADER: usize = 0x4000;
 // Snapshot header layout (starts at OFF_SNAPSHOT_HEADER):
-const OFF_SNAP_MAGIC: usize            = 0x4000; // u32 — 'SNAP' = 0x50414E53
-const OFF_SNAP_VERSION: usize          = 0x4004; // u32 — layout version
-const OFF_SNAP_TICK: usize             = 0x4008; // u64 — monotonic, bumped atomically after each complete write
-const OFF_SNAP_REGION_COUNT: usize     = 0x4010; // u32 — populated RegionEntry slots this tick
-const OFF_SNAP_DATA_BYTES: usize       = 0x4014; // u32 — bytes used in data blob this tick
-const OFF_SNAP_D2R_BASE: usize         = 0x4018; // u64 — D2R.exe module base (for debug / Phase C PEB check)
-const OFF_SNAP_FLAGS: usize            = 0x4020; // u32 — bit0=enabled, bit1=main_player_found, bit2=error
-const OFF_SNAP_LAST_ERR: usize         = 0x4024; // u32 — non-zero if last tick hit an error
-const OFF_SNAP_LAST_RDTSC: usize       = 0x4028; // u64 — debug timestamp
-const OFF_SNAP_UNIT_TABLE: usize       = 0x4030; // u64 — D2R.base + offset.UnitTable (set by Init)
-const OFF_SNAP_EXPANSION: usize        = 0x4038; // u64 — D2R.base + offset.Expansion
-const OFF_SNAP_WAYPOINT_TABLE: usize   = 0x4040; // u64 — D2R.base + offset.WaypointTableOffset
+const OFF_SNAP_MAGIC: usize = 0x4000; // u32 — 'SNAP' = 0x50414E53
+const OFF_SNAP_VERSION: usize = 0x4004; // u32 — layout version
+const OFF_SNAP_TICK: usize = 0x4008; // u64 — monotonic, bumped atomically after each complete write
+const OFF_SNAP_REGION_COUNT: usize = 0x4010; // u32 — populated RegionEntry slots this tick
+const OFF_SNAP_DATA_BYTES: usize = 0x4014; // u32 — bytes used in data blob this tick
+const OFF_SNAP_D2R_BASE: usize = 0x4018; // u64 — D2R.exe module base (for debug / Phase C PEB check)
+const OFF_SNAP_FLAGS: usize = 0x4020; // u32 — bit0=enabled, bit1=main_player_found, bit2=error
+const OFF_SNAP_LAST_ERR: usize = 0x4024; // u32 — non-zero if last tick hit an error
+const OFF_SNAP_LAST_RDTSC: usize = 0x4028; // u64 — debug timestamp
+const OFF_SNAP_UNIT_TABLE: usize = 0x4030; // u64 — D2R.base + offset.UnitTable (set by Init)
+const OFF_SNAP_EXPANSION: usize = 0x4038; // u64 — D2R.base + offset.Expansion
+const OFF_SNAP_WAYPOINT_TABLE: usize = 0x4040; // u64 — D2R.base + offset.WaypointTableOffset
 
 // Per-session XOR mask written by the bot before CmdSnapshotInit. We XOR
 // SNAP_MAGIC with this when publishing the header so an in-D2R-process
 // scanner can't anchor on a constant 'SNAP' word at fixed offset in the
 // mapped SHM view. Key 0 = magic plain (backward compat).
 // Mirrors GID `_frameDropWaitTimeXorKey` (MISC64_MEMORY_AUDIT.md sec 7).
-const OFF_SNAP_XOR_KEY: usize          = 0x4044; // u32
+const OFF_SNAP_XOR_KEY: usize = 0x4044; // u32
 
 // Bot-controlled walker throttle. When 0, rmod uses its default period.
 // When non-zero, snapshot_walker_scan runs every Nth Present frame. Lets the
 // bot dial down reads the moment crash telemetry looks unhappy, without a
 // rmod rebuild. Written by presenter before CmdSnapshotInit (or at runtime).
-const OFF_SNAP_WALKER_PERIOD: usize    = 0x404C; // u32 — frames between full scans
+const OFF_SNAP_WALKER_PERIOD: usize = 0x404C; // u32 — frames between full scans
 
 // Generic static-region table — bot writes N entries of {va:u64, len:u32, pad:u32}
 // before CmdSnapshotInit, rmod mirrors each per tick. Lets us add new field
 // coverage without rebuilding rmod (only the bot side changes).
-const OFF_SNAP_STATIC_COUNT: usize     = 0x4048; // u32
-const OFF_SNAP_STATIC_TABLE: usize     = 0x4050; // StaticRegion[SNAP_STATIC_MAX] × 16 B
-const SNAP_STATIC_MAX: usize           = 23;     // (0x41C0 - 0x4050)/16 = 23 entries fit
+const OFF_SNAP_STATIC_COUNT: usize = 0x4048; // u32
+const OFF_SNAP_STATIC_TABLE: usize = 0x4050; // StaticRegion[SNAP_STATIC_MAX] × 16 B
+const SNAP_STATIC_MAX: usize = 23; // (0x41C0 - 0x4050)/16 = 23 entries fit
 
-const OFF_SNAPSHOT_REGIONS: usize      = 0x4200; // RegionEntry[1024] × 16 B = 16384 B (B3 grow 256→1024 for monster/obj/entrance walkers)
-const SNAPSHOT_REGION_MAX: usize       = 1024;
+const OFF_SNAPSHOT_REGIONS: usize = 0x4200; // RegionEntry[1024] × 16 B = 16384 B (B3 grow 256→1024 for monster/obj/entrance walkers)
+const SNAPSHOT_REGION_MAX: usize = 1024;
 const SNAPSHOT_REGION_ENTRY_SIZE: usize = 16; // sizeof(RegionEntry)
 
-const OFF_SNAPSHOT_DATA: usize         = 0x8200; // blob starts here (0x4200 + 0x4000 region table)
-const SNAPSHOT_DATA_SIZE: usize        = 131072 - 0x8200; // 97792 bytes
+const OFF_SNAPSHOT_DATA: usize = 0x8200; // blob starts here (0x4200 + 0x4000 region table)
+const SNAPSHOT_DATA_SIZE: usize = 131072 - 0x8200; // 97792 bytes
 
-const SNAP_MAGIC: u32                  = 0x50414E53; // 'SNAP'
-const SNAP_VERSION_A: u32              = 1;
+const SNAP_MAGIC: u32 = 0x50414E53; // 'SNAP'
+const SNAP_VERSION_A: u32 = 1;
 
 /// 16-byte entry describing one mirrored D2R memory region.
 /// Bot's SnapshotReader looks up (va, len) and returns slice at data_blob[offset..].
@@ -699,94 +834,101 @@ struct StaticRegion {
 
 // Role codes for StaticRegion.role. Must match presenter's
 // SnapshotStaticRole constants (Go side).
-#[allow(dead_code)] const STATIC_ROLE_REGULAR: u32     = 0;
-const STATIC_ROLE_PING_CHAIN: u32  = 1; // head: 8 B ptr slot; deref → 40 B at target (+36: ping u32)
+#[allow(dead_code)]
+const STATIC_ROLE_REGULAR: u32 = 0;
+const STATIC_ROLE_PING_CHAIN: u32 = 1; // head: 8 B ptr slot; deref → 40 B at target (+36: ping u32)
 const STATIC_ROLE_QUEST_CHAIN: u32 = 2; // head: 8 B ptr slot; deref → 8 B at questDataPtr; deref → 82 B flags buf
-const STATIC_ROLE_TZ_CHAIN: u32    = 3; // head: 16 B (ptr @0, count @8); deref → count*4 B zones array (capped 8)
+const STATIC_ROLE_TZ_CHAIN: u32 = 3; // head: 16 B (ptr @0, count @8); deref → count*4 B zones array (capped 8)
 const STATIC_ROLE_ROSTER_CHAIN: u32 = 4; // head: 8 B ptr slot; deref → party struct head; walker follows +0x148 linked list, 0x70 B per member (cap 16)
 
 // Snapshot flag bits (OFF_SNAP_FLAGS).
-#[allow(dead_code)] const SNAP_FLAG_ENABLED: u32            = 1 << 0;
-#[allow(dead_code)] const SNAP_FLAG_MAIN_PLAYER_FOUND: u32  = 1 << 1;
-#[allow(dead_code)] const SNAP_FLAG_ERROR: u32              = 1 << 2;
-#[allow(dead_code)] const SNAP_FLAG_WALKER_SKIP: u32        = 1 << 3;  // diagnostic: bump tick only, skip all D2R derefs
-#[allow(dead_code)] const SNAP_FLAG_WALKER_ENABLE: u32      = 1 << 4;  // opt-in gate: walker is off by default until Arxan sentinel isolated
-#[allow(dead_code)] const SNAP_FLAG_WALKER_MINIMAL: u32     = 1 << 5;  // opt-in gate: skip hardcoded R1-R4 reads; only mirror bot-supplied static regions
+#[allow(dead_code)]
+const SNAP_FLAG_ENABLED: u32 = 1 << 0;
+#[allow(dead_code)]
+const SNAP_FLAG_MAIN_PLAYER_FOUND: u32 = 1 << 1;
+#[allow(dead_code)]
+const SNAP_FLAG_ERROR: u32 = 1 << 2;
+#[allow(dead_code)]
+const SNAP_FLAG_WALKER_SKIP: u32 = 1 << 3; // diagnostic: bump tick only, skip all D2R derefs
+#[allow(dead_code)]
+const SNAP_FLAG_WALKER_ENABLE: u32 = 1 << 4; // opt-in gate: walker is off by default until Arxan sentinel isolated
+#[allow(dead_code)]
+const SNAP_FLAG_WALKER_MINIMAL: u32 = 1 << 5; // opt-in gate: skip hardcoded R1-R4 reads; only mirror bot-supplied static regions
 
 // ---------------------------------------------------------------------------
 // Crash diagnostic VEH offsets (must match Go protocol.go OffCrash*).
 // Filled in-process when D2R hits an unhandled exception. Bot polls these
 // after detecting D2R exit to learn what really killed it.
 // ---------------------------------------------------------------------------
-const OFF_CRASH_VALID: usize       = 0x1000;
-const OFF_CRASH_COUNT: usize       = 0x1004;
-const OFF_CRASH_CODE: usize        = 0x1008;
-const OFF_CRASH_FLAGS: usize       = 0x100C;
-const OFF_CRASH_TID: usize         = 0x1010;
-const OFF_CRASH_FAULT_TYPE: usize  = 0x1014;
-const OFF_CRASH_RIP: usize         = 0x1018;
-const OFF_CRASH_FAULT_VA: usize    = 0x1020;
-const OFF_CRASH_RSP: usize         = 0x1028;
-const OFF_CRASH_FRAMES: usize      = 0x1030; // u64 * 16
-const CRASH_FRAME_COUNT: usize     = 16;
-const OFF_CRASH_REGS: usize            = 0x10B0; // 16 u64 = 128 bytes (after FRAMES at 0x1030)
-const CRASH_REG_COUNT: usize           = 16;
+const OFF_CRASH_VALID: usize = 0x1000;
+const OFF_CRASH_COUNT: usize = 0x1004;
+const OFF_CRASH_CODE: usize = 0x1008;
+const OFF_CRASH_FLAGS: usize = 0x100C;
+const OFF_CRASH_TID: usize = 0x1010;
+const OFF_CRASH_FAULT_TYPE: usize = 0x1014;
+const OFF_CRASH_RIP: usize = 0x1018;
+const OFF_CRASH_FAULT_VA: usize = 0x1020;
+const OFF_CRASH_RSP: usize = 0x1028;
+const OFF_CRASH_FRAMES: usize = 0x1030; // u64 * 16
+const CRASH_FRAME_COUNT: usize = 16;
+const OFF_CRASH_REGS: usize = 0x10B0; // 16 u64 = 128 bytes (after FRAMES at 0x1030)
+const CRASH_REG_COUNT: usize = 16;
 
 // Bump this every time VEH patches a fault so bot can tell whether the
 // handler swallowed a real AV (valuable signal that our fix-up fired).
-const OFF_CRASH_FIXUPS: usize          = 0x15B4; // u32 — number of auto-fixups applied
+const OFF_CRASH_FIXUPS: usize = 0x15B4; // u32 — number of auto-fixups applied
 
 // ---------------------------------------------------------------------------
 // DR0 persist probe (Arxan diagnostic).  Free SHM 0x1600..0x1FFF.
 // Determines whether SetThreadContext on D2R threads PERSISTS the DR0 value
 // or whether Arxan reverts it (which would mean HWBP-based tracing is dead).
 // ---------------------------------------------------------------------------
-const OFF_DRPROBE_VALID:   usize       = 0x1600; // u32: 0=not run, 1=running, 2=done, 0xEEnn=err
-const OFF_DRPROBE_TOTAL:   usize       = 0x1604; // u32: total D2R threads enumerated
-const OFF_DRPROBE_OK:      usize       = 0x1608; // u32: count where DR0 readback == test value (PERSISTED)
-const OFF_DRPROBE_REVERT:  usize       = 0x160C; // u32: count where DR0 was reverted (Arxan stripped)
-const OFF_DRPROBE_ERR:     usize       = 0x1610; // u32: count of probe errors (open/suspend/get/set fails)
-const OFF_DRPROBE_NUM:     usize       = 0x1614; // u32: entries actually written to ring
-const OFF_DRPROBE_ENTRIES: usize       = 0x1620; // start of entries — 32 B each, max 60 entries
-const DRPROBE_ENTRY_SIZE:  usize       = 32;
-const DRPROBE_MAX_ENTRIES: usize       = 60;
+const OFF_DRPROBE_VALID: usize = 0x1600; // u32: 0=not run, 1=running, 2=done, 0xEEnn=err
+const OFF_DRPROBE_TOTAL: usize = 0x1604; // u32: total D2R threads enumerated
+const OFF_DRPROBE_OK: usize = 0x1608; // u32: count where DR0 readback == test value (PERSISTED)
+const OFF_DRPROBE_REVERT: usize = 0x160C; // u32: count where DR0 was reverted (Arxan stripped)
+const OFF_DRPROBE_ERR: usize = 0x1610; // u32: count of probe errors (open/suspend/get/set fails)
+const OFF_DRPROBE_NUM: usize = 0x1614; // u32: entries actually written to ring
+const OFF_DRPROBE_ENTRIES: usize = 0x1620; // start of entries — 32 B each, max 60 entries
+const DRPROBE_ENTRY_SIZE: usize = 32;
+const DRPROBE_MAX_ENTRIES: usize = 60;
 
 // Test pattern written to DR0 — chosen to be obviously synthetic
 // (high bits set so kernel canonical-address checks don't strip them).
-const DRPROBE_TEST_DR0: u64            = 0x0000_7FFF_BABE_BEEF;
+const DRPROBE_TEST_DR0: u64 = 0x0000_7FFF_BABE_BEEF;
 // DR7 we set: L0 enabled (bit 0), bit 10 always 1 (legacy reserved),
 // no other breakpoints.
-const DRPROBE_TEST_DR7: u64            = 0x0000_0000_0000_0401;
+const DRPROBE_TEST_DR7: u64 = 0x0000_0000_0000_0401;
 
 // ---------------------------------------------------------------------------
 // HWBP packet tracer — captures every D2R-internal call to dual_send_wrap.
 // Lives in extended SHM region 0x2000..0x4000 (8 KB).
 // ---------------------------------------------------------------------------
-const OFF_HWBP_INSTALLED:    usize     = 0x2000; // u32 — 1 = HWBP armed
-const OFF_HWBP_TARGET:       usize     = 0x2008; // u64 — target VA (default dual_send_wrap)
-const OFF_HWBP_FIRES:        usize     = 0x2010; // u32 — total SS exceptions matching target
-const OFF_HWBP_SS_TOTAL:     usize     = 0x2014; // u32 — total SS exceptions seen (any RIP)
-const OFF_HWBP_LAST_RIP:     usize     = 0x2018; // u64 — last SS RIP (debug, even if ≠ target)
-const OFF_HWBP_INSTALL_OK:   usize     = 0x2020; // u32 — threads installed in last install
-const OFF_HWBP_INSTALL_FAIL: usize     = 0x2024; // u32 — install errors
-const OFF_HWBP_VERIFY_STILL: usize     = 0x2028; // u32 — threads still armed at verify time
-const OFF_HWBP_VERIFY_LOST:  usize     = 0x202C; // u32 — threads where DR0 was cleared since install
-const OFF_HWBP_REENUM_NEW:   usize     = 0x2030; // u32 — newly-armed threads in last reenum
-const OFF_HWBP_REENUM_TOTAL: usize     = 0x2034; // u32 — total reenums executed
-const OFF_HWBP_RING_HEAD:    usize     = 0x2038; // u32 — write index (wraps)
-const OFF_HWBP_RING_TAIL:    usize     = 0x203C; // u32 — read index (Go advances)
-const OFF_HWBP_RING_TOTAL:   usize     = 0x2040; // u32 — total entries pushed
-const OFF_HWBP_RING_DROPPED: usize     = 0x2044; // u32 — entries dropped due to full ring
-// Diagnostic — any exception reaching our VEH, broken down by type. Helps
-// detect whether Arxan's VEH is intercepting SS exceptions before us.
-const OFF_HWBP_VEH_ANY:      usize     = 0x2048; // u32 — total VEH callbacks (any code)
-const OFF_HWBP_VEH_BP:       usize     = 0x204C; // u32 — EXCEPTION_BREAKPOINT (INT3)
-const OFF_HWBP_VEH_AV:       usize     = 0x2050; // u32 — EXCEPTION_ACCESS_VIOLATION
-const OFF_HWBP_VEH_OTHER:    usize     = 0x2054; // u32 — anything else
-const OFF_HWBP_VEH_LAST_CODE:usize     = 0x2058; // u32 — last exception code seen (non-SS)
-const OFF_HWBP_RING:         usize     = 0x2100; // ring start (256 B per entry, 31 slots fit 0x2100..0x3F00)
-const HWBP_ENTRY_SIZE:       usize     = 256;
-const HWBP_RING_ENTRIES:     usize     = 30;     // (0x4000-0x2100) / 256 = 31; leave 1 slot headroom
+const OFF_HWBP_INSTALLED: usize = 0x2000; // u32 — 1 = HWBP armed
+const OFF_HWBP_TARGET: usize = 0x2008; // u64 — target VA (default dual_send_wrap)
+const OFF_HWBP_FIRES: usize = 0x2010; // u32 — total SS exceptions matching target
+const OFF_HWBP_SS_TOTAL: usize = 0x2014; // u32 — total SS exceptions seen (any RIP)
+const OFF_HWBP_LAST_RIP: usize = 0x2018; // u64 — last SS RIP (debug, even if ≠ target)
+const OFF_HWBP_INSTALL_OK: usize = 0x2020; // u32 — threads installed in last install
+const OFF_HWBP_INSTALL_FAIL: usize = 0x2024; // u32 — install errors
+const OFF_HWBP_VERIFY_STILL: usize = 0x2028; // u32 — threads still armed at verify time
+const OFF_HWBP_VERIFY_LOST: usize = 0x202C; // u32 — threads where DR0 was cleared since install
+const OFF_HWBP_REENUM_NEW: usize = 0x2030; // u32 — newly-armed threads in last reenum
+const OFF_HWBP_REENUM_TOTAL: usize = 0x2034; // u32 — total reenums executed
+const OFF_HWBP_RING_HEAD: usize = 0x2038; // u32 — write index (wraps)
+const OFF_HWBP_RING_TAIL: usize = 0x203C; // u32 — read index (Go advances)
+const OFF_HWBP_RING_TOTAL: usize = 0x2040; // u32 — total entries pushed
+const OFF_HWBP_RING_DROPPED: usize = 0x2044; // u32 — entries dropped due to full ring
+                                             // Diagnostic — any exception reaching our VEH, broken down by type. Helps
+                                             // detect whether Arxan's VEH is intercepting SS exceptions before us.
+const OFF_HWBP_VEH_ANY: usize = 0x2048; // u32 — total VEH callbacks (any code)
+const OFF_HWBP_VEH_BP: usize = 0x204C; // u32 — EXCEPTION_BREAKPOINT (INT3)
+const OFF_HWBP_VEH_AV: usize = 0x2050; // u32 — EXCEPTION_ACCESS_VIOLATION
+const OFF_HWBP_VEH_OTHER: usize = 0x2054; // u32 — anything else
+const OFF_HWBP_VEH_LAST_CODE: usize = 0x2058; // u32 — last exception code seen (non-SS)
+const OFF_HWBP_RING: usize = 0x2100; // ring start (256 B per entry, 31 slots fit 0x2100..0x3F00)
+const HWBP_ENTRY_SIZE: usize = 256;
+const HWBP_RING_ENTRIES: usize = 30; // (0x4000-0x2100) / 256 = 31; leave 1 slot headroom
 
 // Entry layout (256 B):
 //   +0x00  u64 ts_ms
@@ -807,7 +949,7 @@ const HWBP_RING_ENTRIES:     usize     = 30;     // (0x4000-0x2100) / 256 = 31; 
 
 // HWBP DR7 we set: L0 enabled (bit 0), exec break (R/W0=00 + LEN0=00 implicit),
 // bit 10 always 1 (legacy reserved).
-const HWBP_DR7: u64                    = 0x0000_0000_0000_0401;
+const HWBP_DR7: u64 = 0x0000_0000_0000_0401;
 
 // Packet-capture ring reuses the HWBP ring (HWBP is blocked by Arxan's SS
 // filter, so its ring is unused). Each entry is HWBP_ENTRY_SIZE=256 bytes,
@@ -817,33 +959,47 @@ const HWBP_DR7: u64                    = 0x0000_0000_0000_0401;
 //   +0x0C  u32 size        (rdx = packet size)
 //   +0x10  u64 pkt_ptr     (rcx = plaintext packet VA)
 //   +0x18  u8[232] payload (copy of up to 232 bytes from pkt_ptr)
-const CAP_PAYLOAD_OFF:    usize = 0x18;
-const CAP_PAYLOAD_MAX:    usize = HWBP_ENTRY_SIZE - CAP_PAYLOAD_OFF; // 232
-// Scratch buffer we redirect R9 into when we detect the stash-move memcpy
-// pattern. The memcpy reads [r9 - 0x10 .. r9 + 0x30] so we need at least
-// 0x40 bytes of valid memory starting 0x10 before r9.
+const CAP_PAYLOAD_OFF: usize = 0x18;
+const CAP_PAYLOAD_MAX: usize = HWBP_ENTRY_SIZE - CAP_PAYLOAD_OFF; // 232
+                                                                  // Scratch buffer we redirect R9 into when we detect the stash-move memcpy
+                                                                  // pattern. The memcpy reads [r9 - 0x10 .. r9 + 0x30] so we need at least
+                                                                  // 0x40 bytes of valid memory starting 0x10 before r9.
 static mut G_STASH_SCRATCH: [u8; 0x200] = [0u8; 0x200];
-const OFF_CRASH_RIP_BYTES: usize       = 0x1130; // 128 bytes around RIP (after REGS)
-const CRASH_RIP_BYTES_PRE: usize       = 32;
-const CRASH_RIP_BYTES_LEN: usize       = 128;
-const OFF_CRASH_FRAME_BYTES: usize     = 0x11B0; // 16 * 64 = 1024 bytes
-const CRASH_FRAME_BYTES_PRE: usize     = 16;
-const CRASH_FRAME_BYTES_LEN: usize     = 64;
-const CRASH_FRAME_BYTES_STRIDE: usize  = 64;
+const OFF_CRASH_RIP_BYTES: usize = 0x1130; // 128 bytes around RIP (after REGS)
+const CRASH_RIP_BYTES_PRE: usize = 32;
+const CRASH_RIP_BYTES_LEN: usize = 128;
+const OFF_CRASH_FRAME_BYTES: usize = 0x11B0; // 16 * 64 = 1024 bytes
+const CRASH_FRAME_BYTES_PRE: usize = 16;
+const CRASH_FRAME_BYTES_LEN: usize = 64;
+const CRASH_FRAME_BYTES_STRIDE: usize = 64;
 
 // ---------------------------------------------------------------------------
 // Global state  (set once by the worker thread, read by the handler)
 // ---------------------------------------------------------------------------
 
 static mut G_SHM: *mut SharedBuffer = core::ptr::null_mut();
+static mut G_HOVER_ORIG_WNDPROC: isize = 0;
 // Per-session SHM name prefix populated by Init() from the fallback buffer.
 // Defaults to "DispCache" (legacy fallback) so the DLL still works if the
 // host bot didn't write a prefix into the param buffer. Format: 16 wide
 // chars, null-terminated. The Go side writes 8 wide chars + null.
 static mut G_SHM_PREFIX: [u16; 16] = [
-    b'D' as u16, b'i' as u16, b's' as u16, b'p' as u16,
-    b'C' as u16, b'a' as u16, b'c' as u16, b'h' as u16,
-    b'e' as u16, 0, 0, 0, 0, 0, 0, 0,
+    b'D' as u16,
+    b'i' as u16,
+    b's' as u16,
+    b'p' as u16,
+    b'C' as u16,
+    b'a' as u16,
+    b'c' as u16,
+    b'h' as u16,
+    b'e' as u16,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
 ];
 static mut G_SHM_PREFIX_LEN: usize = 9; // length of the actual prefix in G_SHM_PREFIX (default "DispCache")
 static mut G_TRAMPOLINE: *const u8 = core::ptr::null();
@@ -852,18 +1008,21 @@ static mut G_PRESENT_ADDR: usize = 0;
 /// may return up to ~30 bytes when Present has a big first instruction).
 /// First G_PRESENT_ORIG_LEN bytes are valid; rest is zero padding.
 static mut G_PRESENT_ORIG_BYTES: [u8; 32] = [0u8; 32];
-static mut G_PRESENT_ORIG_LEN:   usize   = 0;
-static mut G_PRESENT_ORIG_PROT: u32 = 0;               // saved page protection (for detach restore)
+static mut G_PRESENT_ORIG_LEN: usize = 0;
+static mut G_PRESENT_ORIG_PROT: u32 = 0; // saved page protection (for detach restore)
 static mut G_GTC64_TRAMPOLINE: *const u8 = core::ptr::null(); // unused (kept for compat)
+static mut G_GTC64_IAT_ENTRY: usize = 0;
+static mut G_GTC64_HOOK_THUNK: *mut u8 = core::ptr::null_mut();
 static mut G_DUAL_SEND_WRAP: usize = 0; // dual_send_wrap VA (set at init)
 static mut G_GAME_HOOK_TRAMPOLINE: *const u8 = core::ptr::null(); // game thread hook marker
-static mut G_GUARD_PAGE_ADDR: usize = 0;    // page we set PAGE_GUARD on
-static mut G_GUARD_PAGE_OLDPROT: u32 = 0;   // original protection
-static mut G_GUARD_PENDING: bool = false;    // true = waiting for game thread to trigger guard
-static mut G_GUARD_REARM_COUNT: u32 = 0;     // prevent infinite re-arm loop
+static mut G_GUARD_VEH_HANDLE: *mut core::ffi::c_void = core::ptr::null_mut();
+static mut G_GUARD_PAGE_ADDR: usize = 0; // page we set PAGE_GUARD on
+static mut G_GUARD_PAGE_OLDPROT: u32 = 0; // original protection
+static mut G_GUARD_PENDING: bool = false; // true = waiting for game thread to trigger guard
+static mut G_GUARD_REARM_COUNT: u32 = 0; // prevent infinite re-arm loop
 static mut G_DR_CTX_BUF: *mut u8 = core::ptr::null_mut(); // 4 KB page for aligned CONTEXT in DR probe
-static mut G_HWBP_TARGET: usize = 0;        // RVA-resolved target VA (dual_send_wrap by default)
-static mut G_HWBP_INSTALLED: bool = false;  // VEH SS handler armed
+static mut G_HWBP_TARGET: usize = 0; // RVA-resolved target VA (dual_send_wrap by default)
+static mut G_HWBP_INSTALLED: bool = false; // VEH SS handler armed
 static mut G_HWBP_VEH_HANDLE: *mut core::ffi::c_void = core::ptr::null_mut();
 
 // ---------------------------------------------------------------------------
@@ -880,18 +1039,31 @@ static mut G_HWBP_VEH_HANDLE: *mut core::ffi::c_void = core::ptr::null_mut();
 // which is proven working on D2R. Counterpart to bufpoll polling —
 // zero-miss capture even for fast packet sequences.
 // ---------------------------------------------------------------------------
-static mut G_CAP_INSTALLED: bool = false;        // hook currently armed
-static mut G_CAP_TARGET: usize = 0;              // send_fn VA that was hooked
+static mut G_CAP_INSTALLED: bool = false; // hook currently armed
+static mut G_CAP_TARGET: usize = 0; // send_fn VA that was hooked
 static mut G_CAP_TRAMPOLINE: *mut u8 = core::ptr::null_mut(); // copy-of-prologue + JMP back
 static mut G_CAP_ORIG_BYTES: [u8; 12] = [0u8; 12]; // stolen bytes at hook offset for uninstall restore
-static mut G_CAP_ORIG_PROT: u32 = 0;             // original page protection
+static mut G_CAP_ORIG_PROT: u32 = 0; // original page protection
+static G_CAP_SUPPRESS_VENDOR: AtomicU32 = AtomicU32::new(0);
+
+// Generic argument capture hook. Used for short-lived RE captures of D2R
+// UI/vendor wrappers: patch target+offset, record volatile argument regs and
+// the original stack qwords into the existing HWBP ring, then continue through
+// a trampoline. Keep this armed only while manually performing one action.
+static mut G_ARGTRACE_INSTALLED: bool = false;
+static mut G_ARGTRACE_TARGET: usize = 0;
+static mut G_ARGTRACE_HOOK: usize = 0;
+static mut G_ARGTRACE_TRAMPOLINE: *mut u8 = core::ptr::null_mut();
+static mut G_ARGTRACE_ORIG_BYTES: [u8; ARGTRACE_STEAL_BYTES] = [0u8; ARGTRACE_STEAL_BYTES];
+static mut G_ARGTRACE_ORIG_PROT: u32 = 0;
+const ARGTRACE_STEAL_BYTES: usize = 15;
 
 // ---------------------------------------------------------------------------
 // Snapshot (Phase A P1-GID). Filled by CMD_SNAPSHOT_INIT, written every
 // Present frame by snapshot_tick_write().
 // ---------------------------------------------------------------------------
-static mut G_SNAPSHOT_ENABLED: bool = false;     // flipped true by CMD_SNAPSHOT_INIT
-static mut G_D2R_BASE: usize = 0;                // D2R.exe module base (from GetModuleHandleW(NULL))
+static mut G_SNAPSHOT_ENABLED: bool = false; // flipped true by CMD_SNAPSHOT_INIT
+static mut G_D2R_BASE: usize = 0; // D2R.exe module base (from GetModuleHandleW(NULL))
 
 // Worker thread state — walker runs OFF the Present callback to avoid blowing
 // d3d12's Present watchdog. Present just bumps a tick; this worker sleeps
@@ -904,9 +1076,9 @@ static mut G_WORKER_SHM: *mut SharedBuffer = core::ptr::null_mut(); // captured 
 // GID ROP port (Phases GID-4 + GID-5). Populated by CMD_ROP_SCAN; consumed by
 // CMD_ROP_READ. `Option<AllocatedMemory>` is a static mut we carefully only
 // touch inside dispatch_commands (single-threaded Present callback context).
-static mut G_ROP_GADGETS:     rop_gadgets::ROPGadgets = rop_gadgets::ROPGadgets::empty();
-static mut G_ROP_EXECUTOR:    Option<executor::Executor> = None;
-static mut G_ROP_STACK:       Option<alloc_mgr::AllocatedMemory> = None;
+static mut G_ROP_GADGETS: rop_gadgets::ROPGadgets = rop_gadgets::ROPGadgets::empty();
+static mut G_ROP_EXECUTOR: Option<executor::Executor> = None;
+static mut G_ROP_STACK: Option<alloc_mgr::AllocatedMemory> = None;
 static mut G_ROP_TRIGGER_BUF: Option<alloc_mgr::AllocatedMemory> = None;
 
 // Chunked scan state. CMD_ROP_SCAN with len > ROP_SCAN_CHUNK only scans
@@ -914,8 +1086,8 @@ static mut G_ROP_TRIGGER_BUF: Option<alloc_mgr::AllocatedMemory> = None;
 // the command (with the same base, auto-advance via OFF_ROP_SCAN_COUNT etc.)
 // until G_ROP_SCAN_COMPLETE. This keeps Present callback under ~1 ms per frame.
 const ROP_SCAN_CHUNK: usize = 0x400; // 1 KB per Present frame — stays well under d3d12 watchdog
-static mut G_ROP_SCAN_CURSOR:   usize = 0; // bytes scanned from base this round
-static mut G_ROP_SCAN_COMPLETE: bool  = false;
+static mut G_ROP_SCAN_CURSOR: usize = 0; // bytes scanned from base this round
+static mut G_ROP_SCAN_COMPLETE: bool = false;
 
 // GID-6 synthetic-gadget backing page. We emit the exact byte sequences
 // build_memcpy needs (`pop rsi; ret`, `pop rdi; ret`, `pop rcx; ret`,
@@ -945,19 +1117,19 @@ static mut G_SYNTHETIC_GADGET_PAGE: *mut u8 = core::ptr::null_mut();
 // worker does the scan, classification, and pool-breakdown write, and
 // only it touches `G_ROP_GADGETS`. Present reads the final results from
 // SHM (which the worker populates), not from rmod .data.
-static mut G_ROP_WORKER_THREAD:   HANDLE = core::ptr::null_mut();
-static mut G_ROP_REQ_BASE:        usize  = 0;
-static mut G_ROP_REQ_LEN:         usize  = 0;
-static mut G_ROP_REQ_PENDING:     bool   = false; // Present sets true, worker clears
-static mut G_ROP_WORKER_COMPLETE: bool   = false; // worker sets true after each finished scan
-static mut G_ROP_WORKER_SHM:      *mut SharedBuffer = core::ptr::null_mut();
+static mut G_ROP_WORKER_THREAD: HANDLE = core::ptr::null_mut();
+static mut G_ROP_REQ_BASE: usize = 0;
+static mut G_ROP_REQ_LEN: usize = 0;
+static mut G_ROP_REQ_PENDING: bool = false; // Present sets true, worker clears
+static mut G_ROP_WORKER_COMPLETE: bool = false; // worker sets true after each finished scan
+static mut G_ROP_WORKER_SHM: *mut SharedBuffer = core::ptr::null_mut();
 // Phase C: D2R offsets stored XOR-encoded in memory; per-boot key from rdtsc
 // at init prevents static-scan signatures matching the literal offset values
 // (UnitTable / Expansion / WaypointTable have well-known constants).
 static mut G_SNAP_UNIT_TABLE_VA_XOR: usize = 0;
-static mut G_SNAP_EXPANSION_VA_XOR: usize  = 0;
-static mut G_SNAP_WAYPOINT_VA_XOR: usize   = 0;
-static mut G_SNAP_VA_XOR_KEY: usize        = 0;
+static mut G_SNAP_EXPANSION_VA_XOR: usize = 0;
+static mut G_SNAP_WAYPOINT_VA_XOR: usize = 0;
+static mut G_SNAP_VA_XOR_KEY: usize = 0;
 
 #[inline(always)]
 unsafe fn snap_unit_table_va() -> usize {
@@ -987,14 +1159,15 @@ type FnSendPacket = unsafe extern "system" fn(*const u8, u32, u32);
 // use — Toolhelp32 thread snapshot will show "<NAME>" instead of an empty
 // label, blending into the legitimate-overlay baseline. UTF-16 + null-term.
 const THREAD_NAME_RENDER_HELPER: [u16; 14] = [
-    0x0052,0x0065,0x006E,0x0064,0x0065,0x0072,0x0020, // "Render "
-    0x0048,0x0065,0x006C,0x0070,0x0065,0x0072,0x0000, // "Helper\0"
+    0x0052, 0x0065, 0x006E, 0x0064, 0x0065, 0x0072, 0x0020, // "Render "
+    0x0048, 0x0065, 0x006C, 0x0070, 0x0065, 0x0072, 0x0000, // "Helper\0"
 ];
 const THREAD_NAME_D3D_WORKER: [u16; 11] = [
-    0x0044,0x0033,0x0044,0x0020,0x0057,0x006F,0x0072,0x006B,0x0065,0x0072,0x0000, // "D3D Worker\0"
+    0x0044, 0x0033, 0x0044, 0x0020, 0x0057, 0x006F, 0x0072, 0x006B, 0x0065, 0x0072,
+    0x0000, // "D3D Worker\0"
 ];
 const THREAD_NAME_GFX_SYNC: [u16; 9] = [
-    0x0047,0x0046,0x0058,0x0020,0x0053,0x0079,0x006E,0x0063,0x0000, // "GFX Sync\0"
+    0x0047, 0x0046, 0x0058, 0x0020, 0x0053, 0x0079, 0x006E, 0x0063, 0x0000, // "GFX Sync\0"
 ];
 
 /// Set a generic-looking name on `handle`. Best-effort: SetThreadDescription
@@ -1050,6 +1223,10 @@ pub unsafe extern "system" fn DllMain(
         }
         uninstall_present_detour();
         uninstall_send_fn_capture_hook();
+        uninstall_argtrace_hook();
+        let shm = G_SHM;
+        G_SHM = core::ptr::null_mut();
+        close_shared_memory_view(shm);
     }
     TRUE
 }
@@ -1115,7 +1292,9 @@ pub unsafe extern "system" fn Init(param: *mut core::ffi::c_void) -> DWORD {
             let mut n = 0;
             while n < 15 {
                 let ch = *prefix_ptr.add(n);
-                if ch == 0 { break; }
+                if ch == 0 {
+                    break;
+                }
                 new_buf[n] = ch;
                 n += 1;
             }
@@ -1182,12 +1361,22 @@ unsafe fn init_from_shm(shm: *mut SharedBuffer) -> Result<(), u32> {
     // appears to scan for new vectored handlers added before the game finishes
     // its own init. Deferring past the first Present frame avoids that.
 
-    let present_addr = find_present_address(shm)?;
-    G_PRESENT_ADDR = present_addr;
-    shm_write_u64(shm, OFF_ORIGINAL_PRESENT, present_addr as u64);
-    shm_write_u32(shm, OFF_DEBUG_STEP, 0x08);
+    let skip_present_hook = shm_read_u32(shm as *const SharedBuffer, OFF_SKIP_PRESENT_HOOK) != 0;
+    if skip_present_hook {
+        // Normal-mode dual-only presenter uses the game-thread dispatch path.
+        // Do not touch IDXGISwapChain::Present; installing this detour after
+        // game entry has repeatedly frozen D2R before the next UI action.
+        shm_write_u32(shm, OFF_DEBUG_STEP, 0x80);
+        G_PRESENT_ADDR = 0;
+        shm_write_u64(shm, OFF_ORIGINAL_PRESENT, 0);
+    } else {
+        let present_addr = find_present_address(shm)?;
+        G_PRESENT_ADDR = present_addr;
+        shm_write_u64(shm, OFF_ORIGINAL_PRESENT, present_addr as u64);
+        shm_write_u32(shm, OFF_DEBUG_STEP, 0x08);
 
-    install_detour(present_addr, shm)?;
+        install_detour(present_addr, shm)?;
+    }
 
     // Install IAT hook on kernel32!GetTickCount64 (or fallback GetTickCount /
     // timeGetTime). Trampoline calls game_tick_dispatch on every invocation
@@ -1198,7 +1387,9 @@ unsafe fn init_from_shm(shm: *mut SharedBuffer) -> Result<(), u32> {
     // install anyway — dispatch will pick up the addr later when bot issues
     // the first CMD_SEND_DUAL_GT command which also stores the VA.
     let dual_addr = shm_read_u64(shm as *const SharedBuffer, OFF_DUAL_SEND_WRAP) as usize;
-    if dual_addr != 0 { G_DUAL_SEND_WRAP = dual_addr; }
+    if dual_addr != 0 {
+        G_DUAL_SEND_WRAP = dual_addr;
+    }
     install_gtc64_hook();
 
     // TimerQueue worker drains multi-slot batch pool every 1 ms without
@@ -1226,8 +1417,8 @@ unsafe fn init_from_shm(shm: *mut SharedBuffer) -> Result<(), u32> {
     // returned NULL, 0xC0DE0044 thread already existed (re-init).
     shm_write_u32(shm, OFF_ROP_DBG, 0xC0DE0001);
     let target_va = G_D2R_BASE;
-    G_ROP_EXECUTOR    = executor::Executor::new(target_va);
-    G_ROP_STACK       = alloc_mgr::AllocatedMemory::new(0x1000);
+    G_ROP_EXECUTOR = executor::Executor::new(target_va);
+    G_ROP_STACK = alloc_mgr::AllocatedMemory::new(0x1000);
     G_ROP_TRIGGER_BUF = alloc_mgr::AllocatedMemory::new(0x1000);
     // Synthetic gadget page DISABLED for Claude walker mode 04-18 pm:
     // the page's PAGE_EXECUTE_READ protection looks like a freshly-allocated
@@ -1248,7 +1439,11 @@ unsafe fn init_from_shm(shm: *mut SharedBuffer) -> Result<(), u32> {
         shm_write_u32(shm, OFF_ROP_KIND_COUNTS + 1 * 4, 3); // PopReg: 3 (rsi,rdi,rcx)
         shm_write_u32(shm, OFF_ROP_KIND_COUNTS + 4 * 4, 1); // RepMovsb
         shm_write_u32(shm, OFF_ROP_KIND_COUNTS + 7 * 4, 1); // Ret
-        shm_write_u32(shm, OFF_ROP_POPREG_MASK, (1u32 << 1) | (1u32 << 6) | (1u32 << 7));
+        shm_write_u32(
+            shm,
+            OFF_ROP_POPREG_MASK,
+            (1u32 << 1) | (1u32 << 6) | (1u32 << 7),
+        );
         shm_write_u32(shm, OFF_ROP_SCAN_COUNT, 5);
     }
     shm_write_u32(shm, OFF_ROP_DBG, 0xC0DE0002);
@@ -1260,9 +1455,15 @@ unsafe fn init_from_shm(shm: *mut SharedBuffer) -> Result<(), u32> {
     // AVs silently). Fresh thread with the current shm as its param is
     // the only way to get heartbeats into this session's SHM.
     if !G_ROP_WORKER_THREAD.is_null() {
-        TerminateThread(G_ROP_WORKER_THREAD, 0);
+        G_WORKER_STOP = true;
+        let wait = WaitForSingleObject(G_ROP_WORKER_THREAD, 500);
+        if wait != 0 {
+            shm_write_u32(shm, OFF_ROP_DBG, 0xC0DE00F1);
+            return Err(0xE0F1);
+        }
         CloseHandle(G_ROP_WORKER_THREAD);
         G_ROP_WORKER_THREAD = core::ptr::null_mut();
+        G_ROP_WORKER_SHM = core::ptr::null_mut();
     }
     // Reset the global stop flag — a previous uninstall_present_detour
     // would have set it true, which the new worker would see on its first
@@ -1285,6 +1486,15 @@ unsafe fn init_from_shm(shm: *mut SharedBuffer) -> Result<(), u32> {
         shm_write_u32(shm, OFF_ROP_DBG, 0xC0DE00EE);
     }
 
+    shm_write_u32(
+        shm,
+        OFF_CAPABILITIES,
+        CAP_POST_MOVE_NO_SET_CURSOR_POS
+            | CAP_POST_CLICK_NO_SET_CURSOR_POS
+            | CAP_SET_D2R_CURSOR
+            | CAP_VENDOR_SEND_SUPPRESS
+            | CAP_VENDOR_NATIVE_PRICE,
+    );
     shm_write_u32(shm, OFF_DEBUG_STEP, 0x0F);
     shm_write_u32(shm, OFF_READY_FLAG, 1);
 
@@ -1351,8 +1561,8 @@ unsafe fn init_all() -> Result<(), u32> {
     // (D2R worker context, before Present hook activity stabilises) has been
     // stable. All three are small and live for the lifetime of the process.
     let target_va = G_D2R_BASE;
-    G_ROP_EXECUTOR    = executor::Executor::new(target_va);
-    G_ROP_STACK       = alloc_mgr::AllocatedMemory::new(0x1000);
+    G_ROP_EXECUTOR = executor::Executor::new(target_va);
+    G_ROP_STACK = alloc_mgr::AllocatedMemory::new(0x1000);
     G_ROP_TRIGGER_BUF = alloc_mgr::AllocatedMemory::new(0x1000);
 
     // 3d.1 — Synthetic gadget page DISABLED 04-18 pm. First Present after
@@ -1383,6 +1593,15 @@ unsafe fn init_all() -> Result<(), u32> {
     }
 
     // 4. Signal ready.
+    shm_write_u32(
+        shm,
+        OFF_CAPABILITIES,
+        CAP_POST_MOVE_NO_SET_CURSOR_POS
+            | CAP_POST_CLICK_NO_SET_CURSOR_POS
+            | CAP_SET_D2R_CURSOR
+            | CAP_VENDOR_SEND_SUPPRESS
+            | CAP_VENDOR_NATIVE_PRICE,
+    );
     shm_write_u32(shm, OFF_DEBUG_STEP, 0x0F); // all done
     shm_write_u32(shm, OFF_READY_FLAG, 1);
 
@@ -1424,13 +1643,27 @@ unsafe fn open_shared_memory() -> Result<*mut SharedBuffer, u32> {
     // and the cascade killed D2R (see fault_va=SHM+0x4030 crash pattern
     // 04-18). The assert on SharedBuffer's size at line 562 is the source
     // of truth for what needs to be mapped.
-    let view = MapViewOfFile(handle, FILE_MAP_ALL_ACCESS, 0, 0, core::mem::size_of::<SharedBuffer>());
+    let view = MapViewOfFile(
+        handle,
+        FILE_MAP_ALL_ACCESS,
+        0,
+        0,
+        core::mem::size_of::<SharedBuffer>(),
+    );
     if view.is_null() {
         CloseHandle(handle);
         return Err(0xE011);
     }
+    CloseHandle(handle);
 
     Ok(view as *mut SharedBuffer)
+}
+
+#[inline(always)]
+unsafe fn close_shared_memory_view(shm: *mut SharedBuffer) {
+    if !shm.is_null() {
+        let _ = UnmapViewOfFile(shm as *const core::ffi::c_void);
+    }
 }
 
 /// Write a u32 as decimal wide chars into `buf` starting at `pos`. Returns new pos.
@@ -1457,40 +1690,207 @@ fn write_u32_wide(buf: &mut [u16], pos: usize, val: u32) -> usize {
 }
 
 // ---------------------------------------------------------------------------
-// Find IDXGISwapChain::Present address — lightweight, no dummy device
+// Find IDXGISwapChain::Present address via a temporary D3D11 swap chain.
 // ---------------------------------------------------------------------------
 
 unsafe fn find_present_address(shm: *mut SharedBuffer) -> Result<usize, u32> {
     shm_write_u32(shm, OFF_DEBUG_STEP, 0x03);
+    let override_addr = shm_read_u64(shm, OFF_ORIGINAL_PRESENT) as usize;
+    if override_addr != 0 {
+        shm_write_u32(shm, OFF_DEBUG_STEP, 0x07);
+        return Ok(override_addr);
+    }
 
-    // dxgi.dll is already loaded by D2R. Get its base address.
-    let dxgi_name: &[u16] = &[
-        b'd' as u16, b'x' as u16, b'g' as u16, b'i' as u16,
-        b'.' as u16, b'd' as u16, b'l' as u16, b'l' as u16, 0,
+    let d3d11_name: &[u16] = &[
+        b'd' as u16,
+        b'3' as u16,
+        b'd' as u16,
+        b'1' as u16,
+        b'1' as u16,
+        b'.' as u16,
+        b'd' as u16,
+        b'l' as u16,
+        b'l' as u16,
+        0,
     ];
-    // Phase C: PEB walk replaces GetModuleHandleW for module-base resolution.
-    let hmod_addr = peb_find_module(dxgi_name);
-    if hmod_addr == 0 {
+    let mut d3d11 = GetModuleHandleW(d3d11_name.as_ptr());
+    let mut loaded_by_us = false;
+    if d3d11.is_null() {
+        d3d11 = LoadLibraryW(d3d11_name.as_ptr());
+        loaded_by_us = !d3d11.is_null();
+    }
+    if d3d11.is_null() {
         return Err(0xE020);
     }
-    let hmod = hmod_addr as HMODULE;
 
-    // IDXGISwapChain::Present is at a known offset in dxgi.dll.
-    // This offset is stable per Windows version (determined by vtable layout).
-    // Offset verified on current system: 0x4F80.
-    // The Go side passes the correct offset via shared buffer if needed;
-    // for now we read it from OFF_ORIGINAL_PRESENT if non-zero, else use default.
-    let override_addr = shm_read_u64(shm, OFF_ORIGINAL_PRESENT) as usize;
-    let present_addr = if override_addr != 0 {
-        override_addr
-    } else {
-        (hmod as usize) + 0x4F80
+    let create_name = b"D3D11CreateDeviceAndSwapChain\0";
+    let create_ptr = GetProcAddress(d3d11, create_name.as_ptr());
+    if create_ptr.is_null() {
+        if loaded_by_us {
+            FreeLibrary(d3d11);
+        }
+        return Err(0xE021);
+    }
+    let create_fn: FnD3D11Create = core::mem::transmute(create_ptr);
+
+    shm_write_u32(shm, OFF_DEBUG_STEP, 0x04);
+
+    let hinst = GetModuleHandleW(core::ptr::null());
+    let pid = GetCurrentProcessId();
+    let mut class_name = [0u16; 24];
+    let prefix: &[u16] = &[
+        b'R' as u16,
+        b'm' as u16,
+        b'o' as u16,
+        b'd' as u16,
+        b'D' as u16,
+        b'x' as u16,
+        b'G' as u16,
+        b'e' as u16,
+        b't' as u16,
+        b'_' as u16,
+    ];
+    let mut class_len = 0usize;
+    while class_len < prefix.len() {
+        class_name[class_len] = prefix[class_len];
+        class_len += 1;
+    }
+    class_len = write_u32_wide(&mut class_name, class_len, pid);
+    class_name[class_len] = 0;
+
+    let wc = WNDCLASSEXW {
+        cbSize: core::mem::size_of::<WNDCLASSEXW>() as u32,
+        style: 0,
+        lpfnWndProc: Some(stub_wndproc),
+        cbClsExtra: 0,
+        cbWndExtra: 0,
+        hInstance: hinst,
+        hIcon: core::ptr::null_mut(),
+        hCursor: core::ptr::null_mut(),
+        hbrBackground: core::ptr::null_mut(),
+        lpszMenuName: core::ptr::null(),
+        lpszClassName: class_name.as_ptr(),
+        hIconSm: core::ptr::null_mut(),
     };
+    let _ = RegisterClassExW(&wc);
+
+    let hwnd = CreateWindowExW(
+        0,
+        class_name.as_ptr(),
+        class_name.as_ptr(),
+        WS_OVERLAPPEDWINDOW,
+        0,
+        0,
+        1,
+        1,
+        core::ptr::null_mut(),
+        core::ptr::null_mut(),
+        hinst,
+        core::ptr::null(),
+    );
+    if hwnd.is_null() {
+        if loaded_by_us {
+            FreeLibrary(d3d11);
+        }
+        let _ = UnregisterClassW(class_name.as_ptr(), hinst);
+        return Err(0xE022);
+    }
+
+    shm_write_u32(shm, OFF_DEBUG_STEP, 0x05);
+
+    let desc = DXGI_SWAP_CHAIN_DESC {
+        BufferDesc: DXGI_MODE_DESC {
+            Width: 1,
+            Height: 1,
+            RefreshRate: DXGI_RATIONAL {
+                Numerator: 60,
+                Denominator: 1,
+            },
+            Format: DXGI_FORMAT_R8G8B8A8_UNORM,
+            ScanlineOrdering: 0,
+            Scaling: 0,
+        },
+        SampleDesc: DXGI_SAMPLE_DESC {
+            Count: 1,
+            Quality: 0,
+        },
+        BufferUsage: DXGI_USAGE_RENDER_TARGET_OUTPUT,
+        BufferCount: 1,
+        OutputWindow: hwnd,
+        Windowed: TRUE,
+        SwapEffect: DXGI_SWAP_EFFECT_DISCARD,
+        Flags: 0,
+    };
+
+    let mut swap_chain: *mut core::ffi::c_void = core::ptr::null_mut();
+    let mut device: *mut core::ffi::c_void = core::ptr::null_mut();
+    let mut immediate_ctx: *mut core::ffi::c_void = core::ptr::null_mut();
+    let mut feature_level: u32 = 0;
+
+    let mut hr = create_fn(
+        core::ptr::null_mut(),
+        D3D_DRIVER_TYPE_HARDWARE,
+        core::ptr::null_mut(),
+        0,
+        core::ptr::null(),
+        0,
+        D3D11_SDK_VERSION,
+        &desc,
+        &mut swap_chain,
+        &mut device,
+        &mut feature_level,
+        &mut immediate_ctx,
+    );
+    if hr < 0 {
+        hr = create_fn(
+            core::ptr::null_mut(),
+            D3D_DRIVER_TYPE_WARP,
+            core::ptr::null_mut(),
+            0,
+            core::ptr::null(),
+            0,
+            D3D11_SDK_VERSION,
+            &desc,
+            &mut swap_chain,
+            &mut device,
+            &mut feature_level,
+            &mut immediate_ctx,
+        );
+    }
+    if hr < 0 || swap_chain.is_null() {
+        if !immediate_ctx.is_null() {
+            com_release(immediate_ctx);
+        }
+        if !device.is_null() {
+            com_release(device);
+        }
+        if !swap_chain.is_null() {
+            com_release(swap_chain);
+        }
+        DestroyWindow(hwnd);
+        let _ = UnregisterClassW(class_name.as_ptr(), hinst);
+        if loaded_by_us {
+            FreeLibrary(d3d11);
+        }
+        return Err(0xE023);
+    }
+
+    let vtbl = (*(swap_chain as *mut SwapChainObj)).vtbl;
+    let present_addr = if vtbl.is_null() { 0 } else { (*vtbl).present };
+
+    com_release(immediate_ctx);
+    com_release(device);
+    com_release(swap_chain);
+    DestroyWindow(hwnd);
+    let _ = UnregisterClassW(class_name.as_ptr(), hinst);
+    if loaded_by_us {
+        FreeLibrary(d3d11);
+    }
 
     shm_write_u32(shm, OFF_DEBUG_STEP, 0x07);
 
     if present_addr == 0 {
-        return Err(0xE025);
+        return Err(0xE024);
     }
 
     Ok(present_addr)
@@ -1508,7 +1908,10 @@ unsafe fn com_release(obj: *mut core::ffi::c_void) {
 }
 
 unsafe extern "system" fn stub_wndproc(
-    hwnd: HWND, msg: UINT, wparam: WPARAM, lparam: LPARAM,
+    hwnd: HWND,
+    msg: UINT,
+    wparam: WPARAM,
+    lparam: LPARAM,
 ) -> LRESULT {
     DefWindowProcW(hwnd, msg, wparam, lparam)
 }
@@ -1549,8 +1952,8 @@ unsafe fn install_detour(present_addr: usize, shm: *mut SharedBuffer) -> Result<
     //    walks one instruction at a time and stops at a boundary ≥ DETOUR_SIZE.
     //    Fallback to fixed DETOUR_SIZE on decode failure (current D2R builds
     //    have RIP-rel-free first 14 bytes of Present so the fallback is safe).
-    let copy_len = asm::walk_instruction_boundary(present_ptr, DETOUR_SIZE, 32)
-        .unwrap_or(DETOUR_SIZE);
+    let copy_len =
+        asm::walk_instruction_boundary(present_ptr, DETOUR_SIZE, 32).unwrap_or(DETOUR_SIZE);
 
     // Copy original prologue bytes into trampoline AND save a copy for
     // DLL_PROCESS_DETACH uninstall (trampoline may be VirtualFree'd).
@@ -1666,6 +2069,20 @@ unsafe fn uninstall_present_detour() {
         G_ROP_WORKER_THREAD = core::ptr::null_mut();
         G_ROP_WORKER_SHM = core::ptr::null_mut();
     }
+    if !G_TIMER_QUEUE_HANDLE.is_null() {
+        G_TIMER_QUEUE_SHM = core::ptr::null_mut();
+        let _ = DeleteTimerQueueTimer(
+            core::ptr::null_mut(),
+            G_TIMER_QUEUE_HANDLE,
+            core::ptr::null_mut(),
+        );
+        G_TIMER_QUEUE_HANDLE = core::ptr::null_mut();
+    }
+    uninstall_game_thread_hook();
+    uninstall_gtc64_hook();
+    G_SNAPSHOT_ENABLED = false;
+    G_DUAL_SEND_WRAP = 0;
+    G_HWBP_TARGET = 0;
     if G_PRESENT_ADDR == 0 {
         return; // never installed
     }
@@ -1675,35 +2092,43 @@ unsafe fn uninstall_present_detour() {
     // Use G_PRESENT_ORIG_LEN (set by install_detour via walk_instruction_boundary)
     // so variable-length prologues restore correctly; fall back to DETOUR_SIZE
     // for legacy paths that didn't set the length.
-    let restore_len = if G_PRESENT_ORIG_LEN != 0 { G_PRESENT_ORIG_LEN } else { DETOUR_SIZE };
+    let restore_len = if G_PRESENT_ORIG_LEN != 0 {
+        G_PRESENT_ORIG_LEN
+    } else {
+        DETOUR_SIZE
+    };
     let mut old_protect: DWORD = 0;
     if VirtualProtect(
         present_ptr as *const core::ffi::c_void,
         restore_len,
         PAGE_EXECUTE_READWRITE,
         &mut old_protect,
-    ) == 0 {
+    ) == 0
+    {
         return; // can't unhook; let the process die as it will
     }
 
-    core::ptr::copy_nonoverlapping(
-        G_PRESENT_ORIG_BYTES.as_ptr(),
-        present_ptr,
-        restore_len,
-    );
+    core::ptr::copy_nonoverlapping(G_PRESENT_ORIG_BYTES.as_ptr(), present_ptr, restore_len);
     FlushInstructionCache(GetCurrentProcess(), present_ptr as _, restore_len);
 
     let mut dummy: DWORD = 0;
     VirtualProtect(
         present_ptr as *const core::ffi::c_void,
         restore_len,
-        if G_PRESENT_ORIG_PROT != 0 { G_PRESENT_ORIG_PROT } else { old_protect },
+        if G_PRESENT_ORIG_PROT != 0 {
+            G_PRESENT_ORIG_PROT
+        } else {
+            old_protect
+        },
         &mut dummy,
     );
 
     // Mark detour removed so a re-injection (if any) will reinstall.
     G_TRAMPOLINE = core::ptr::null();
     G_PRESENT_ADDR = 0;
+    G_PRESENT_ORIG_LEN = 0;
+    G_PRESENT_ORIG_PROT = 0;
+    G_PRESENT_ORIG_BYTES = [0u8; 32];
 }
 
 /// Write a 14-byte absolute indirect JMP: FF 25 00 00 00 00 [addr64].
@@ -1741,13 +2166,13 @@ unsafe fn build_handler_thunk(buf: *mut u8, trampoline: *const u8) {
     let mut w = ThunkWriter { buf, offset: 0 };
 
     // Save integer volatiles.
-    w.emit(&[0x50]);                         // push rax
-    w.emit(&[0x51]);                         // push rcx
-    w.emit(&[0x52]);                         // push rdx
-    w.emit(&[0x41, 0x50]);                   // push r8
-    w.emit(&[0x41, 0x51]);                   // push r9
-    w.emit(&[0x41, 0x52]);                   // push r10
-    w.emit(&[0x41, 0x53]);                   // push r11
+    w.emit(&[0x50]); // push rax
+    w.emit(&[0x51]); // push rcx
+    w.emit(&[0x52]); // push rdx
+    w.emit(&[0x41, 0x50]); // push r8
+    w.emit(&[0x41, 0x51]); // push r9
+    w.emit(&[0x41, 0x52]); // push r10
+    w.emit(&[0x41, 0x53]); // push r11
 
     // sub rsp, 0x100  (256 bytes for ALL XMM save area: XMM0-15).
     // XMM0-5 volatile (only caller needs to preserve), XMM6-15 non-volatile
@@ -1758,14 +2183,14 @@ unsafe fn build_handler_thunk(buf: *mut u8, trampoline: *const u8) {
     w.emit(&[0x48, 0x81, 0xEC, 0x00, 0x01, 0x00, 0x00]);
 
     // movaps [rsp+N], xmmN  — save XMM0-7 (1-byte disp, REX-free)
-    w.emit(&[0x0F, 0x29, 0x04, 0x24]);                // xmm0 -> [rsp+0x00]
-    w.emit(&[0x0F, 0x29, 0x4C, 0x24, 0x10]);          // xmm1 -> [rsp+0x10]
-    w.emit(&[0x0F, 0x29, 0x54, 0x24, 0x20]);          // xmm2 -> [rsp+0x20]
-    w.emit(&[0x0F, 0x29, 0x5C, 0x24, 0x30]);          // xmm3 -> [rsp+0x30]
-    w.emit(&[0x0F, 0x29, 0x64, 0x24, 0x40]);          // xmm4 -> [rsp+0x40]
-    w.emit(&[0x0F, 0x29, 0x6C, 0x24, 0x50]);          // xmm5 -> [rsp+0x50]
-    w.emit(&[0x0F, 0x29, 0x74, 0x24, 0x60]);          // xmm6 -> [rsp+0x60]
-    w.emit(&[0x0F, 0x29, 0x7C, 0x24, 0x70]);          // xmm7 -> [rsp+0x70]
+    w.emit(&[0x0F, 0x29, 0x04, 0x24]); // xmm0 -> [rsp+0x00]
+    w.emit(&[0x0F, 0x29, 0x4C, 0x24, 0x10]); // xmm1 -> [rsp+0x10]
+    w.emit(&[0x0F, 0x29, 0x54, 0x24, 0x20]); // xmm2 -> [rsp+0x20]
+    w.emit(&[0x0F, 0x29, 0x5C, 0x24, 0x30]); // xmm3 -> [rsp+0x30]
+    w.emit(&[0x0F, 0x29, 0x64, 0x24, 0x40]); // xmm4 -> [rsp+0x40]
+    w.emit(&[0x0F, 0x29, 0x6C, 0x24, 0x50]); // xmm5 -> [rsp+0x50]
+    w.emit(&[0x0F, 0x29, 0x74, 0x24, 0x60]); // xmm6 -> [rsp+0x60]
+    w.emit(&[0x0F, 0x29, 0x7C, 0x24, 0x70]); // xmm7 -> [rsp+0x70]
 
     // save XMM8-15 (REX.R prefix 0x44, 4-byte disp because offset >= 0x80)
     w.emit(&[0x44, 0x0F, 0x29, 0x84, 0x24, 0x80, 0x00, 0x00, 0x00]); // xmm8  -> [rsp+0x80]
@@ -1797,14 +2222,14 @@ unsafe fn build_handler_thunk(buf: *mut u8, trampoline: *const u8) {
     w.emit(&[0x48, 0x83, 0xC4, 0x28]);
 
     // Restore XMM0-7.
-    w.emit(&[0x0F, 0x28, 0x04, 0x24]);                // xmm0 <- [rsp+0x00]
-    w.emit(&[0x0F, 0x28, 0x4C, 0x24, 0x10]);          // xmm1 <- [rsp+0x10]
-    w.emit(&[0x0F, 0x28, 0x54, 0x24, 0x20]);          // xmm2 <- [rsp+0x20]
-    w.emit(&[0x0F, 0x28, 0x5C, 0x24, 0x30]);          // xmm3 <- [rsp+0x30]
-    w.emit(&[0x0F, 0x28, 0x64, 0x24, 0x40]);          // xmm4 <- [rsp+0x40]
-    w.emit(&[0x0F, 0x28, 0x6C, 0x24, 0x50]);          // xmm5 <- [rsp+0x50]
-    w.emit(&[0x0F, 0x28, 0x74, 0x24, 0x60]);          // xmm6 <- [rsp+0x60]
-    w.emit(&[0x0F, 0x28, 0x7C, 0x24, 0x70]);          // xmm7 <- [rsp+0x70]
+    w.emit(&[0x0F, 0x28, 0x04, 0x24]); // xmm0 <- [rsp+0x00]
+    w.emit(&[0x0F, 0x28, 0x4C, 0x24, 0x10]); // xmm1 <- [rsp+0x10]
+    w.emit(&[0x0F, 0x28, 0x54, 0x24, 0x20]); // xmm2 <- [rsp+0x20]
+    w.emit(&[0x0F, 0x28, 0x5C, 0x24, 0x30]); // xmm3 <- [rsp+0x30]
+    w.emit(&[0x0F, 0x28, 0x64, 0x24, 0x40]); // xmm4 <- [rsp+0x40]
+    w.emit(&[0x0F, 0x28, 0x6C, 0x24, 0x50]); // xmm5 <- [rsp+0x50]
+    w.emit(&[0x0F, 0x28, 0x74, 0x24, 0x60]); // xmm6 <- [rsp+0x60]
+    w.emit(&[0x0F, 0x28, 0x7C, 0x24, 0x70]); // xmm7 <- [rsp+0x70]
 
     // Restore XMM8-15.
     w.emit(&[0x44, 0x0F, 0x28, 0x84, 0x24, 0x80, 0x00, 0x00, 0x00]); // xmm8  <- [rsp+0x80]
@@ -1820,13 +2245,13 @@ unsafe fn build_handler_thunk(buf: *mut u8, trampoline: *const u8) {
     w.emit(&[0x48, 0x81, 0xC4, 0x00, 0x01, 0x00, 0x00]);
 
     // Restore integer volatiles.
-    w.emit(&[0x41, 0x5B]);                   // pop r11
-    w.emit(&[0x41, 0x5A]);                   // pop r10
-    w.emit(&[0x41, 0x59]);                   // pop r9
-    w.emit(&[0x41, 0x58]);                   // pop r8
-    w.emit(&[0x5A]);                         // pop rdx
-    w.emit(&[0x59]);                         // pop rcx
-    w.emit(&[0x58]);                         // pop rax
+    w.emit(&[0x41, 0x5B]); // pop r11
+    w.emit(&[0x41, 0x5A]); // pop r10
+    w.emit(&[0x41, 0x59]); // pop r9
+    w.emit(&[0x41, 0x58]); // pop r8
+    w.emit(&[0x5A]); // pop rdx
+    w.emit(&[0x59]); // pop rcx
+    w.emit(&[0x58]); // pop rax
 
     // JMP to trampoline (original prologue + jmp back to Present+14)
     write_abs_jmp(w.current(), trampoline as usize);
@@ -1856,18 +2281,36 @@ impl ThunkWriter {
 /// Drain every pending multi-slot batch. Called once per Present frame.
 /// Each slot is independent — bot picks a free one via CAS on its flag,
 /// fills entries, sets flag=1, polls for flag back to 0 (done).
+/// Set by dispatch_batch_slots — number of slots that had flag==1 in the most
+/// recent call. Peeked by dispatch_commands (latency instrumentation) to tag
+/// PATH_BATCH_HAD_WORK. Signed-in via a static instead of a return value so
+/// we don't break the 3 existing callsites.
+static mut LAST_BATCH_WORK_COUNT: u32 = 0;
+
 unsafe fn dispatch_batch_slots(shm: *mut SharedBuffer) {
+    let mut work: u32 = 0;
     for slot in 0..ROP_BATCH_SLOT_COUNT {
         let slot_base = OFF_ROP_BATCH_SLOTS + slot * ROP_BATCH_SLOT_SIZE;
-        let flag = shm_read_u32(shm as *const SharedBuffer, slot_base + ROP_BATCH_SLOT_OFF_FLAG);
+        let flag = shm_read_u32(
+            shm as *const SharedBuffer,
+            slot_base + ROP_BATCH_SLOT_OFF_FLAG,
+        );
         if flag != 1 {
             continue;
         }
-        let raw_count = shm_read_u32(shm as *const SharedBuffer, slot_base + ROP_BATCH_SLOT_OFF_COUNT) as usize;
-        let count = if raw_count > ROP_BATCH_MAX { ROP_BATCH_MAX } else { raw_count };
+        work += 1;
+        let raw_count = shm_read_u32(
+            shm as *const SharedBuffer,
+            slot_base + ROP_BATCH_SLOT_OFF_COUNT,
+        ) as usize;
+        let count = if raw_count > ROP_BATCH_MAX {
+            ROP_BATCH_MAX
+        } else {
+            raw_count
+        };
         let entries_base = (shm as *const u8).add(slot_base + ROP_BATCH_SLOT_OFF_ENTRIES);
-        let status_base  = (shm as *mut u8).add(slot_base + ROP_BATCH_SLOT_OFF_STATUS);
-        let output_base  = (shm as *mut u8).add(slot_base + ROP_BATCH_SLOT_OFF_OUTPUT);
+        let status_base = (shm as *mut u8).add(slot_base + ROP_BATCH_SLOT_OFF_STATUS);
+        let output_base = (shm as *mut u8).add(slot_base + ROP_BATCH_SLOT_OFF_OUTPUT);
         let mut total: usize = 0;
         for i in 0..count {
             let entry_ptr = entries_base.add(i * 16);
@@ -1901,6 +2344,41 @@ unsafe fn dispatch_batch_slots(shm: *mut SharedBuffer) {
         // Flag goes back to 0 — bot sees "done" and reads status + output.
         shm_write_u32(shm, slot_base + ROP_BATCH_SLOT_OFF_FLAG, 0);
     }
+    LAST_BATCH_WORK_COUNT = work;
+}
+
+/// Update the 5 latency slots + PATHS_LAST after each dispatch_commands run.
+/// `cycles` is a raw rdtsc delta. Go-side converts via the host CPU's TSC
+/// frequency (~3 GHz typical, so 1 µs ≈ 3000 cycles).
+unsafe fn record_present_latency(shm: *mut SharedBuffer, cycles: u64, paths: u32) {
+    let shm_u8 = shm as *mut u8;
+
+    // LAST + PATHS_LAST (always overwrite — this is the "most recent" slot).
+    core::ptr::write_unaligned(shm_u8.add(OFF_PRESENT_LAT_LAST_CYC) as *mut u64, cycles);
+    shm_write_u32(shm, OFF_PRESENT_LAT_PATHS, paths);
+
+    // MIN — first sample bootstraps because initial state is 0 (0 < any).
+    let min_ptr = shm_u8.add(OFF_PRESENT_LAT_MIN_CYC) as *mut u64;
+    let cur_min = core::ptr::read_unaligned(min_ptr);
+    if cur_min == 0 || cycles < cur_min {
+        core::ptr::write_unaligned(min_ptr, cycles);
+    }
+
+    // MAX — monotonic upward.
+    let max_ptr = shm_u8.add(OFF_PRESENT_LAT_MAX_CYC) as *mut u64;
+    let cur_max = core::ptr::read_unaligned(max_ptr);
+    if cycles > cur_max {
+        core::ptr::write_unaligned(max_ptr, cycles);
+    }
+
+    // SUM + COUNT for running-average calc on Go side.
+    let sum_ptr = shm_u8.add(OFF_PRESENT_LAT_SUM_CYC) as *mut u64;
+    let cur_sum = core::ptr::read_unaligned(sum_ptr);
+    core::ptr::write_unaligned(sum_ptr, cur_sum.wrapping_add(cycles));
+
+    let cnt_ptr = shm_u8.add(OFF_PRESENT_LAT_COUNT) as *mut u64;
+    let cur_cnt = core::ptr::read_unaligned(cnt_ptr);
+    core::ptr::write_unaligned(cnt_ptr, cur_cnt.wrapping_add(1));
 }
 
 unsafe fn dispatch_commands() {
@@ -1908,6 +2386,18 @@ unsafe fn dispatch_commands() {
     if shm.is_null() {
         return;
     }
+    // Wrap the full body with rdtsc so Go can decide whether the hook is
+    // expensive enough to justify offloading walker/sniffer/batch work to a
+    // dedicated worker thread. Raw cycles stored in SHM (see OFF_PRESENT_LAT_*).
+    let tsc_start = rdtsc_u64();
+    let mut paths: u32 = 0;
+    dispatch_commands_inner(shm, &mut paths);
+    let tsc_end = rdtsc_u64();
+    record_present_latency(shm, tsc_end.wrapping_sub(tsc_start), paths);
+}
+
+unsafe fn dispatch_commands_inner(shm: *mut SharedBuffer, paths: &mut u32) {
+    // shm non-null precondition guaranteed by dispatch_commands wrapper.
 
     // Install crash-diagnostic VEH eagerly on the FIRST Present frame after
     // SHM is mapped. Doing it here (before any command processing) means we
@@ -1930,11 +2420,17 @@ unsafe fn dispatch_commands() {
     #[cfg(feature = "sniffer")]
     {
         sniffer_poll();
+        *paths |= PATH_SNIFFER_RAN;
         // Debug: write sniffer state to error_code field so Go can read it
         static mut DBG_COUNTER: u32 = 0;
         DBG_COUNTER = DBG_COUNTER.wrapping_add(1);
-        if DBG_COUNTER % 300 == 0 { // every ~5s at 60fps
-            let marker: u32 = if sniffer_impl::G_SNIFF_SHM.is_null() { 0xDEAD0000 } else { 0xA11E0000 };
+        if DBG_COUNTER % 300 == 0 {
+            // every ~5s at 60fps
+            let marker: u32 = if sniffer_impl::G_SNIFF_SHM.is_null() {
+                0xDEAD0000
+            } else {
+                0xA11E0000
+            };
             shm_write_u32(shm, OFF_ERROR_CODE, marker | (DBG_COUNTER & 0xFFFF));
         }
     }
@@ -1943,6 +2439,7 @@ unsafe fn dispatch_commands() {
     // After CMD_SNAPSHOT_INIT flips G_SNAPSHOT_ENABLED, this populates the
     // SHM snapshot region so bot can read in-process (zero cross-process RPM).
     if G_SNAPSHOT_ENABLED {
+        *paths |= PATH_SNAPSHOT_ENABLED;
         snapshot_tick_write(shm);
     }
 
@@ -1951,6 +2448,9 @@ unsafe fn dispatch_commands() {
     // serialising on a single command flag. Independent of G_SNAPSHOT_ENABLED
     // so the bot can run pump traffic even without a snapshot walker.
     dispatch_batch_slots(shm);
+    if LAST_BATCH_WORK_COUNT > 0 {
+        *paths |= PATH_BATCH_HAD_WORK;
+    }
 
     // Fast path: no pending command.
     if shm_read_u32(shm, OFF_COMMAND_FLAG) == 0 {
@@ -1963,6 +2463,8 @@ unsafe fn dispatch_commands() {
     install_crash_diag_veh(shm);
 
     let cmd_type = shm_read_u32(shm, OFF_COMMAND_TYPE);
+    // Tag paths: command dispatched this frame + cmd_type in bits 8..15.
+    *paths |= PATH_CMD_DISPATCHED | ((cmd_type & 0xFF) << 8);
 
     match cmd_type {
         CMD_NOP => {
@@ -1989,10 +2491,40 @@ unsafe fn dispatch_commands() {
         CMD_CALL_FN_GT => {
             dispatch_call_fn_game_thread(shm);
         }
+        CMD_POST_KEY => {
+            dispatch_post_key(shm);
+        }
+        CMD_POST_MOVE => {
+            dispatch_post_move(shm);
+        }
+        CMD_SET_D2R_CURSOR => {
+            dispatch_set_d2r_cursor(shm);
+        }
+        CMD_RESOLVE_D2R_HOVER => {
+            dispatch_resolve_d2r_hover(shm);
+        }
+        CMD_CAP_SUPPRESS_VENDOR => {
+            let enabled = shm_read_u32(shm as *const SharedBuffer, OFF_PACKET_DATA);
+            if enabled == 0 {
+                G_CAP_SUPPRESS_VENDOR.store(0, Ordering::Relaxed);
+            } else {
+                G_CAP_SUPPRESS_VENDOR.store(1, Ordering::Relaxed);
+            }
+            shm_write_u32(shm, OFF_STATUS_FLAG, STATUS_DONE);
+            shm_write_u32(shm, OFF_COMMAND_FLAG, 0);
+        }
+        CMD_VENDOR_PRICE => {
+            dispatch_vendor_price(shm);
+        }
+        CMD_POST_CLICK => {
+            dispatch_post_click(shm);
+        }
         CMD_SEND_DUAL_GT => {
             // Load dual_send_wrap address from SHM (idempotent).
             let dual_addr = shm_read_u64(shm as *const SharedBuffer, OFF_DUAL_SEND_WRAP) as usize;
-            if dual_addr != 0 { G_DUAL_SEND_WRAP = dual_addr; }
+            if dual_addr != 0 {
+                G_DUAL_SEND_WRAP = dual_addr;
+            }
             // Pure IAT-hook path: install_gtc64_hook was called at init; every
             // GetTickCount64 call on a game thread fires our thunk, which calls
             // game_tick_dispatch, which picks up STATUS_BUSY + CMD and invokes
@@ -2037,7 +2569,7 @@ unsafe fn dispatch_commands() {
             // 1 KB per Present frame (same chunking as Plan A).
             shm_write_u32(shm, OFF_ROP_DBG, 0xBEEF0001);
             let base_va = shm_read_u64(shm, OFF_ROP_SCAN_BASE) as *const u8;
-            let total   = shm_read_u64(shm, OFF_ROP_SCAN_LEN) as usize;
+            let total = shm_read_u64(shm, OFF_ROP_SCAN_LEN) as usize;
             shm_write_u32(shm, OFF_ROP_DBG, 0xBEEF0002);
 
             if G_ROP_SCAN_COMPLETE {
@@ -2049,7 +2581,11 @@ unsafe fn dispatch_commands() {
                 // `pop rcx; ret` + `rep movsb; ret` that build_memcpy relies
                 // on when D2R.text doesn't organically contain them.
                 const SYNTHETIC_GADGET_COUNT: usize = 5;
-                let preserve = if G_SYNTHETIC_GADGET_PAGE.is_null() { 0 } else { SYNTHETIC_GADGET_COUNT };
+                let preserve = if G_SYNTHETIC_GADGET_PAGE.is_null() {
+                    0
+                } else {
+                    SYNTHETIC_GADGET_COUNT
+                };
                 G_ROP_GADGETS.count = preserve;
                 // Rebuild SHM kind counts from preserved synthetic entries.
                 let mut kind_counts = [0u32; 8];
@@ -2069,7 +2605,11 @@ unsafe fn dispatch_commands() {
             }
 
             let remaining = total.saturating_sub(G_ROP_SCAN_CURSOR);
-            let this_chunk = if remaining > ROP_SCAN_CHUNK { ROP_SCAN_CHUNK } else { remaining };
+            let this_chunk = if remaining > ROP_SCAN_CHUNK {
+                ROP_SCAN_CHUNK
+            } else {
+                remaining
+            };
 
             shm_write_u32(shm, OFF_ROP_DBG, 0xBEEF0003);
             if this_chunk > 0 {
@@ -2091,7 +2631,8 @@ unsafe fn dispatch_commands() {
             // Single volatile count read — this read pattern never triggered
             // the cascade in Plan A. The broken read was the pool-iteration
             // loop which is now gone.
-            let current_count: u32 = core::ptr::read_volatile(&G_ROP_GADGETS.count as *const usize) as u32;
+            let current_count: u32 =
+                core::ptr::read_volatile(&G_ROP_GADGETS.count as *const usize) as u32;
             shm_write_u32(shm, OFF_ROP_SCAN_COUNT, current_count);
 
             let ready = G_ROP_SCAN_COMPLETE
@@ -2127,7 +2668,7 @@ unsafe fn dispatch_commands() {
 
             let src_va = shm_read_u64(shm, OFF_ROP_READ_SRC) as usize;
             let mut dst_va = shm_read_u64(shm, OFF_ROP_READ_DST) as usize;
-            let len    = shm_read_u64(shm, OFF_ROP_READ_LEN) as usize;
+            let len = shm_read_u64(shm, OFF_ROP_READ_LEN) as usize;
             // Sentinel: dst_va == 0 means "use internal SHM scratch buffer".
             if dst_va == 0 {
                 if len > OFF_ROP_READ_BUFFER_SIZE {
@@ -2169,7 +2710,11 @@ unsafe fn dispatch_commands() {
             // operators can decode what's going wrong without instrumenting
             // every call site. Status is in the upper 16 bits (0xNNNN prefix
             // per the existing BBBB/CAFE/BEEF scheme), bytes_read in low.
-            shm_write_u32(shm, OFF_ROP_DBG, 0xBB00_0000u32 | ((status as u32) & 0x0000FFFFu32));
+            shm_write_u32(
+                shm,
+                OFF_ROP_DBG,
+                0xBB00_0000u32 | ((status as u32) & 0x0000FFFFu32),
+            );
             shm_write_u32(shm, OFF_ROP_READ_LEN + 4, bytes_read as u32); // diag: high 32 of len slot
             if status != 0 || bytes_read != len {
                 shm_write_u32(shm, OFF_ROP_READ_STATUS, 5);
@@ -2197,7 +2742,11 @@ unsafe fn dispatch_commands() {
             //   2 = invalid (len=0 or would overflow scratch buffer)
             shm_write_u32(shm, OFF_ROP_DBG, 0xBA7C0001);
             let raw_count = shm_read_u32(shm, OFF_ROP_BATCH_COUNT) as usize;
-            let count = if raw_count > ROP_BATCH_MAX { ROP_BATCH_MAX } else { raw_count };
+            let count = if raw_count > ROP_BATCH_MAX {
+                ROP_BATCH_MAX
+            } else {
+                raw_count
+            };
             let buf_base = (shm as *mut u8).add(OFF_ROP_READ_BUFFER);
             let status_base = (shm as *mut u8).add(OFF_ROP_BATCH_STATUS);
             let entries_base = (shm as *const u8).add(OFF_ROP_BATCH_ENTRIES);
@@ -2257,6 +2806,7 @@ unsafe fn dispatch_commands() {
             }
             uninstall_present_detour();
             uninstall_send_fn_capture_hook();
+            uninstall_argtrace_hook();
             G_SNAPSHOT_ENABLED = false;
             shm_write_u32(shm, OFF_STATUS_FLAG, STATUS_DONE);
             shm_write_u32(shm, OFF_COMMAND_FLAG, 0);
@@ -2264,7 +2814,22 @@ unsafe fn dispatch_commands() {
             // dispatch_commands's `if shm.is_null() { return; }` will short-
             // circuit next frame once the bot unmaps its side.
             G_SHM = core::ptr::null_mut();
+            close_shared_memory_view(shm);
             return;
+        }
+        CMD_ARG_TRACE_INSTALL => {
+            if install_argtrace_hook(shm) {
+                shm_write_u32(shm, OFF_STATUS_FLAG, STATUS_DONE);
+            } else {
+                shm_write_u32(shm, OFF_ERROR_CODE, 0xE221);
+                shm_write_u32(shm, OFF_STATUS_FLAG, STATUS_ERROR);
+            }
+            shm_write_u32(shm, OFF_COMMAND_FLAG, 0);
+        }
+        CMD_ARG_TRACE_UNINSTALL => {
+            uninstall_argtrace_hook();
+            shm_write_u32(shm, OFF_STATUS_FLAG, STATUS_DONE);
+            shm_write_u32(shm, OFF_COMMAND_FLAG, 0);
         }
         CMD_PACKET_TRACE_INSTALL | CMD_PACKET_TRACE_UNINSTALL => {
             // DISABLED 2026-04-15 late: inline hook approach crashed D2R via
@@ -2339,14 +2904,12 @@ unsafe fn dispatch_send_packet(shm: *mut SharedBuffer) {
 
 #[inline(always)]
 unsafe fn shm_read_u32(shm: *const SharedBuffer, offset: usize) -> u32 {
-    let ptr = (shm as *const u8).add(offset) as *const AtomicU32;
-    (*ptr).load(Ordering::SeqCst)
+    core::ptr::read_volatile((shm as *const u8).add(offset) as *const u32)
 }
 
 #[inline(always)]
 unsafe fn shm_write_u32(shm: *mut SharedBuffer, offset: usize, val: u32) {
-    let ptr = (shm as *mut u8).add(offset) as *const AtomicU32;
-    (*ptr).store(val, Ordering::SeqCst);
+    core::ptr::write_volatile((shm as *mut u8).add(offset) as *mut u32, val);
 }
 
 #[inline(always)]
@@ -2365,7 +2928,9 @@ unsafe fn shm_read_u64(shm: *const SharedBuffer, offset: usize) -> u64 {
         8,
         &mut br as *mut usize,
     );
-    if status != 0 || br != 8 { return 0; }
+    if status != 0 || br != 8 {
+        return 0;
+    }
     v
 }
 
@@ -2387,10 +2952,10 @@ unsafe fn dispatch_send_ui_packet(shm: *mut SharedBuffer) {
     //   netman_instance = *(global)
     //   vtable          = *(netman_instance)
     //   ui_send_fn      = *(vtable + 0x28)
-    let ui_netman_global = shm_read_u64(shm, OFF_UI_NET_MAN_ADDR);
+    let ui_netman_candidate = shm_read_u64(shm, OFF_UI_NET_MAN_ADDR);
     let size = shm_read_u32(shm, OFF_PACKET_SIZE);
 
-    if ui_netman_global == 0 {
+    if ui_netman_candidate == 0 {
         shm_write_u32(shm, OFF_ERROR_CODE, 0xE120);
         shm_write_u32(shm, OFF_STATUS_FLAG, STATUS_ERROR);
         shm_write_u32(shm, OFF_COMMAND_FLAG, 0);
@@ -2406,8 +2971,8 @@ unsafe fn dispatch_send_ui_packet(shm: *mut SharedBuffer) {
     }
 
     // 1. Deref the global to get the instance pointer (heap).
-    let netman_instance =
-        core::ptr::read_unaligned(ui_netman_global as *const u64) as usize;
+    let (netman_instance, vtable_ptr, ui_send_fn, resolve_mode) =
+        resolve_ui_netman_send(ui_netman_candidate as usize);
     if netman_instance == 0 {
         shm_write_u32(shm, OFF_ERROR_CODE, 0xE124); // global empty — not in game
         shm_write_u32(shm, OFF_STATUS_FLAG, STATUS_ERROR);
@@ -2416,7 +2981,6 @@ unsafe fn dispatch_send_ui_packet(shm: *mut SharedBuffer) {
     }
 
     // 2. Deref instance to get vtable pointer (code/rdata).
-    let vtable_ptr = core::ptr::read_unaligned(netman_instance as *const u64) as usize;
     if vtable_ptr == 0 {
         shm_write_u32(shm, OFF_ERROR_CODE, 0xE122);
         shm_write_u32(shm, OFF_STATUS_FLAG, STATUS_ERROR);
@@ -2425,7 +2989,6 @@ unsafe fn dispatch_send_ui_packet(shm: *mut SharedBuffer) {
     }
 
     // 3. Read vtable[5] at offset +0x28.
-    let ui_send_fn = core::ptr::read_unaligned((vtable_ptr + 0x28) as *const u64) as usize;
     if ui_send_fn == 0 {
         shm_write_u32(shm, OFF_ERROR_CODE, 0xE123);
         shm_write_u32(shm, OFF_STATUS_FLAG, STATUS_ERROR);
@@ -2447,7 +3010,8 @@ unsafe fn dispatch_send_ui_packet(shm: *mut SharedBuffer) {
     shm_write_u64(shm, 0x80, netman_instance as u64);
     shm_write_u64(shm, 0x88, vtable_ptr as u64);
     shm_write_u64(shm, 0x90, ui_send_fn as u64);
-    core::ptr::copy_nonoverlapping(ui_send_fn as *const u8, (shm as *mut u8).add(0x98), 8);
+    shm_write_u32(shm, 0x94, resolve_mode);
+    shm_write_u64(shm, 0x98, d2r_read_u64(ui_send_fn));
 
     // Push our VEH to head of chain so we see any AV from this dispatch
     // before Arxan redirects into stack-overflow recovery.
@@ -2566,10 +3130,418 @@ static mut G_APC_SHELLCODE: *mut u8 = core::ptr::null_mut();
 // breaking past the one-batch-per-frame throughput ceiling.
 static mut G_TIMER_QUEUE_HANDLE: HANDLE = core::ptr::null_mut();
 static mut G_TIMER_QUEUE_SHM: *mut SharedBuffer = core::ptr::null_mut();
+static G_TIMER_CMD_ACTIVE: AtomicU32 = AtomicU32::new(0);
+
+unsafe fn dispatch_timer_queue_command(shm: *mut SharedBuffer) -> bool {
+    let skip_present_hook = shm_read_u32(shm as *const SharedBuffer, OFF_SKIP_PRESENT_HOOK) != 0;
+    if G_PRESENT_ADDR != 0 && !skip_present_hook {
+        shm_write_u32(shm, OFF_TIMER_COMMAND_DIAG, 0xD0A0);
+        return false;
+    }
+    if shm_read_u32(shm, OFF_COMMAND_FLAG) == 0 {
+        return false;
+    }
+    shm_write_u32(shm, OFF_TIMER_COMMAND_DIAG, 0xD001);
+    if shm_read_u32(shm, OFF_STATUS_FLAG) != STATUS_BUSY {
+        let status = shm_read_u32(shm as *const SharedBuffer, OFF_STATUS_FLAG);
+        shm_write_u32(shm, OFF_TIMER_COMMAND_DIAG, 0xD0C0 | (status & 0xF));
+        return false;
+    }
+
+    let cmd = shm_read_u32(shm, OFF_COMMAND_TYPE);
+    if cmd != CMD_SEND_DUAL
+        && cmd != CMD_SEND_DUAL_GT
+        && cmd != CMD_POST_KEY
+        && cmd != CMD_POST_MOVE
+        && cmd != CMD_SET_D2R_CURSOR
+        && cmd != CMD_RESOLVE_D2R_HOVER
+        && cmd != CMD_POST_CLICK
+        && cmd != CMD_NATIVE_CLICK
+        && cmd != CMD_DR_PROBE
+        && cmd != CMD_HWBP_INSTALL
+        && cmd != CMD_HWBP_UNINSTALL
+        && cmd != CMD_HWBP_VERIFY
+        && cmd != CMD_HWBP_REENUM
+        && cmd != CMD_ARG_TRACE_INSTALL
+        && cmd != CMD_ARG_TRACE_UNINSTALL
+        && cmd != CMD_CAP_SUPPRESS_VENDOR
+        && cmd != CMD_VENDOR_PRICE
+        && cmd != CMD_UNINSTALL_DETOUR
+    {
+        shm_write_u32(shm, OFF_TIMER_COMMAND_DIAG, 0xD000 | (cmd & 0xFF));
+        return false;
+    }
+    if G_TIMER_CMD_ACTIVE
+        .compare_exchange(0, 1, Ordering::Acquire, Ordering::Relaxed)
+        .is_err()
+    {
+        shm_write_u32(shm, OFF_TIMER_COMMAND_DIAG, 0xD0E0 | (cmd & 0xFF));
+        return true;
+    }
+
+    let runs = shm_read_u32(shm as *const SharedBuffer, OFF_TIMER_COMMAND_RUNS);
+    shm_write_u32(shm, OFF_TIMER_COMMAND_RUNS, runs.wrapping_add(1));
+    shm_write_u32(shm, OFF_TIMER_COMMAND_DIAG, 0xA000 | (cmd & 0xFF));
+
+    if cmd == CMD_SEND_DUAL {
+        shm_write_u32(shm, OFF_TIMER_COMMAND_DIAG, 0xA10B);
+        dispatch_send_dual(shm);
+        shm_write_u32(
+            shm,
+            OFF_TIMER_LAST_STATUS,
+            shm_read_u32(shm as *const SharedBuffer, OFF_STATUS_FLAG),
+        );
+        shm_write_u32(
+            shm,
+            OFF_TIMER_LAST_COMMAND_FLAG,
+            shm_read_u32(shm as *const SharedBuffer, OFF_COMMAND_FLAG),
+        );
+        shm_write_u32(shm, OFF_TIMER_COMMAND_DIAG, 0xA20B);
+        G_TIMER_CMD_ACTIVE.store(0, Ordering::Release);
+        return true;
+    }
+
+    if cmd == CMD_SEND_DUAL_GT {
+        shm_write_u32(shm, OFF_TIMER_COMMAND_DIAG, 0xA110);
+        dispatch_dual_via_hijack(shm);
+        shm_write_u32(
+            shm,
+            OFF_TIMER_LAST_STATUS,
+            shm_read_u32(shm as *const SharedBuffer, OFF_STATUS_FLAG),
+        );
+        shm_write_u32(
+            shm,
+            OFF_TIMER_LAST_COMMAND_FLAG,
+            shm_read_u32(shm as *const SharedBuffer, OFF_COMMAND_FLAG),
+        );
+        shm_write_u32(shm, OFF_TIMER_COMMAND_DIAG, 0xA210);
+        G_TIMER_CMD_ACTIVE.store(0, Ordering::Release);
+        return true;
+    }
+
+    if cmd == CMD_POST_KEY {
+        shm_write_u32(shm, OFF_TIMER_COMMAND_DIAG, 0xA11C);
+        dispatch_post_key(shm);
+        shm_write_u32(
+            shm,
+            OFF_TIMER_LAST_STATUS,
+            shm_read_u32(shm as *const SharedBuffer, OFF_STATUS_FLAG),
+        );
+        shm_write_u32(
+            shm,
+            OFF_TIMER_LAST_COMMAND_FLAG,
+            shm_read_u32(shm as *const SharedBuffer, OFF_COMMAND_FLAG),
+        );
+        shm_write_u32(shm, OFF_TIMER_COMMAND_DIAG, 0xA21C);
+        G_TIMER_CMD_ACTIVE.store(0, Ordering::Release);
+        return true;
+    }
+
+    if cmd == CMD_POST_MOVE {
+        shm_write_u32(shm, OFF_TIMER_COMMAND_DIAG, 0xA123);
+        dispatch_post_move(shm);
+        shm_write_u32(
+            shm,
+            OFF_TIMER_LAST_STATUS,
+            shm_read_u32(shm as *const SharedBuffer, OFF_STATUS_FLAG),
+        );
+        shm_write_u32(
+            shm,
+            OFF_TIMER_LAST_COMMAND_FLAG,
+            shm_read_u32(shm as *const SharedBuffer, OFF_COMMAND_FLAG),
+        );
+        shm_write_u32(shm, OFF_TIMER_COMMAND_DIAG, 0xA223);
+        G_TIMER_CMD_ACTIVE.store(0, Ordering::Release);
+        return true;
+    }
+
+    if cmd == CMD_SET_D2R_CURSOR {
+        shm_write_u32(shm, OFF_TIMER_COMMAND_DIAG, 0xA124);
+        dispatch_set_d2r_cursor(shm);
+        shm_write_u32(
+            shm,
+            OFF_TIMER_LAST_STATUS,
+            shm_read_u32(shm as *const SharedBuffer, OFF_STATUS_FLAG),
+        );
+        shm_write_u32(
+            shm,
+            OFF_TIMER_LAST_COMMAND_FLAG,
+            shm_read_u32(shm as *const SharedBuffer, OFF_COMMAND_FLAG),
+        );
+        shm_write_u32(shm, OFF_TIMER_COMMAND_DIAG, 0xA224);
+        G_TIMER_CMD_ACTIVE.store(0, Ordering::Release);
+        return true;
+    }
+
+    if cmd == CMD_RESOLVE_D2R_HOVER {
+        shm_write_u32(shm, OFF_TIMER_COMMAND_DIAG, 0xA125);
+        dispatch_resolve_d2r_hover(shm);
+        shm_write_u32(
+            shm,
+            OFF_TIMER_LAST_STATUS,
+            shm_read_u32(shm as *const SharedBuffer, OFF_STATUS_FLAG),
+        );
+        shm_write_u32(
+            shm,
+            OFF_TIMER_LAST_COMMAND_FLAG,
+            shm_read_u32(shm as *const SharedBuffer, OFF_COMMAND_FLAG),
+        );
+        shm_write_u32(shm, OFF_TIMER_COMMAND_DIAG, 0xA225);
+        G_TIMER_CMD_ACTIVE.store(0, Ordering::Release);
+        return true;
+    }
+
+    if cmd == CMD_POST_CLICK {
+        shm_write_u32(shm, OFF_TIMER_COMMAND_DIAG, 0xA11F);
+        dispatch_post_click(shm);
+        shm_write_u32(
+            shm,
+            OFF_TIMER_LAST_STATUS,
+            shm_read_u32(shm as *const SharedBuffer, OFF_STATUS_FLAG),
+        );
+        shm_write_u32(
+            shm,
+            OFF_TIMER_LAST_COMMAND_FLAG,
+            shm_read_u32(shm as *const SharedBuffer, OFF_COMMAND_FLAG),
+        );
+        shm_write_u32(shm, OFF_TIMER_COMMAND_DIAG, 0xA21F);
+        G_TIMER_CMD_ACTIVE.store(0, Ordering::Release);
+        return true;
+    }
+
+    if cmd == CMD_NATIVE_CLICK {
+        shm_write_u32(shm, OFF_TIMER_COMMAND_DIAG, 0xA120);
+        dispatch_native_click(shm);
+        shm_write_u32(
+            shm,
+            OFF_TIMER_LAST_STATUS,
+            shm_read_u32(shm as *const SharedBuffer, OFF_STATUS_FLAG),
+        );
+        shm_write_u32(
+            shm,
+            OFF_TIMER_LAST_COMMAND_FLAG,
+            shm_read_u32(shm as *const SharedBuffer, OFF_COMMAND_FLAG),
+        );
+        shm_write_u32(shm, OFF_TIMER_COMMAND_DIAG, 0xA220);
+        G_TIMER_CMD_ACTIVE.store(0, Ordering::Release);
+        return true;
+    }
+
+    if cmd == CMD_VENDOR_PRICE {
+        shm_write_u32(shm, OFF_TIMER_COMMAND_DIAG, 0xA127);
+        dispatch_vendor_price(shm);
+        shm_write_u32(
+            shm,
+            OFF_TIMER_LAST_STATUS,
+            shm_read_u32(shm as *const SharedBuffer, OFF_STATUS_FLAG),
+        );
+        shm_write_u32(
+            shm,
+            OFF_TIMER_LAST_COMMAND_FLAG,
+            shm_read_u32(shm as *const SharedBuffer, OFF_COMMAND_FLAG),
+        );
+        shm_write_u32(shm, OFF_TIMER_COMMAND_DIAG, 0xA227);
+        G_TIMER_CMD_ACTIVE.store(0, Ordering::Release);
+        return true;
+    }
+
+    if cmd == CMD_DR_PROBE {
+        shm_write_u32(shm, OFF_TIMER_COMMAND_DIAG, 0xA116);
+        dispatch_dr_probe(shm);
+        shm_write_u32(
+            shm,
+            OFF_TIMER_LAST_STATUS,
+            shm_read_u32(shm as *const SharedBuffer, OFF_STATUS_FLAG),
+        );
+        shm_write_u32(
+            shm,
+            OFF_TIMER_LAST_COMMAND_FLAG,
+            shm_read_u32(shm as *const SharedBuffer, OFF_COMMAND_FLAG),
+        );
+        shm_write_u32(shm, OFF_TIMER_COMMAND_DIAG, 0xA216);
+        G_TIMER_CMD_ACTIVE.store(0, Ordering::Release);
+        return true;
+    }
+
+    if cmd == CMD_HWBP_INSTALL {
+        shm_write_u32(shm, OFF_TIMER_COMMAND_DIAG, 0xA106);
+        dispatch_hwbp_install(shm);
+        shm_write_u32(
+            shm,
+            OFF_TIMER_LAST_STATUS,
+            shm_read_u32(shm as *const SharedBuffer, OFF_STATUS_FLAG),
+        );
+        shm_write_u32(
+            shm,
+            OFF_TIMER_LAST_COMMAND_FLAG,
+            shm_read_u32(shm as *const SharedBuffer, OFF_COMMAND_FLAG),
+        );
+        shm_write_u32(shm, OFF_TIMER_COMMAND_DIAG, 0xA206);
+        G_TIMER_CMD_ACTIVE.store(0, Ordering::Release);
+        return true;
+    }
+
+    if cmd == CMD_HWBP_UNINSTALL {
+        shm_write_u32(shm, OFF_TIMER_COMMAND_DIAG, 0xA107);
+        dispatch_hwbp_uninstall(shm);
+        shm_write_u32(
+            shm,
+            OFF_TIMER_LAST_STATUS,
+            shm_read_u32(shm as *const SharedBuffer, OFF_STATUS_FLAG),
+        );
+        shm_write_u32(
+            shm,
+            OFF_TIMER_LAST_COMMAND_FLAG,
+            shm_read_u32(shm as *const SharedBuffer, OFF_COMMAND_FLAG),
+        );
+        shm_write_u32(shm, OFF_TIMER_COMMAND_DIAG, 0xA207);
+        G_TIMER_CMD_ACTIVE.store(0, Ordering::Release);
+        return true;
+    }
+
+    if cmd == CMD_HWBP_VERIFY {
+        shm_write_u32(shm, OFF_TIMER_COMMAND_DIAG, 0xA108);
+        dispatch_hwbp_verify(shm);
+        shm_write_u32(
+            shm,
+            OFF_TIMER_LAST_STATUS,
+            shm_read_u32(shm as *const SharedBuffer, OFF_STATUS_FLAG),
+        );
+        shm_write_u32(
+            shm,
+            OFF_TIMER_LAST_COMMAND_FLAG,
+            shm_read_u32(shm as *const SharedBuffer, OFF_COMMAND_FLAG),
+        );
+        shm_write_u32(shm, OFF_TIMER_COMMAND_DIAG, 0xA208);
+        G_TIMER_CMD_ACTIVE.store(0, Ordering::Release);
+        return true;
+    }
+
+    if cmd == CMD_HWBP_REENUM {
+        shm_write_u32(shm, OFF_TIMER_COMMAND_DIAG, 0xA117);
+        dispatch_hwbp_reenum(shm);
+        shm_write_u32(
+            shm,
+            OFF_TIMER_LAST_STATUS,
+            shm_read_u32(shm as *const SharedBuffer, OFF_STATUS_FLAG),
+        );
+        shm_write_u32(
+            shm,
+            OFF_TIMER_LAST_COMMAND_FLAG,
+            shm_read_u32(shm as *const SharedBuffer, OFF_COMMAND_FLAG),
+        );
+        shm_write_u32(shm, OFF_TIMER_COMMAND_DIAG, 0xA217);
+        G_TIMER_CMD_ACTIVE.store(0, Ordering::Release);
+        return true;
+    }
+
+    if cmd == CMD_ARG_TRACE_INSTALL {
+        shm_write_u32(shm, OFF_TIMER_COMMAND_DIAG, 0xA121);
+        if install_argtrace_hook(shm) {
+            shm_write_u32(shm, OFF_STATUS_FLAG, STATUS_DONE);
+        } else {
+            shm_write_u32(shm, OFF_ERROR_CODE, 0xE221);
+            shm_write_u32(shm, OFF_STATUS_FLAG, STATUS_ERROR);
+        }
+        shm_write_u32(shm, OFF_COMMAND_FLAG, 0);
+        shm_write_u32(
+            shm,
+            OFF_TIMER_LAST_STATUS,
+            shm_read_u32(shm as *const SharedBuffer, OFF_STATUS_FLAG),
+        );
+        shm_write_u32(
+            shm,
+            OFF_TIMER_LAST_COMMAND_FLAG,
+            shm_read_u32(shm as *const SharedBuffer, OFF_COMMAND_FLAG),
+        );
+        shm_write_u32(shm, OFF_TIMER_COMMAND_DIAG, 0xA221);
+        G_TIMER_CMD_ACTIVE.store(0, Ordering::Release);
+        return true;
+    }
+
+    if cmd == CMD_ARG_TRACE_UNINSTALL {
+        shm_write_u32(shm, OFF_TIMER_COMMAND_DIAG, 0xA122);
+        uninstall_argtrace_hook();
+        shm_write_u32(shm, OFF_STATUS_FLAG, STATUS_DONE);
+        shm_write_u32(shm, OFF_COMMAND_FLAG, 0);
+        shm_write_u32(
+            shm,
+            OFF_TIMER_LAST_STATUS,
+            shm_read_u32(shm as *const SharedBuffer, OFF_STATUS_FLAG),
+        );
+        shm_write_u32(
+            shm,
+            OFF_TIMER_LAST_COMMAND_FLAG,
+            shm_read_u32(shm as *const SharedBuffer, OFF_COMMAND_FLAG),
+        );
+        shm_write_u32(shm, OFF_TIMER_COMMAND_DIAG, 0xA222);
+        G_TIMER_CMD_ACTIVE.store(0, Ordering::Release);
+        return true;
+    }
+
+    if cmd == CMD_CAP_SUPPRESS_VENDOR {
+        shm_write_u32(shm, OFF_TIMER_COMMAND_DIAG, 0xA126);
+        let enabled = shm_read_u32(shm as *const SharedBuffer, OFF_PACKET_DATA);
+        if enabled == 0 {
+            G_CAP_SUPPRESS_VENDOR.store(0, Ordering::Relaxed);
+        } else {
+            G_CAP_SUPPRESS_VENDOR.store(1, Ordering::Relaxed);
+        }
+        shm_write_u32(shm, OFF_STATUS_FLAG, STATUS_DONE);
+        shm_write_u32(shm, OFF_COMMAND_FLAG, 0);
+        shm_write_u32(
+            shm,
+            OFF_TIMER_LAST_STATUS,
+            shm_read_u32(shm as *const SharedBuffer, OFF_STATUS_FLAG),
+        );
+        shm_write_u32(
+            shm,
+            OFF_TIMER_LAST_COMMAND_FLAG,
+            shm_read_u32(shm as *const SharedBuffer, OFF_COMMAND_FLAG),
+        );
+        shm_write_u32(shm, OFF_TIMER_COMMAND_DIAG, 0xA226);
+        G_TIMER_CMD_ACTIVE.store(0, Ordering::Release);
+        return true;
+    }
+
+    // Skip-Present shutdown path. Do not call uninstall_present_detour() here:
+    // this callback is itself running from G_TIMER_QUEUE_HANDLE, and deleting
+    // the current timer from inside its own callback can deadlock. Present was
+    // never patched on this path, so restore only the mutations that can exist.
+    if !G_CRASH_VEH_HANDLE.is_null() {
+        RemoveVectoredExceptionHandler(G_CRASH_VEH_HANDLE);
+        G_CRASH_VEH_HANDLE = core::ptr::null_mut();
+        G_CRASH_VEH_INSTALLED = false;
+    }
+    if !G_HWBP_VEH_HANDLE.is_null() {
+        RemoveVectoredExceptionHandler(G_HWBP_VEH_HANDLE);
+        G_HWBP_VEH_HANDLE = core::ptr::null_mut();
+        G_HWBP_INSTALLED = false;
+    }
+    uninstall_game_thread_hook();
+    uninstall_gtc64_hook();
+    uninstall_send_fn_capture_hook();
+    uninstall_argtrace_hook();
+    G_SNAPSHOT_ENABLED = false;
+    G_DUAL_SEND_WRAP = 0;
+    G_TIMER_QUEUE_SHM = core::ptr::null_mut();
+    shm_write_u32(shm, OFF_TIMER_COMMAND_DIAG, 0xA119);
+    shm_write_u32(shm, OFF_STATUS_FLAG, STATUS_DONE);
+    shm_write_u32(shm, OFF_COMMAND_FLAG, 0);
+    G_SHM = core::ptr::null_mut();
+    close_shared_memory_view(shm);
+    G_TIMER_CMD_ACTIVE.store(0, Ordering::Release);
+    true
+}
 
 unsafe extern "system" fn timer_queue_drain(_param: *mut core::ffi::c_void, _fired: BOOL) {
     let shm = G_TIMER_QUEUE_SHM;
     if shm.is_null() {
+        return;
+    }
+    let ticks = shm_read_u32(shm as *const SharedBuffer, OFF_TIMER_QUEUE_TICKS);
+    shm_write_u32(shm, OFF_TIMER_QUEUE_TICKS, ticks.wrapping_add(1));
+    if dispatch_timer_queue_command(shm) {
         return;
     }
     // Fast-path: if every slot is idle, exit without calling into
@@ -2590,10 +3562,10 @@ unsafe extern "system" fn timer_queue_drain(_param: *mut core::ffi::c_void, _fir
 }
 
 unsafe fn install_timer_queue_worker(shm: *mut SharedBuffer) -> bool {
+    G_TIMER_QUEUE_SHM = shm;
     if !G_TIMER_QUEUE_HANDLE.is_null() {
         return true;
     }
-    G_TIMER_QUEUE_SHM = shm;
     let mut timer: HANDLE = core::ptr::null_mut();
     // DueTime=5 ms, Period=5 ms. Under Windows default timer
     // resolution (15.6 ms) this usually coalesces to one fire per
@@ -2617,6 +3589,53 @@ unsafe fn install_timer_queue_worker(shm: *mut SharedBuffer) -> bool {
     true
 }
 
+#[inline(always)]
+unsafe fn resolve_window_thread_id(shm: *mut SharedBuffer) -> DWORD {
+    if shm.is_null() {
+        return 0;
+    }
+    let hwnd = shm_read_u64(shm as *const SharedBuffer, OFF_HWND_D2R) as HWND;
+    if hwnd.is_null() {
+        return 0;
+    }
+    let mut window_pid: DWORD = 0;
+    let window_tid = GetWindowThreadProcessId(hwnd, &mut window_pid);
+    if window_tid == 0 {
+        return 0;
+    }
+    let current_pid = GetCurrentProcessId();
+    if window_pid != 0 && window_pid != current_pid {
+        return 0;
+    }
+    window_tid
+}
+
+#[inline(always)]
+unsafe fn remember_game_thread_id(shm: *mut SharedBuffer, tid: DWORD) {
+    if shm.is_null() || tid == 0 {
+        return;
+    }
+    if shm_read_u32(shm as *const SharedBuffer, OFF_GAME_THREAD_ID) == 0 {
+        shm_write_u32(shm, OFF_GAME_THREAD_ID, tid);
+    }
+}
+
+#[inline(always)]
+unsafe fn resolve_game_thread_id(shm: *mut SharedBuffer) -> DWORD {
+    if shm.is_null() {
+        return 0;
+    }
+    let game_tid = shm_read_u32(shm as *const SharedBuffer, OFF_GAME_THREAD_ID);
+    if game_tid != 0 {
+        return game_tid;
+    }
+    let window_tid = resolve_window_thread_id(shm);
+    if window_tid != 0 {
+        shm_write_u32(shm, OFF_GAME_THREAD_ID, window_tid);
+    }
+    window_tid
+}
+
 unsafe fn dispatch_call_fn_game_thread(shm: *mut SharedBuffer) {
     let p = (shm as *const u8).add(OFF_PACKET_DATA);
     let fn_addr = core::ptr::read_unaligned(p as *const u64);
@@ -2628,7 +3647,7 @@ unsafe fn dispatch_call_fn_game_thread(shm: *mut SharedBuffer) {
         return;
     }
 
-    let game_tid = shm_read_u32(shm as *const SharedBuffer, OFF_GAME_THREAD_ID);
+    let game_tid = resolve_game_thread_id(shm);
 
     // Build shellcode once, reuse on subsequent calls.
     // The shellcode is position-independent; it receives the SHM VA as the
@@ -2645,29 +3664,29 @@ unsafe fn dispatch_call_fn_game_thread(shm: *mut SharedBuffer) {
     //   call rax ; write ret+status ; cleanup ; ret
     if G_APC_SHELLCODE.is_null() {
         let sc: &[u8] = &[
-            0x53,                                           // push rbx
-            0x56,                                           // push rsi
-            0x48, 0x83, 0xEC, 0x38,                         // sub rsp, 0x38
-            0x48, 0x89, 0xCE,                               // mov rsi, rcx
-            0x48, 0x8B, 0x86, 0x00, 0x01, 0x00, 0x00,       // mov rax, [rsi+0x100] (fn_addr)
+            0x53, // push rbx
+            0x56, // push rsi
+            0x48, 0x83, 0xEC, 0x38, // sub rsp, 0x38
+            0x48, 0x89, 0xCE, // mov rsi, rcx
+            0x48, 0x8B, 0x86, 0x00, 0x01, 0x00, 0x00, // mov rax, [rsi+0x100] (fn_addr)
             // load arg4/arg5 first (before we clobber rbx)
-            0x48, 0x8B, 0x9E, 0x30, 0x01, 0x00, 0x00,       // mov rbx, [rsi+0x130] (arg4)
-            0x48, 0x89, 0x5C, 0x24, 0x20,                   // mov [rsp+0x20], rbx
-            0x48, 0x8B, 0x9E, 0x38, 0x01, 0x00, 0x00,       // mov rbx, [rsi+0x138] (arg5)
-            0x48, 0x89, 0x5C, 0x24, 0x28,                   // mov [rsp+0x28], rbx
+            0x48, 0x8B, 0x9E, 0x30, 0x01, 0x00, 0x00, // mov rbx, [rsi+0x130] (arg4)
+            0x48, 0x89, 0x5C, 0x24, 0x20, // mov [rsp+0x20], rbx
+            0x48, 0x8B, 0x9E, 0x38, 0x01, 0x00, 0x00, // mov rbx, [rsi+0x138] (arg5)
+            0x48, 0x89, 0x5C, 0x24, 0x28, // mov [rsp+0x28], rbx
             // now load reg args
-            0x48, 0x8B, 0x8E, 0x10, 0x01, 0x00, 0x00,       // mov rcx, [rsi+0x110] (arg0)
-            0x48, 0x8B, 0x96, 0x18, 0x01, 0x00, 0x00,       // mov rdx, [rsi+0x118] (arg1)
-            0x4C, 0x8B, 0x86, 0x20, 0x01, 0x00, 0x00,       // mov r8,  [rsi+0x120] (arg2)
-            0x4C, 0x8B, 0x8E, 0x28, 0x01, 0x00, 0x00,       // mov r9,  [rsi+0x128] (arg3)
-            0xFF, 0xD0,                                     // call rax
-            0x48, 0x89, 0x86, 0x00, 0x01, 0x00, 0x00,       // mov [rsi+0x100], rax
-            0xC7, 0x46, 0x10, 0x01, 0x00, 0x00, 0x00,       // mov dword [rsi+0x10], 1
-            0xC7, 0x46, 0x0C, 0x00, 0x00, 0x00, 0x00,       // mov dword [rsi+0x0C], 0
-            0x48, 0x83, 0xC4, 0x38,                         // add rsp, 0x38
-            0x5E,                                           // pop rsi
-            0x5B,                                           // pop rbx
-            0xC3,                                           // ret
+            0x48, 0x8B, 0x8E, 0x10, 0x01, 0x00, 0x00, // mov rcx, [rsi+0x110] (arg0)
+            0x48, 0x8B, 0x96, 0x18, 0x01, 0x00, 0x00, // mov rdx, [rsi+0x118] (arg1)
+            0x4C, 0x8B, 0x86, 0x20, 0x01, 0x00, 0x00, // mov r8,  [rsi+0x120] (arg2)
+            0x4C, 0x8B, 0x8E, 0x28, 0x01, 0x00, 0x00, // mov r9,  [rsi+0x128] (arg3)
+            0xFF, 0xD0, // call rax
+            0x48, 0x89, 0x86, 0x00, 0x01, 0x00, 0x00, // mov [rsi+0x100], rax
+            0xC7, 0x46, 0x10, 0x01, 0x00, 0x00, 0x00, // mov dword [rsi+0x10], 1
+            0xC7, 0x46, 0x0C, 0x00, 0x00, 0x00, 0x00, // mov dword [rsi+0x0C], 0
+            0x48, 0x83, 0xC4, 0x38, // add rsp, 0x38
+            0x5E, // pop rsi
+            0x5B, // pop rbx
+            0xC3, // ret
         ];
         let mem = VirtualAlloc(
             core::ptr::null(),
@@ -2687,21 +3706,14 @@ unsafe fn dispatch_call_fn_game_thread(shm: *mut SharedBuffer) {
 
     let shm_va = shm as *mut core::ffi::c_void;
 
-    // Use explicit game_tid from SHM if set, otherwise fall back to window thread.
-    let mut target_tid = game_tid;
-    if target_tid == 0 {
-        let hwnd = shm_read_u64(shm as *const SharedBuffer, OFF_HWND_D2R) as HWND;
-        let mut dummy_pid: DWORD = 0;
-        target_tid = GetWindowThreadProcessId(hwnd, &mut dummy_pid);
-    }
-    if target_tid == 0 {
+    if game_tid == 0 {
         shm_write_u32(shm, OFF_ERROR_CODE, 0xE194);
         shm_write_u32(shm, OFF_STATUS_FLAG, STATUS_ERROR);
         shm_write_u32(shm, OFF_COMMAND_FLAG, 0);
         return;
     }
 
-    let h_thread = OpenThread(0x1FFFFF /* THREAD_ALL_ACCESS */, 0, target_tid);
+    let h_thread = OpenThread(0x1FFFFF /* THREAD_ALL_ACCESS */, 0, game_tid);
     if h_thread.is_null() {
         shm_write_u32(shm, OFF_ERROR_CODE, 0xE196);
         shm_write_u32(shm, OFF_STATUS_FLAG, STATUS_ERROR);
@@ -2755,7 +3767,12 @@ unsafe fn dispatch_write_mem(shm: *mut SharedBuffer) {
     // pages are PAGE_READONLY under Arxan; writing without changing protection
     // causes an AV that crashes rmod.dll (no SEH wrapping the write loop).
     let mut old_prot: u32 = 0;
-    VirtualProtect(dst as _, size, 0x04 /* PAGE_READWRITE */, &mut old_prot);
+    VirtualProtect(
+        dst as _,
+        size,
+        0x04, /* PAGE_READWRITE */
+        &mut old_prot,
+    );
 
     for i in 0..size {
         *dst.add(i) = *src.add(i);
@@ -2802,7 +3819,7 @@ unsafe fn dispatch_dual_via_hijack(shm: *mut SharedBuffer) {
         return;
     }
 
-    let game_tid = shm_read_u32(shm as *const SharedBuffer, OFF_GAME_THREAD_ID);
+    let game_tid = resolve_game_thread_id(shm);
     if game_tid == 0 {
         shm_write_u32(shm, OFF_ERROR_CODE, 0xE232);
         shm_write_u32(shm, OFF_STATUS_FLAG, STATUS_ERROR);
@@ -2829,7 +3846,8 @@ unsafe fn dispatch_dual_via_hijack(shm: *mut SharedBuffer) {
     let gc = GetThreadContext(h, ctx.data.as_mut_ptr() as *mut CONTEXT);
     if gc == 0 {
         shm_write_u32(shm, OFF_ERROR_CODE, 0xE2F0); // GetContext failed
-        ResumeThread(h); CloseHandle(h);
+        ResumeThread(h);
+        CloseHandle(h);
         shm_write_u32(shm, OFF_ERROR_CODE, 0xE234);
         shm_write_u32(shm, OFF_STATUS_FLAG, STATUS_ERROR);
         shm_write_u32(shm, OFF_COMMAND_FLAG, 0);
@@ -2842,57 +3860,108 @@ unsafe fn dispatch_dual_via_hijack(shm: *mut SharedBuffer) {
     // Alloc packet copy + shellcode in one block
     let block = VirtualAlloc(core::ptr::null(), 4096, 0x3000, 0x40) as *mut u8;
     if block.is_null() {
-        ResumeThread(h); CloseHandle(h);
+        ResumeThread(h);
+        CloseHandle(h);
         shm_write_u32(shm, OFF_ERROR_CODE, 0xE235);
         shm_write_u32(shm, OFF_STATUS_FLAG, STATUS_ERROR);
         shm_write_u32(shm, OFF_COMMAND_FLAG, 0);
         return;
     }
 
-    // Layout: [0..512] = packet data, [512..] = shellcode
+    // Layout: [0..512] = packet data, [512..] = shellcode, [end] = private stack.
+    //
+    // Important: do not run this on the victim thread's current stack. Earlier
+    // versions aligned orig_rsp-8 and jumped back without restoring RSP, which
+    // corrupts the interrupted frame after dual_send_wrap returns. Use the same
+    // shape as the proven Go send_fn hijack path: private aligned stack, full
+    // register/flags save, restore original RSP just before jumping back.
     let pkt = block;
     let sc = block.add(512);
+    let stack_top = ((block as usize + 4096 - 0x10) & !0xF) as u64;
     core::ptr::copy_nonoverlapping((shm as *const u8).add(OFF_PACKET_DATA), pkt, size as usize);
 
     let mut w = ThunkWriter { buf: sc, offset: 0 };
 
-    // Save ALL registers we'll clobber
-    w.emit(&[0x53]);                         // push rbx
-    w.emit(&[0x48, 0x83, 0xEC, 0x28]);       // sub rsp, 0x28 (shadow + align)
+    // Save flags + all GP registers before entering D2R code.
+    w.emit(&[0x9C]); // pushfq
+    w.emit(&[0x50, 0x51, 0x52, 0x53, 0x55, 0x56, 0x57]); // rax..rdi
+    w.emit(&[
+        0x41, 0x50, // push r8
+        0x41, 0x51, // push r9
+        0x41, 0x52, // push r10
+        0x41, 0x53, // push r11
+        0x41, 0x54, // push r12
+        0x41, 0x55, // push r13
+        0x41, 0x56, // push r14
+        0x41, 0x57, // push r15
+    ]);
+    w.emit(&[0x48, 0x83, 0xEC, 0x20]); // shadow space; RSP is 16-byte aligned
 
     let shm_cmd_addr = (shm as usize + OFF_COMMAND_FLAG) as u64;
     let shm_status_addr = (shm as usize + OFF_STATUS_FLAG) as u64;
     let shm_error_addr = (shm as usize + OFF_ERROR_CODE) as u64;
 
     // CANARY: write 0xBEEF to error_code to prove shellcode executed
-    w.emit(&[0x48, 0xBB]); w.emit(&shm_error_addr.to_le_bytes());
-    w.emit(&[0xC7, 0x03, 0xEF, 0xBE, 0x00, 0x00]);  // mov dword [rbx], 0xBEEF
+    w.emit(&[0x48, 0xBB]);
+    w.emit(&shm_error_addr.to_le_bytes());
+    w.emit(&[0xC7, 0x03, 0xEF, 0xBE, 0x00, 0x00]); // mov dword [rbx], 0xBEEF
 
     // Clear command flag (before dual_send_wrap, so SHM won't re-dispatch)
-    w.emit(&[0x48, 0xBB]); w.emit(&shm_cmd_addr.to_le_bytes());
+    w.emit(&[0x48, 0xBB]);
+    w.emit(&shm_cmd_addr.to_le_bytes());
     w.emit(&[0xC7, 0x03, 0x00, 0x00, 0x00, 0x00]);
 
-    // Call dual_send_wrap(rcx=pkt, edx=size)
-    w.emit(&[0x48, 0xB9]); w.emit(&(pkt as u64).to_le_bytes());
-    w.emit(&[0xBA]); w.emit(&(size as u32).to_le_bytes());
-    w.emit(&[0x48, 0xB8]); w.emit(&(dual_fn as u64).to_le_bytes());
+    // Call dual_send_wrap(rcx=pkt, edx=size).
+    //
+    // D2R's dual wrapper intentionally byte-rotates the first byte at its
+    // caller return address. If that byte is the normal continuation prefix
+    // (usually 0x48), our injected code is corrupted before it resumes. Land
+    // on `FF 25 00 00 00 00 <cont_addr>` instead: 0xFF is invariant under
+    // ROL3 and the jump target is memory-immediate, so this does not depend on
+    // any register surviving the obfuscated wrapper.
+    w.emit(&[0x48, 0xB9]);
+    w.emit(&(pkt as u64).to_le_bytes());
+    w.emit(&[0xBA]);
+    w.emit(&(size as u32).to_le_bytes());
+    let cont_addr = sc as u64 + w.offset as u64 + 10 + 2 + 6 + 8;
+    w.emit(&[0x48, 0xB8]);
+    w.emit(&(dual_fn as u64).to_le_bytes());
     w.emit(&[0xFF, 0xD0]);
+    w.emit(&[0xFF, 0x25, 0x00, 0x00, 0x00, 0x00]); // return landing: jmp qword ptr [rip]
+    w.emit(&cont_addr.to_le_bytes());
 
     // Set STATUS_DONE
-    w.emit(&[0x48, 0xBB]); w.emit(&shm_status_addr.to_le_bytes());
+    w.emit(&[0x48, 0xBB]);
+    w.emit(&shm_status_addr.to_le_bytes());
     w.emit(&[0xC7, 0x03, 0x01, 0x00, 0x00, 0x00]);
 
-    // Restore
-    w.emit(&[0x48, 0x83, 0xC4, 0x28]);
-    w.emit(&[0x5B]);
+    // Restore registers and flags exactly as they were before the hijack.
+    w.emit(&[0x48, 0x83, 0xC4, 0x20]);
+    w.emit(&[
+        0x41, 0x5F, // pop r15
+        0x41, 0x5E, // pop r14
+        0x41, 0x5D, // pop r13
+        0x41, 0x5C, // pop r12
+        0x41, 0x5B, // pop r11
+        0x41, 0x5A, // pop r10
+        0x41, 0x59, // pop r9
+        0x41, 0x58, // pop r8
+    ]);
+    w.emit(&[0x5F, 0x5E, 0x5D, 0x5B, 0x5A, 0x59, 0x58]); // rdi..rax
+    w.emit(&[0x9D]); // popfq
+
+    // Restore the interrupted stack pointer before returning to D2R.
+    w.emit(&[0x48, 0xBC]); // mov rsp, orig_rsp
+    w.emit(&orig_rsp.to_le_bytes());
 
     // Jump back to original RIP
-    w.emit(&[0x48, 0xB8]); w.emit(&orig_rip.to_le_bytes());         // mov rax, orig_rip
-    w.emit(&[0xFF, 0xE0]);                                           // jmp rax
+    w.emit(&[0x48, 0xB8]);
+    w.emit(&orig_rip.to_le_bytes()); // mov rax, orig_rip
+    w.emit(&[0xFF, 0xE0]); // jmp rax
 
-    // Hijack: set RIP to shellcode, align RSP
+    // Hijack: set RIP to shellcode and use our private stack.
     ctx.set_rip(sc as u64);
-    ctx.set_rsp((orig_rsp & !0xF) - 8);
+    ctx.set_rsp(stack_top);
 
     let stc = SetThreadContext(h, ctx.data.as_ptr() as *const CONTEXT);
     if stc == 0 {
@@ -2901,7 +3970,8 @@ unsafe fn dispatch_dual_via_hijack(shm: *mut SharedBuffer) {
         ctx.set_rip(orig_rip);
         ctx.set_rsp(orig_rsp);
         SetThreadContext(h, ctx.data.as_ptr() as *const CONTEXT);
-        ResumeThread(h); CloseHandle(h);
+        ResumeThread(h);
+        CloseHandle(h);
         shm_write_u32(shm, OFF_STATUS_FLAG, STATUS_ERROR);
         shm_write_u32(shm, OFF_COMMAND_FLAG, 0);
         return;
@@ -2951,6 +4021,627 @@ unsafe fn dispatch_post_key(shm: *mut SharedBuffer) {
     shm_write_u32(shm, OFF_COMMAND_FLAG, 0);
 }
 
+unsafe fn dispatch_post_move(shm: *mut SharedBuffer) {
+    let hwnd = shm_read_u64(shm as *const SharedBuffer, OFF_HWND_D2R) as HWND;
+    if hwnd.is_null() {
+        shm_write_u32(shm, OFF_ERROR_CODE, 0xE225);
+        shm_write_u32(shm, OFF_STATUS_FLAG, STATUS_ERROR);
+        shm_write_u32(shm, OFF_COMMAND_FLAG, 0);
+        return;
+    }
+
+    let pkt = (shm as *const u8).add(OFF_PACKET_DATA);
+    let x = core::ptr::read_unaligned(pkt as *const u32) as usize;
+    let y = core::ptr::read_unaligned(pkt.add(4) as *const u32) as usize;
+    let send_fn = shm_read_u64(shm as *const SharedBuffer, OFF_FN_SEND_PACKET) as usize;
+
+    const WM_MOUSEMOVE: u32 = 0x0200;
+    const WM_NCHITTEST: u32 = 0x0084;
+    const WM_SETCURSOR: u32 = 0x0020;
+    let (client_msg_x, client_msg_y) = d2r_client_from_logical(hwnd, x as i32, y as i32);
+    let lparam = (((client_msg_y as usize) & 0xFFFF) << 16) | ((client_msg_x as usize) & 0xFFFF);
+
+    if send_fn >= 0x146600 {
+        let base = send_fn - 0x146600;
+        let cursor_fn = base + 0x15E400;
+        let cursor_notify_fn = base + 0x1602C0;
+        let mouse_xy = base + 0x1EC3BB8;
+        let mouse_dirty = base + 0x1EC3BB4;
+        type FnSetCursor = unsafe extern "C" fn(i32, i32);
+        let set_cursor: FnSetCursor = core::mem::transmute(cursor_fn);
+        // Go passes D2R logical 800x600 UI coordinates here. Do not convert
+        // them through the current window size again, or inventory hovers land
+        // on the wrong panel in scaled/letterboxed windows.
+        set_cursor(x as i32, y as i32);
+
+        let got_x = core::ptr::read_unaligned(mouse_xy as *const u32);
+        let got_y = core::ptr::read_unaligned((mouse_xy + 4) as *const u32);
+        let dirty = core::ptr::read_unaligned(mouse_dirty as *const u8) as u32;
+        let out = (shm as *mut u8).add(OFF_PACKET_DATA);
+        core::ptr::write_unaligned(out.add(0x08) as *mut u32, got_x);
+        core::ptr::write_unaligned(out.add(0x0C) as *mut u32, got_y);
+        shm_write_u64(shm, OFF_PACKET_DATA + 0x10, cursor_fn as u64);
+        shm_write_u64(shm, OFF_PACKET_DATA + 0x18, mouse_xy as u64);
+        core::ptr::write_unaligned(out.add(0x20) as *mut u32, dirty);
+        shm_write_u64(shm, OFF_PACKET_DATA + 0x28, cursor_notify_fn as u64);
+        shm_write_u64(shm, OFF_PACKET_DATA + 0x40, (base + 0x1DFB080) as u64);
+    }
+
+    let mut pt = POINT {
+        x: client_msg_x,
+        y: client_msg_y,
+    };
+    if ClientToScreen(hwnd, &mut pt as *mut POINT) != 0 {
+        let screen_lparam = (((pt.y as usize) & 0xFFFF) << 16) | ((pt.x as usize) & 0xFFFF);
+        SendMessageW(hwnd, WM_NCHITTEST, 0, screen_lparam);
+    } else {
+        SendMessageW(hwnd, WM_NCHITTEST, 0, lparam);
+    }
+    SendMessageW(hwnd, WM_SETCURSOR, hwnd as usize, 0x2010001);
+    SendMessageW(hwnd, WM_MOUSEMOVE, 0, lparam);
+
+    if send_fn >= 0x146600 {
+        let base = send_fn - 0x146600;
+        let cursor_fn = base + 0x15E400;
+        let mouse_xy = base + 0x1EC3BB8;
+        let mouse_dirty = base + 0x1EC3BB4;
+        let hover = base + 0x1DFB080;
+        let selection_key = base + 0x1EAA3D4;
+        type FnSetCursor = unsafe extern "C" fn(i32, i32);
+        let set_cursor: FnSetCursor = core::mem::transmute(cursor_fn);
+        set_cursor(x as i32, y as i32);
+        let got_x = core::ptr::read_unaligned(mouse_xy as *const u32);
+        let got_y = core::ptr::read_unaligned((mouse_xy + 4) as *const u32);
+        let dirty = core::ptr::read_unaligned(mouse_dirty as *const u8) as u32;
+        let hover_flag = core::ptr::read_unaligned(hover as *const u16) as u32;
+        let hover_type = core::ptr::read_unaligned((hover + 0x04) as *const u32);
+        let hover_gid = core::ptr::read_unaligned((hover + 0x08) as *const u32);
+        let sel = core::ptr::read_unaligned(selection_key as *const u32);
+        let out = (shm as *mut u8).add(OFF_PACKET_DATA);
+        core::ptr::write_unaligned(out.add(0x08) as *mut u32, got_x);
+        core::ptr::write_unaligned(out.add(0x0C) as *mut u32, got_y);
+        core::ptr::write_unaligned(out.add(0x20) as *mut u32, dirty);
+        core::ptr::write_unaligned(out.add(0x30) as *mut u32, sel);
+        core::ptr::write_unaligned(out.add(0x34) as *mut u32, hover_flag);
+        core::ptr::write_unaligned(out.add(0x38) as *mut u32, hover_type);
+        core::ptr::write_unaligned(out.add(0x3C) as *mut u32, hover_gid);
+        shm_write_u64(shm, OFF_PACKET_DATA + 0x40, hover as u64);
+        core::ptr::write_unaligned(out.add(0x48) as *mut u32, 1);
+    }
+
+    shm_write_u32(shm, OFF_STATUS_FLAG, STATUS_DONE);
+    shm_write_u32(shm, OFF_COMMAND_FLAG, 0);
+}
+
+unsafe fn d2r_logical_cursor_from_client(hwnd: HWND, client_x: i32, client_y: i32) -> (i32, i32) {
+    let mut rect = RECT {
+        left: 0,
+        top: 0,
+        right: 0,
+        bottom: 0,
+    };
+    if GetClientRect(hwnd, &mut rect as *mut RECT) == 0 {
+        return (clamp_i32(client_x, 0, 799), clamp_i32(client_y, 0, 599));
+    }
+
+    let width = rect.right - rect.left;
+    let height = rect.bottom - rect.top;
+    if width <= 0 || height <= 0 {
+        return (clamp_i32(client_x, 0, 799), clamp_i32(client_y, 0, 599));
+    }
+
+    let mut render_w = width;
+    let mut render_h = width * 3 / 4;
+    let mut off_x = 0;
+    let mut off_y = (height - render_h) / 2;
+    if render_h > height {
+        render_h = height;
+        render_w = height * 4 / 3;
+        off_x = (width - render_w) / 2;
+        off_y = 0;
+    }
+    if render_w <= 0 || render_h <= 0 {
+        return (clamp_i32(client_x, 0, 799), clamp_i32(client_y, 0, 599));
+    }
+
+    let lx = ((client_x - off_x) * 800) / render_w;
+    let ly = ((client_y - off_y) * 600) / render_h;
+    (clamp_i32(lx, 0, 799), clamp_i32(ly, 0, 599))
+}
+
+fn clamp_i32(v: i32, lo: i32, hi: i32) -> i32 {
+    if v < lo {
+        lo
+    } else if v > hi {
+        hi
+    } else {
+        v
+    }
+}
+
+unsafe fn d2r_client_from_logical(hwnd: HWND, logical_x: i32, logical_y: i32) -> (i32, i32) {
+    let mut rect = RECT {
+        left: 0,
+        top: 0,
+        right: 0,
+        bottom: 0,
+    };
+    if GetClientRect(hwnd, &mut rect as *mut RECT) == 0 {
+        return (logical_x, logical_y);
+    }
+
+    let width = rect.right - rect.left;
+    let height = rect.bottom - rect.top;
+    if width <= 0 || height <= 0 {
+        return (logical_x, logical_y);
+    }
+
+    let mut render_w = width;
+    let mut render_h = width * 3 / 4;
+    let mut off_x = 0;
+    let mut off_y = (height - render_h) / 2;
+    if render_h > height {
+        render_h = height;
+        render_w = height * 4 / 3;
+        off_x = (width - render_w) / 2;
+        off_y = 0;
+    }
+    if render_w <= 0 || render_h <= 0 {
+        return (logical_x, logical_y);
+    }
+
+    let cx = off_x + (logical_x * render_w) / 800;
+    let cy = off_y + (logical_y * render_h) / 600;
+    (clamp_i32(cx, 0, width - 1), clamp_i32(cy, 0, height - 1))
+}
+
+unsafe fn dispatch_set_d2r_cursor(shm: *mut SharedBuffer) {
+    let send_fn = shm_read_u64(shm as *const SharedBuffer, OFF_FN_SEND_PACKET) as usize;
+    if send_fn < 0x146600 {
+        shm_write_u32(shm, OFF_ERROR_CODE, 0xE226);
+        shm_write_u32(shm, OFF_STATUS_FLAG, STATUS_ERROR);
+        shm_write_u32(shm, OFF_COMMAND_FLAG, 0);
+        return;
+    }
+
+    let pkt = (shm as *const u8).add(OFF_PACKET_DATA);
+    let x = core::ptr::read_unaligned(pkt as *const u32) as i32;
+    let y = core::ptr::read_unaligned(pkt.add(4) as *const u32) as i32;
+    let cursor_fn = send_fn - 0x146600 + 0x15E400;
+    let cursor_notify_fn = send_fn - 0x146600 + 0x1602C0;
+    let mouse_xy = send_fn - 0x146600 + 0x1EC3BB8;
+    let mouse_dirty = send_fn - 0x146600 + 0x1EC3BB4;
+
+    type FnSetCursor = unsafe extern "C" fn(i32, i32);
+    let set_cursor: FnSetCursor = core::mem::transmute(cursor_fn);
+    set_cursor(x, y);
+
+    let got_x = core::ptr::read_unaligned(mouse_xy as *const u32);
+    let got_y = core::ptr::read_unaligned((mouse_xy + 4) as *const u32);
+    let dirty = core::ptr::read_unaligned(mouse_dirty as *const u8) as u32;
+    let out = (shm as *mut u8).add(OFF_PACKET_DATA);
+    core::ptr::write_unaligned(out.add(0x08) as *mut u32, got_x);
+    core::ptr::write_unaligned(out.add(0x0C) as *mut u32, got_y);
+    shm_write_u64(shm, OFF_PACKET_DATA + 0x10, cursor_fn as u64);
+    shm_write_u64(shm, OFF_PACKET_DATA + 0x18, mouse_xy as u64);
+    core::ptr::write_unaligned(out.add(0x20) as *mut u32, dirty);
+    shm_write_u64(shm, OFF_PACKET_DATA + 0x28, cursor_notify_fn as u64);
+    let hover = send_fn - 0x146600 + 0x1DFB080;
+    let hover_flag = core::ptr::read_unaligned(hover as *const u16) as u32;
+    let hover_type = core::ptr::read_unaligned((hover + 0x04) as *const u32);
+    let hover_gid = core::ptr::read_unaligned((hover + 0x08) as *const u32);
+    core::ptr::write_unaligned(out.add(0x34) as *mut u32, hover_flag);
+    core::ptr::write_unaligned(out.add(0x38) as *mut u32, hover_type);
+    core::ptr::write_unaligned(out.add(0x3C) as *mut u32, hover_gid);
+    shm_write_u64(shm, OFF_PACKET_DATA + 0x40, hover as u64);
+
+    shm_write_u32(shm, OFF_STATUS_FLAG, STATUS_DONE);
+    shm_write_u32(shm, OFF_COMMAND_FLAG, 0);
+}
+
+unsafe fn dispatch_vendor_price(shm: *mut SharedBuffer) {
+    let send_fn = shm_read_u64(shm as *const SharedBuffer, OFF_FN_SEND_PACKET) as usize;
+    if send_fn < 0x146600 {
+        shm_write_u32(shm, OFF_ERROR_CODE, 0xE260);
+        shm_write_u32(shm, OFF_STATUS_FLAG, STATUS_ERROR);
+        shm_write_u32(shm, OFF_COMMAND_FLAG, 0);
+        return;
+    }
+
+    let pkt = (shm as *const u8).add(OFF_PACKET_DATA);
+    let item_ptr = core::ptr::read_unaligned(pkt as *const u64) as usize;
+    let merchant_ptr = core::ptr::read_unaligned(pkt.add(8) as *const u64) as usize;
+    let player_ptr = core::ptr::read_unaligned(pkt.add(0x40) as *const u64) as usize;
+    let requested_mode = core::ptr::read_unaligned(pkt.add(0x48) as *const u32) as i32;
+    let requested_diff = core::ptr::read_unaligned(pkt.add(0x4C) as *const u32) as i32;
+    let requested_ctx = core::ptr::read_unaligned(pkt.add(0x50) as *const u64) as usize;
+    let requested_npc = core::ptr::read_unaligned(pkt.add(0x58) as *const u32) as i32;
+    if item_ptr < 0x10000000000 {
+        shm_write_u32(shm, OFF_ERROR_CODE, 0xE261);
+        shm_write_u32(shm, OFF_STATUS_FLAG, STATUS_ERROR);
+        shm_write_u32(shm, OFF_COMMAND_FLAG, 0);
+        return;
+    }
+    if core::ptr::read_unaligned(item_ptr as *const u32) != 4 {
+        shm_write_u32(shm, OFF_ERROR_CODE, 0xE262);
+        shm_write_u32(shm, OFF_STATUS_FLAG, STATUS_ERROR);
+        shm_write_u32(shm, OFF_COMMAND_FLAG, 0);
+        return;
+    }
+
+    let base = send_fn - 0x146600;
+    let record_fn = base + 0x258B90;
+    let value_fn = base + 0x291940;
+    let stat_fn = base + 0x251D30;
+    let item_cost_fn = base + 0x26DDD0;
+
+    type FnRecord = unsafe extern "C" fn(u8, u32) -> usize;
+    type FnValue = unsafe extern "C" fn(usize, usize, usize, i32) -> i32;
+    type FnStat = unsafe extern "C" fn(usize, u32) -> i32;
+    type FnItemCost = unsafe extern "C" fn(usize, usize, i32, usize, i32, i32) -> u64;
+
+    let get_record: FnRecord = core::mem::transmute(record_fn);
+    let select_value: FnValue = core::mem::transmute(value_fn);
+    let get_stat: FnStat = core::mem::transmute(stat_fn);
+    let item_cost: FnItemCost = core::mem::transmute(item_cost_fn);
+    let price_context = merchant_ptr;
+    if price_context < 0x10000000000 {
+        shm_write_u32(shm, OFF_ERROR_CODE, 0xE264);
+        shm_write_u32(shm, OFF_STATUS_FLAG, STATUS_ERROR);
+        shm_write_u32(shm, OFF_COMMAND_FLAG, 0);
+        return;
+    }
+
+    let difficulty = core::ptr::read_unaligned((item_ptr + 0x1BD) as *const u8);
+    let txt_id = core::ptr::read_unaligned((item_ptr + 0x04) as *const u32);
+    let record = get_record(difficulty, txt_id);
+    if record == 0 {
+        shm_write_u32(shm, OFF_ERROR_CODE, 0xE263);
+        shm_write_u32(shm, OFF_STATUS_FLAG, STATUS_ERROR);
+        shm_write_u32(shm, OFF_COMMAND_FLAG, 0);
+        return;
+    }
+
+    let rate_a = core::ptr::read_unaligned((record + 0x11A) as *const u16) as i64;
+    let rate_b = core::ptr::read_unaligned((record + 0x11C) as *const u16) as i64;
+    let mode_value = select_value(price_context, item_ptr, 0, 6) as i64;
+    let stat_5b = get_stat(item_ptr, 0x5B) as i64;
+    let value = mode_value + stat_5b;
+
+    let item_data = core::ptr::read_unaligned((item_ptr + 0x10) as *const usize);
+    let discounted = item_data >= 0x10000000000
+        && (core::ptr::read_unaligned((item_data + 0x18) as *const u32) & 0x400000) != 0;
+
+    let price_a = vendor_native_price_from_rate(value, rate_a, discounted);
+    let price_b = vendor_native_price_from_rate(value, rate_b, discounted);
+
+    let npc_txt_id = if requested_npc >= 0 {
+        requested_npc
+    } else if merchant_ptr >= 0x10000000000 {
+        core::ptr::read_unaligned((merchant_ptr + 0x04) as *const u32) as i32
+    } else {
+        0
+    };
+    let cost_diff = if requested_diff >= 0 {
+        requested_diff
+    } else {
+        difficulty as i32
+    };
+    let cost_ctx = if requested_ctx >= 0x10000000000 {
+        requested_ctx
+    } else {
+        core::ptr::read_unaligned((base + 0x1EC3D58) as *const usize)
+    };
+    let mut native_cost: u32 = 0;
+    let mut native_cost_hi: u32 = 0;
+    if player_ptr >= 0x10000000000 && npc_txt_id > 0 && requested_mode >= 0 {
+        let raw = item_cost(
+            player_ptr,
+            item_ptr,
+            cost_diff,
+            cost_ctx,
+            npc_txt_id,
+            requested_mode,
+        );
+        native_cost = raw as u32;
+        native_cost_hi = (raw >> 32) as u32;
+    }
+
+    let out = (shm as *mut u8).add(OFF_PACKET_DATA);
+    core::ptr::write_unaligned(out.add(0x00) as *mut u32, price_a);
+    core::ptr::write_unaligned(out.add(0x04) as *mut u32, price_b);
+    core::ptr::write_unaligned(out.add(0x08) as *mut i32, value as i32);
+    core::ptr::write_unaligned(out.add(0x0C) as *mut u32, rate_a as u32);
+    core::ptr::write_unaligned(out.add(0x10) as *mut u32, rate_b as u32);
+    core::ptr::write_unaligned(out.add(0x14) as *mut i32, mode_value as i32);
+    core::ptr::write_unaligned(out.add(0x18) as *mut i32, stat_5b as i32);
+    core::ptr::write_unaligned(out.add(0x1C) as *mut u32, txt_id);
+    core::ptr::write_unaligned(out.add(0x20) as *mut u32, difficulty as u32);
+    shm_write_u64(shm, OFF_PACKET_DATA + 0x28, record as u64);
+    shm_write_u64(shm, OFF_PACKET_DATA + 0x30, price_context as u64);
+    core::ptr::write_unaligned(out.add(0x38) as *mut i32, -1);
+    core::ptr::write_unaligned(out.add(0x3C) as *mut u32, native_cost);
+    shm_write_u64(shm, OFF_PACKET_DATA + 0x40, player_ptr as u64);
+    core::ptr::write_unaligned(out.add(0x48) as *mut i32, requested_mode);
+    core::ptr::write_unaligned(out.add(0x4C) as *mut i32, cost_diff);
+    shm_write_u64(shm, OFF_PACKET_DATA + 0x50, cost_ctx as u64);
+    core::ptr::write_unaligned(out.add(0x58) as *mut i32, npc_txt_id);
+    core::ptr::write_unaligned(out.add(0x5C) as *mut u32, native_cost_hi);
+    shm_write_u64(shm, OFF_PACKET_DATA + 0x60, item_cost_fn as u64);
+
+    shm_write_u32(shm, OFF_STATUS_FLAG, STATUS_DONE);
+    shm_write_u32(shm, OFF_COMMAND_FLAG, 0);
+}
+
+fn vendor_native_price_from_rate(value: i64, rate: i64, discounted: bool) -> u32 {
+    if value <= 0 || rate <= 0 {
+        return 0;
+    }
+    let mut variable = (value * rate) / 100;
+    if discounted {
+        variable -= 10;
+    }
+    let price = rate + variable;
+    if price <= 0 {
+        0
+    } else if price > u32::MAX as i64 {
+        u32::MAX
+    } else {
+        price as u32
+    }
+}
+
+unsafe fn run_d2r_hover_resolver_on_current_thread(shm: *mut SharedBuffer, x: u32, y: u32) -> u32 {
+    let send_fn = shm_read_u64(shm as *const SharedBuffer, OFF_FN_SEND_PACKET) as usize;
+    if send_fn < 0x146600 {
+        return 0xE227;
+    }
+
+    let base = send_fn - 0x146600;
+    let cursor_notify_fn = base + 0x1602C0;
+    let mouse_xy = base + 0x1EC3BB8;
+    let mouse_dirty = base + 0x1EC3BB4;
+    let panel_manager_global = base + 0x1EDF6F8;
+    let hover_resolver_fn = base + 0x1A4F70;
+    let selection_key = base + 0x1EAA3D4;
+
+    core::ptr::write_volatile(mouse_xy as *mut u32, x);
+    core::ptr::write_volatile((mouse_xy + 4) as *mut u32, y);
+    core::ptr::write_volatile(mouse_dirty as *mut u8, 1);
+
+    type FnCursorNotify = unsafe extern "C" fn();
+    let notify: FnCursorNotify = core::mem::transmute(cursor_notify_fn);
+    notify();
+
+    let panel_manager = core::ptr::read_unaligned(panel_manager_global as *const usize);
+    if panel_manager == 0 {
+        return 0xE228;
+    }
+
+    // Event object only needs qword +8 for this resolver path. The constant is
+    // the same hover/mouse event discriminator compared at base+0x1A4FD2.
+    let event: [u64; 2] = [0, 0xBDF8_DAFF_2E44_666F];
+    type FnHoverResolver = unsafe extern "C" fn(usize, *const u64);
+    let resolve: FnHoverResolver = core::mem::transmute(hover_resolver_fn);
+    resolve(panel_manager, event.as_ptr());
+
+    let got_x = core::ptr::read_unaligned(mouse_xy as *const u32);
+    let got_y = core::ptr::read_unaligned((mouse_xy + 4) as *const u32);
+    let dirty = core::ptr::read_unaligned(mouse_dirty as *const u8) as u32;
+    let sel = core::ptr::read_unaligned(selection_key as *const u32);
+    let out = (shm as *mut u8).add(OFF_PACKET_DATA);
+    core::ptr::write_unaligned(out.add(0x08) as *mut u32, got_x);
+    core::ptr::write_unaligned(out.add(0x0C) as *mut u32, got_y);
+    shm_write_u64(shm, OFF_PACKET_DATA + 0x10, hover_resolver_fn as u64);
+    shm_write_u64(shm, OFF_PACKET_DATA + 0x18, mouse_xy as u64);
+    core::ptr::write_unaligned(out.add(0x20) as *mut u32, dirty);
+    shm_write_u64(shm, OFF_PACKET_DATA + 0x28, panel_manager as u64);
+    core::ptr::write_unaligned(out.add(0x30) as *mut u32, sel);
+    let hover = base + 0x1DFB080;
+    let hover_flag = core::ptr::read_unaligned(hover as *const u16) as u32;
+    let hover_type = core::ptr::read_unaligned((hover + 0x04) as *const u32);
+    let hover_gid = core::ptr::read_unaligned((hover + 0x08) as *const u32);
+    core::ptr::write_unaligned(out.add(0x34) as *mut u32, hover_flag);
+    core::ptr::write_unaligned(out.add(0x38) as *mut u32, hover_type);
+    core::ptr::write_unaligned(out.add(0x3C) as *mut u32, hover_gid);
+    shm_write_u64(shm, OFF_PACKET_DATA + 0x40, hover as u64);
+    core::ptr::write_unaligned(out.add(0x48) as *mut u32, 2);
+
+    0
+}
+
+unsafe extern "system" fn rmod_hover_wndproc(
+    hwnd: HWND,
+    msg: UINT,
+    wparam: WPARAM,
+    lparam: LPARAM,
+) -> LRESULT {
+    if msg == WM_RMOD_RESOLVE_HOVER {
+        let shm = G_SHM;
+        if shm.is_null() {
+            return 0;
+        }
+        let err = run_d2r_hover_resolver_on_current_thread(shm, wparam as u32, lparam as u32);
+        if err != 0 {
+            shm_write_u32(shm, OFF_ERROR_CODE, err);
+            return 0;
+        }
+        return 1;
+    }
+    let prev = G_HOVER_ORIG_WNDPROC;
+    if prev != 0 {
+        return CallWindowProcW(prev, hwnd, msg, wparam, lparam);
+    }
+    DefWindowProcW(hwnd, msg, wparam, lparam)
+}
+
+unsafe fn dispatch_resolve_d2r_hover(shm: *mut SharedBuffer) {
+    let hwnd = shm_read_u64(shm as *const SharedBuffer, OFF_HWND_D2R) as HWND;
+    if hwnd.is_null() {
+        shm_write_u32(shm, OFF_ERROR_CODE, 0xE229);
+        shm_write_u32(shm, OFF_STATUS_FLAG, STATUS_ERROR);
+        shm_write_u32(shm, OFF_COMMAND_FLAG, 0);
+        return;
+    }
+
+    let pkt = (shm as *const u8).add(OFF_PACKET_DATA);
+    let x = core::ptr::read_unaligned(pkt as *const u32);
+    let y = core::ptr::read_unaligned(pkt.add(4) as *const u32);
+
+    let prev = SetWindowLongPtrW(hwnd, GWLP_WNDPROC, rmod_hover_wndproc as isize);
+    if prev == 0 {
+        shm_write_u32(shm, OFF_ERROR_CODE, 0xE22A);
+        shm_write_u32(shm, OFF_STATUS_FLAG, STATUS_ERROR);
+        shm_write_u32(shm, OFF_COMMAND_FLAG, 0);
+        return;
+    }
+    G_HOVER_ORIG_WNDPROC = prev;
+    let result = SendMessageW(hwnd, WM_RMOD_RESOLVE_HOVER, x as usize, y as usize);
+    SetWindowLongPtrW(hwnd, GWLP_WNDPROC, prev);
+    G_HOVER_ORIG_WNDPROC = 0;
+
+    if result != 1 {
+        if shm_read_u32(shm as *const SharedBuffer, OFF_ERROR_CODE) == 0 {
+            shm_write_u32(shm, OFF_ERROR_CODE, 0xE22B);
+        }
+        shm_write_u32(shm, OFF_STATUS_FLAG, STATUS_ERROR);
+        shm_write_u32(shm, OFF_COMMAND_FLAG, 0);
+        return;
+    }
+
+    shm_write_u32(shm, OFF_STATUS_FLAG, STATUS_DONE);
+    shm_write_u32(shm, OFF_COMMAND_FLAG, 0);
+}
+
+unsafe fn dispatch_post_click(shm: *mut SharedBuffer) {
+    let hwnd = shm_read_u64(shm as *const SharedBuffer, OFF_HWND_D2R) as HWND;
+    if hwnd.is_null() {
+        shm_write_u32(shm, OFF_ERROR_CODE, 0xE220);
+        shm_write_u32(shm, OFF_STATUS_FLAG, STATUS_ERROR);
+        shm_write_u32(shm, OFF_COMMAND_FLAG, 0);
+        return;
+    }
+
+    let pkt = (shm as *const u8).add(OFF_PACKET_DATA);
+    let x = core::ptr::read_unaligned(pkt as *const u32) as usize;
+    let y = core::ptr::read_unaligned(pkt.add(4) as *const u32) as usize;
+    let btn = *pkt.add(8);
+    let lparam = ((y & 0xFFFF) << 16) | (x & 0xFFFF);
+
+    const WM_MOUSEMOVE: u32 = 0x0200;
+    const WM_NCHITTEST: u32 = 0x0084;
+    const WM_SETCURSOR: u32 = 0x0020;
+    const WM_KEYDOWN: u32 = 0x0100;
+    const WM_KEYUP: u32 = 0x0101;
+    const WM_LBUTTONDOWN: u32 = 0x0201;
+    const WM_LBUTTONUP: u32 = 0x0202;
+    const WM_RBUTTONDOWN: u32 = 0x0204;
+    const WM_RBUTTONUP: u32 = 0x0205;
+    const WM_MBUTTONDOWN: u32 = 0x0207;
+    const WM_MBUTTONUP: u32 = 0x0208;
+    const MK_LBUTTON: usize = 0x0001;
+    const MK_RBUTTON: usize = 0x0002;
+    const MK_SHIFT: usize = 0x0004;
+    const MK_CONTROL: usize = 0x0008;
+    const MK_MBUTTON: usize = 0x0010;
+    const VK_CONTROL: u8 = 0x11;
+    const VK_SHIFT: u8 = 0x10;
+    const VK_LCONTROL: u8 = 0xA2;
+    const VK_RCONTROL: u8 = 0xA3;
+    const VK_LSHIFT: u8 = 0xA0;
+    const VK_RSHIFT: u8 = 0xA1;
+
+    let (down, up, mk) = match btn {
+        1 => (WM_LBUTTONDOWN, WM_LBUTTONUP, MK_LBUTTON),
+        2 => (WM_MBUTTONDOWN, WM_MBUTTONUP, MK_MBUTTON),
+        4 => (WM_RBUTTONDOWN, WM_RBUTTONUP, MK_RBUTTON),
+        _ => {
+            shm_write_u32(shm, OFF_ERROR_CODE, 0xE221);
+            shm_write_u32(shm, OFF_STATUS_FLAG, STATUS_ERROR);
+            shm_write_u32(shm, OFF_COMMAND_FLAG, 0);
+            return;
+        }
+    };
+
+    let target_key = *((shm as *const u8).add(OFF_TARGET_KEY));
+    let key_active = *((shm as *const u8).add(OFF_KEY_ACTIVE));
+    let mut mod_flags = 0usize;
+    if key_active != 0 {
+        match target_key {
+            VK_CONTROL | VK_LCONTROL | VK_RCONTROL => mod_flags |= MK_CONTROL,
+            VK_SHIFT | VK_LSHIFT | VK_RSHIFT => mod_flags |= MK_SHIFT,
+            _ => {}
+        }
+        if target_key != 0 {
+            let vk = target_key as u32;
+            let scan_code = MapVirtualKeyW(vk, 0);
+            let lparam_down = 1u32 | (scan_code << 16);
+            PostMessageW(hwnd, WM_KEYDOWN, vk as usize, lparam_down as usize);
+        }
+    }
+
+    let mut pt = POINT {
+        x: x as i32,
+        y: y as i32,
+    };
+    let hit_lparam = if ClientToScreen(hwnd, &mut pt as *mut POINT) != 0 {
+        (((pt.y as usize) & 0xFFFF) << 16) | ((pt.x as usize) & 0xFFFF)
+    } else {
+        lparam
+    };
+
+    PostMessageW(hwnd, WM_NCHITTEST, 0, hit_lparam);
+    PostMessageW(hwnd, WM_SETCURSOR, hwnd as usize, 0x2010001);
+    PostMessageW(hwnd, WM_MOUSEMOVE, mod_flags, lparam);
+    PostMessageW(hwnd, down, mk | mod_flags, lparam);
+    Sleep(30);
+    PostMessageW(hwnd, up, mod_flags, lparam);
+
+    if key_active != 0 && target_key != 0 {
+        let vk = target_key as u32;
+        let scan_code = MapVirtualKeyW(vk, 0);
+        let lparam_up = 1u32 | (scan_code << 16) | (1 << 30) | (1 << 31);
+        PostMessageW(hwnd, WM_KEYUP, vk as usize, lparam_up as usize);
+    }
+
+    shm_write_u32(shm, OFF_STATUS_FLAG, STATUS_DONE);
+    shm_write_u32(shm, OFF_COMMAND_FLAG, 0);
+}
+
+unsafe fn dispatch_native_click(shm: *mut SharedBuffer) {
+    let hwnd = shm_read_u64(shm as *const SharedBuffer, OFF_HWND_D2R) as HWND;
+    let fn_real_click = shm_read_u64(shm as *const SharedBuffer, OFF_FN_REAL_CLICK) as usize;
+    if hwnd.is_null() || fn_real_click == 0 {
+        shm_write_u32(shm, OFF_ERROR_CODE, 0xE230);
+        shm_write_u32(shm, OFF_STATUS_FLAG, STATUS_ERROR);
+        shm_write_u32(shm, OFF_COMMAND_FLAG, 0);
+        return;
+    }
+
+    let pkt = (shm as *const u8).add(OFF_PACKET_DATA);
+    let x = core::ptr::read_unaligned(pkt as *const u32);
+    let y = core::ptr::read_unaligned(pkt.add(4) as *const u32);
+    let btn = *pkt.add(8) as u32;
+    match btn {
+        1 | 2 | 4 => {}
+        _ => {
+            shm_write_u32(shm, OFF_ERROR_CODE, 0xE231);
+            shm_write_u32(shm, OFF_STATUS_FLAG, STATUS_ERROR);
+            shm_write_u32(shm, OFF_COMMAND_FLAG, 0);
+            return;
+        }
+    }
+
+    type FnRealClick = unsafe extern "system" fn(HWND, u32, u32, u32, u32) -> usize;
+    let f: FnRealClick = core::mem::transmute(fn_real_click);
+    f(hwnd, 10, btn, y, x);
+    Sleep(20);
+    f(hwnd, 11, btn, y, x);
+
+    shm_write_u32(shm, OFF_STATUS_FLAG, STATUS_DONE);
+    shm_write_u32(shm, OFF_COMMAND_FLAG, 0);
+}
+
 // ---------------------------------------------------------------------------
 // Game thread hook: GetTickCount64 detour
 //
@@ -2967,12 +4658,14 @@ unsafe fn dispatch_post_key(shm: *mut SharedBuffer) {
 #[no_mangle]
 unsafe extern "C" fn game_tick_dispatch() {
     let shm = G_SHM;
-    if shm.is_null() { return; }
+    if shm.is_null() {
+        return;
+    }
 
     // Diagnostic: bump "GTC64 hook called" counter on every GTC64 invocation.
     // If this stays 0 while D2R is running, the IAT hook isn't firing at all.
-    let gtc_count = shm_read_u32(shm as *const SharedBuffer, 0x2080);
-    shm_write_u32(shm, 0x2080, gtc_count.wrapping_add(1));
+    let gtc_count = shm_read_u32(shm as *const SharedBuffer, OFF_GTC64_HOOK_COUNT);
+    shm_write_u32(shm, OFF_GTC64_HOOK_COUNT, gtc_count.wrapping_add(1));
 
     // Drain any pending batch slots on the game thread — Arxan tolerates
     // reads from this context (GID's whole dispatch model). Cheap to
@@ -2980,12 +4673,115 @@ unsafe extern "C" fn game_tick_dispatch() {
     dispatch_batch_slots(shm);
 
     // Quick check: is there a pending game-thread command?
-    if shm_read_u32(shm, OFF_COMMAND_FLAG) == 0 { return; }
+    if shm_read_u32(shm, OFF_COMMAND_FLAG) == 0 {
+        return;
+    }
     let cmd = shm_read_u32(shm, OFF_COMMAND_TYPE);
-    if cmd != CMD_SEND_DUAL_GT { return; }
+    if cmd != CMD_SEND_DUAL_GT
+        && cmd != CMD_SEND_DUAL
+        && cmd != CMD_POST_KEY
+        && cmd != CMD_POST_MOVE
+        && cmd != CMD_SET_D2R_CURSOR
+        && cmd != CMD_RESOLVE_D2R_HOVER
+        && cmd != CMD_POST_CLICK
+        && cmd != CMD_NATIVE_CLICK
+        && cmd != CMD_VENDOR_PRICE
+        && cmd != CMD_ARG_TRACE_INSTALL
+        && cmd != CMD_ARG_TRACE_UNINSTALL
+        && cmd != CMD_UNINSTALL_DETOUR
+    {
+        return;
+    }
 
     // Only process if status is BUSY (set by render thread dispatch).
-    if shm_read_u32(shm, OFF_STATUS_FLAG) != STATUS_BUSY { return; }
+    if shm_read_u32(shm, OFF_STATUS_FLAG) != STATUS_BUSY {
+        return;
+    }
+
+    if cmd == CMD_UNINSTALL_DETOUR {
+        if !G_CRASH_VEH_HANDLE.is_null() {
+            RemoveVectoredExceptionHandler(G_CRASH_VEH_HANDLE);
+            G_CRASH_VEH_HANDLE = core::ptr::null_mut();
+            G_CRASH_VEH_INSTALLED = false;
+        }
+        if !G_HWBP_VEH_HANDLE.is_null() {
+            RemoveVectoredExceptionHandler(G_HWBP_VEH_HANDLE);
+            G_HWBP_VEH_HANDLE = core::ptr::null_mut();
+            G_HWBP_INSTALLED = false;
+        }
+        uninstall_present_detour();
+        uninstall_send_fn_capture_hook();
+        uninstall_argtrace_hook();
+        G_SNAPSHOT_ENABLED = false;
+        shm_write_u32(shm, OFF_STATUS_FLAG, STATUS_DONE);
+        shm_write_u32(shm, OFF_COMMAND_FLAG, 0);
+        G_SHM = core::ptr::null_mut();
+        close_shared_memory_view(shm);
+        return;
+    }
+
+    if cmd == CMD_SEND_DUAL {
+        dispatch_send_dual(shm);
+        return;
+    }
+
+    if cmd == CMD_POST_KEY {
+        dispatch_post_key(shm);
+        return;
+    }
+
+    if cmd == CMD_POST_MOVE {
+        dispatch_post_move(shm);
+        return;
+    }
+
+    if cmd == CMD_SET_D2R_CURSOR {
+        dispatch_set_d2r_cursor(shm);
+        return;
+    }
+
+    if cmd == CMD_RESOLVE_D2R_HOVER {
+        dispatch_resolve_d2r_hover(shm);
+        return;
+    }
+
+    if cmd == CMD_POST_CLICK {
+        dispatch_post_click(shm);
+        return;
+    }
+
+    if cmd == CMD_NATIVE_CLICK {
+        dispatch_native_click(shm);
+        return;
+    }
+
+    if cmd == CMD_VENDOR_PRICE {
+        dispatch_vendor_price(shm);
+        return;
+    }
+
+    if cmd == CMD_ARG_TRACE_INSTALL {
+        if install_argtrace_hook(shm) {
+            shm_write_u32(shm, OFF_STATUS_FLAG, STATUS_DONE);
+        } else {
+            shm_write_u32(shm, OFF_ERROR_CODE, 0xE221);
+            shm_write_u32(shm, OFF_STATUS_FLAG, STATUS_ERROR);
+        }
+        shm_write_u32(shm, OFF_COMMAND_FLAG, 0);
+        return;
+    }
+
+    if cmd == CMD_ARG_TRACE_UNINSTALL {
+        uninstall_argtrace_hook();
+        shm_write_u32(shm, OFF_STATUS_FLAG, STATUS_DONE);
+        shm_write_u32(shm, OFF_COMMAND_FLAG, 0);
+        return;
+    }
+
+    let target_tid = resolve_game_thread_id(shm);
+    if target_tid != 0 && GetCurrentThreadId() != target_tid {
+        return;
+    }
 
     let dual_fn = G_DUAL_SEND_WRAP;
     if dual_fn == 0 {
@@ -3045,7 +4841,7 @@ static mut G_CRASH_VEH_HANDLE: *mut core::ffi::c_void = core::ptr::null_mut();
 // Thresholds tuned for Present-rate (60 fps): normal path sees ≤1 AV per
 // several seconds. >AV_CASCADE_LIMIT within AV_CASCADE_WINDOW_TICKS means a
 // real cascade, not a natural runtime error.
-const AV_CASCADE_LIMIT: u32 = 8;             // AVs seen inside the window
+const AV_CASCADE_LIMIT: u32 = 8; // AVs seen inside the window
 const AV_CASCADE_WINDOW_TICKS: u64 = 300_000_000; // rdtsc ticks (~100 ms on 3 GHz)
 static mut G_AV_WINDOW_START: u64 = 0;
 static mut G_AV_WINDOW_COUNT: u32 = 0;
@@ -3055,11 +4851,17 @@ static mut G_AV_CASCADE_TRIPPED: bool = false;
 /// them after D2R dies. Returns EXCEPTION_CONTINUE_SEARCH for everything so
 /// any other handler (including Arxan's UnhandledExceptionFilter) still runs.
 unsafe extern "system" fn crash_diag_veh(info: *mut EXCEPTION_POINTERS) -> i32 {
-    if info.is_null() { return EXCEPTION_CONTINUE_SEARCH; }
+    if info.is_null() {
+        return EXCEPTION_CONTINUE_SEARCH;
+    }
     let rec = (*info).ExceptionRecord;
-    if rec.is_null() { return EXCEPTION_CONTINUE_SEARCH; }
+    if rec.is_null() {
+        return EXCEPTION_CONTINUE_SEARCH;
+    }
     let shm = G_SHM;
-    if shm.is_null() { return EXCEPTION_CONTINUE_SEARCH; }
+    if shm.is_null() {
+        return EXCEPTION_CONTINUE_SEARCH;
+    }
 
     let code = (*rec).ExceptionCode;
 
@@ -3100,13 +4902,15 @@ unsafe extern "system" fn crash_diag_veh(info: *mut EXCEPTION_POINTERS) -> i32 {
 
     // Only capture interesting (likely-fatal) codes. Skip BP/SS/guard-page
     // since those are routine and a different handler usually consumes them.
-    let is_fatal = matches!(code,
+    let is_fatal = matches!(
+        code,
         EXCEPTION_ACCESS_VIOLATION
-        | EXCEPTION_ILLEGAL_INSTRUCTION
-        | EXCEPTION_PRIV_INSTRUCTION
-        | EXCEPTION_STACK_OVERFLOW
-        | EXCEPTION_INT_DIVIDE_BY_ZERO
-        | STATUS_STACK_BUFFER_OVERRUN);
+            | EXCEPTION_ILLEGAL_INSTRUCTION
+            | EXCEPTION_PRIV_INSTRUCTION
+            | EXCEPTION_STACK_OVERFLOW
+            | EXCEPTION_INT_DIVIDE_BY_ZERO
+            | STATUS_STACK_BUFFER_OVERRUN
+    );
 
     // Always bump the count so we can see *something* fired.
     let prev_count = shm_read_u32(shm as *const SharedBuffer, OFF_CRASH_COUNT);
@@ -3171,13 +4975,19 @@ unsafe extern "system" fn crash_diag_veh(info: *mut EXCEPTION_POINTERS) -> i32 {
         let ctx = (*info).ContextRecord as *const u8;
         if code == EXCEPTION_ACCESS_VIOLATION && !ctx.is_null() {
             let rip_now = core::ptr::read_unaligned(ctx.add(0xF8) as *const u64);
-            if rip_now != 0 && is_user_va(rip_now as usize) && is_user_va((rip_now + 4) as usize)
-                && page_readable(rip_now as usize) && page_readable((rip_now + 4) as usize) {
+            if rip_now != 0
+                && is_user_va(rip_now as usize)
+                && is_user_va((rip_now + 4) as usize)
+                && page_readable(rip_now as usize)
+                && page_readable((rip_now + 4) as usize)
+            {
                 let bytes_at_rip = core::ptr::read_unaligned(rip_now as *const [u8; 5]);
                 let is_stash_memcpy = bytes_at_rip == [0x47, 0x8A, 0x5C, 0x11, 0xF0];
                 let fault_va_now: u64 = if (*rec).NumberParameters >= 2 {
                     (*rec).ExceptionInformation[1]
-                } else { 0 };
+                } else {
+                    0
+                };
                 let faulted_low = (fault_va_now & 0xFFFF) as u32;
                 if is_stash_memcpy && faulted_low == 0xFFF0 {
                     let scratch_base = G_STASH_SCRATCH.as_mut_ptr() as u64;
@@ -3205,8 +5015,8 @@ unsafe extern "system" fn crash_diag_veh(info: *mut EXCEPTION_POINTERS) -> i32 {
         //   +0xC8 R10  +0xD0 R11  +0xD8 R12  +0xE0 R13  +0xE8 R14
         //   +0xF0 R15  +0xF8 Rip
         const GPR_OFFSETS: [usize; 16] = [
-            0x78, 0x80, 0x88, 0x90, 0x98, 0xA0, 0xA8, 0xB0,
-            0xB8, 0xC0, 0xC8, 0xD0, 0xD8, 0xE0, 0xE8, 0xF0,
+            0x78, 0x80, 0x88, 0x90, 0x98, 0xA0, 0xA8, 0xB0, 0xB8, 0xC0, 0xC8, 0xD0, 0xD8, 0xE0,
+            0xE8, 0xF0,
         ];
         let mut i = 0;
         while i < 16 {
@@ -3224,10 +5034,14 @@ unsafe extern "system" fn crash_diag_veh(info: *mut EXCEPTION_POINTERS) -> i32 {
 
     let fault_va: u64 = if (*rec).NumberParameters >= 2 {
         (*rec).ExceptionInformation[1]
-    } else { 0 };
+    } else {
+        0
+    };
     let fault_type: u32 = if (*rec).NumberParameters >= 1 {
         (*rec).ExceptionInformation[0] as u32
-    } else { 0 };
+    } else {
+        0
+    };
 
     shm_write_u32(shm, OFF_CRASH_CODE, code);
     shm_write_u32(shm, OFF_CRASH_FLAGS, (*rec).ExceptionFlags);
@@ -3242,9 +5056,11 @@ unsafe extern "system" fn crash_diag_veh(info: *mut EXCEPTION_POINTERS) -> i32 {
     // Guard: stack is normally mapped, but a stack-overflow AV points rsp at
     // the guard page that's already unmapped — reading it here would re-fault
     // and cascade inside VEH.
-    if rsp != 0 && is_user_va(rsp as usize)
+    if rsp != 0
+        && is_user_va(rsp as usize)
         && page_readable(rsp as usize)
-        && page_readable((rsp + (CRASH_FRAME_COUNT as u64 - 1) * 8) as usize) {
+        && page_readable((rsp + (CRASH_FRAME_COUNT as u64 - 1) * 8) as usize)
+    {
         let mut i = 0;
         while i < CRASH_FRAME_COUNT {
             let slot = rsp.wrapping_add((i as u64) * 8) as *const u64;
@@ -3265,9 +5081,12 @@ unsafe extern "system" fn crash_diag_veh(info: *mut EXCEPTION_POINTERS) -> i32 {
     // live test 2026-04-17 surfaced this: count=1708 AVs in ~1 s before D2R dies.
     if rip != 0 {
         let start_va = rip.wrapping_sub(CRASH_RIP_BYTES_PRE as u64);
-        let end_va   = start_va.wrapping_add(CRASH_RIP_BYTES_LEN as u64);
-        if is_user_va(start_va as usize) && is_user_va(end_va as usize)
-            && page_readable(start_va as usize) && page_readable(end_va as usize - 1) {
+        let end_va = start_va.wrapping_add(CRASH_RIP_BYTES_LEN as u64);
+        if is_user_va(start_va as usize)
+            && is_user_va(end_va as usize)
+            && page_readable(start_va as usize)
+            && page_readable(end_va as usize - 1)
+        {
             let start = start_va as *const u8;
             let mut i = 0;
             while i < CRASH_RIP_BYTES_LEN {
@@ -3287,10 +5106,13 @@ unsafe extern "system" fn crash_diag_veh(info: *mut EXCEPTION_POINTERS) -> i32 {
     while i < CRASH_FRAME_COUNT {
         let frame = shm_read_u64(shm as *const SharedBuffer, OFF_CRASH_FRAMES + i * 8);
         let start_va = frame.wrapping_sub(CRASH_FRAME_BYTES_PRE as u64);
-        let end_va   = start_va.wrapping_add(CRASH_FRAME_BYTES_LEN as u64);
-        let plausible_code = frame > 0x10000 && frame < 0x00007FFFFFFFFFFF
-            && is_user_va(start_va as usize) && is_user_va(end_va as usize)
-            && page_readable(start_va as usize) && page_readable(end_va as usize - 1);
+        let end_va = start_va.wrapping_add(CRASH_FRAME_BYTES_LEN as u64);
+        let plausible_code = frame > 0x10000
+            && frame < 0x00007FFFFFFFFFFF
+            && is_user_va(start_va as usize)
+            && is_user_va(end_va as usize)
+            && page_readable(start_va as usize)
+            && page_readable(end_va as usize - 1);
         if plausible_code {
             let start = start_va as *const u8;
             let dst_off = OFF_CRASH_FRAME_BYTES + i * CRASH_FRAME_BYTES_STRIDE;
@@ -3338,8 +5160,12 @@ unsafe extern "system" fn crash_diag_veh(info: *mut EXCEPTION_POINTERS) -> i32 {
         // Copy 16 raw bytes at RIP for offline disassembly.
         // Guard: RIP and RIP+15 canonical AND page-mapped (covers canonical-
         // but-unmapped pages that would re-fault inside the VEH).
-        if rip != 0 && is_user_va(rip as usize) && is_user_va((rip + 15) as usize)
-            && page_readable(rip as usize) && page_readable((rip + 15) as usize) {
+        if rip != 0
+            && is_user_va(rip as usize)
+            && is_user_va((rip + 15) as usize)
+            && page_readable(rip as usize)
+            && page_readable((rip + 15) as usize)
+        {
             let mut i = 0;
             while i < 16 {
                 let b = core::ptr::read_unaligned((rip as *const u8).add(i));
@@ -3348,9 +5174,14 @@ unsafe extern "system" fn crash_diag_veh(info: *mut EXCEPTION_POINTERS) -> i32 {
             }
         }
     }
-    if code == EXCEPTION_ACCESS_VIOLATION && fault_type == 0 && !ctx.is_null()
-        && rip != 0 && is_user_va(rip as usize) && is_user_va((rip + 4) as usize)
-        && page_readable(rip as usize) && page_readable((rip + 4) as usize)
+    if code == EXCEPTION_ACCESS_VIOLATION
+        && fault_type == 0
+        && !ctx.is_null()
+        && rip != 0
+        && is_user_va(rip as usize)
+        && is_user_va((rip + 4) as usize)
+        && page_readable(rip as usize)
+        && page_readable((rip + 4) as usize)
     {
         // Peek the instruction bytes at RIP — must match `47 8a 5c 11 f0`
         let bytes_at_rip = core::ptr::read_unaligned(rip as *const [u8; 5]);
@@ -3395,7 +5226,9 @@ unsafe extern "system" fn crash_diag_veh(info: *mut EXCEPTION_POINTERS) -> i32 {
 ///   0xC2 = AddVectoredExceptionHandler returned non-null (success)
 ///   0xC3 = AddVectoredExceptionHandler returned null (failure)
 unsafe fn install_crash_diag_veh(shm: *mut SharedBuffer) {
-    if G_CRASH_VEH_INSTALLED { return; }
+    if G_CRASH_VEH_INSTALLED {
+        return;
+    }
     shm_write_u32(shm, OFF_CRASH_VALID, 0xC1);
     shm_write_u32(shm, OFF_CRASH_COUNT, 0);
     // First=1 (head of chain) so we run before anything else, including
@@ -3435,7 +5268,9 @@ unsafe fn reinstall_crash_diag_veh() {
 /// re-inserting ours we maximize the chance that SS exceptions reach us
 /// before Arxan swallows them.
 unsafe fn reinstall_hwbp_veh() {
-    if !G_HWBP_INSTALLED { return; }
+    if !G_HWBP_INSTALLED {
+        return;
+    }
     if !G_HWBP_VEH_HANDLE.is_null() {
         RemoveVectoredExceptionHandler(G_HWBP_VEH_HANDLE);
         G_HWBP_VEH_HANDLE = core::ptr::null_mut();
@@ -3447,31 +5282,42 @@ unsafe fn reinstall_hwbp_veh() {
 }
 
 unsafe extern "system" fn guard_page_veh(info: *mut EXCEPTION_POINTERS) -> i32 {
-    if info.is_null() { return EXCEPTION_CONTINUE_SEARCH; }
+    if info.is_null() {
+        return EXCEPTION_CONTINUE_SEARCH;
+    }
     let rec = (*info).ExceptionRecord;
-    if rec.is_null() { return EXCEPTION_CONTINUE_SEARCH; }
+    if rec.is_null() {
+        return EXCEPTION_CONTINUE_SEARCH;
+    }
 
-    if (*rec).ExceptionCode != STATUS_GUARD_PAGE_VIOLATION { return EXCEPTION_CONTINUE_SEARCH; }
-    if !G_GUARD_PENDING { return EXCEPTION_CONTINUE_SEARCH; }
+    if (*rec).ExceptionCode != STATUS_GUARD_PAGE_VIOLATION {
+        return EXCEPTION_CONTINUE_SEARCH;
+    }
+    if !G_GUARD_PENDING {
+        return EXCEPTION_CONTINUE_SEARCH;
+    }
 
     let fault_addr = if (*rec).NumberParameters >= 2 {
         (*rec).ExceptionInformation[1] as usize
-    } else { 0 };
+    } else {
+        0
+    };
     let fault_page = fault_addr & !0xFFF;
     let guard_page = G_GUARD_PAGE_ADDR & !0xFFF;
-    if fault_page != guard_page { return EXCEPTION_CONTINUE_SEARCH; }
+    if fault_page != guard_page {
+        return EXCEPTION_CONTINUE_SEARCH;
+    }
 
     // CRITICAL: only dispatch on the GAME THREAD
     let shm = G_SHM;
-    if shm.is_null() { return EXCEPTION_CONTINUE_EXECUTION; }
-    let game_tid = shm_read_u32(shm as *const SharedBuffer, OFF_GAME_THREAD_ID);
+    if shm.is_null() {
+        return EXCEPTION_CONTINUE_EXECUTION;
+    }
     let current_tid = GetCurrentThreadId();
     // Mirror buffer is ONLY written by game thread (from D2R's dual_send_wrap).
     // Any write here IS the game thread — trust it and dispatch immediately.
     // Also: auto-detect game_tid by recording current_tid on first write.
-    if !G_SHM.is_null() && game_tid == 0 {
-        shm_write_u32(G_SHM, OFF_GAME_THREAD_ID, current_tid);
-    }
+    remember_game_thread_id(shm, current_tid);
 
     // WE ARE ON THE GAME THREAD! Dispatch dual_send_wrap.
     G_GUARD_PENDING = false;
@@ -3484,16 +5330,20 @@ unsafe extern "system" fn guard_page_veh(info: *mut EXCEPTION_POINTERS) -> i32 {
 /// Sets PAGE_GUARD on WidgetStatesOffset page. Game thread reads it every tick.
 unsafe fn install_game_thread_hook() -> bool {
     let shm = G_SHM;
-    if !shm.is_null() { shm_write_u32(shm, OFF_ERROR_CODE, 0xD601); }
+    if !shm.is_null() {
+        shm_write_u32(shm, OFF_ERROR_CODE, 0xD601);
+    }
 
     // Install VEH handler (first time only)
-    if G_GAME_HOOK_TRAMPOLINE.is_null() {
+    if G_GUARD_VEH_HANDLE.is_null() {
         let h = AddVectoredExceptionHandler(1, guard_page_veh);
         if h.is_null() {
-            if !shm.is_null() { shm_write_u32(shm, OFF_ERROR_CODE, 0xD602); }
+            if !shm.is_null() {
+                shm_write_u32(shm, OFF_ERROR_CODE, 0xD602);
+            }
             return false;
         }
-        G_GAME_HOOK_TRAMPOLINE = h as *const u8; // non-null = installed
+        G_GUARD_VEH_HANDLE = h;
     }
 
     // Target: MIRROR BUFFER page @ 0x1F51000. Only game thread writes here
@@ -3508,15 +5358,48 @@ unsafe fn install_game_thread_hook() -> bool {
 
     // Set PAGE_GUARD
     let mut old_prot: u32 = 0;
-    let ok = VirtualProtect(page as _, 0x1000, 0x104 /* PAGE_READWRITE | PAGE_GUARD */, &mut old_prot);
+    let ok = VirtualProtect(
+        page as _,
+        0x1000,
+        0x104, /* PAGE_READWRITE | PAGE_GUARD */
+        &mut old_prot,
+    );
     if ok == 0 {
         // Try with original protection + guard
-        VirtualProtect(page as _, 0x1000, old_prot | 0x100 /* PAGE_GUARD */, &mut old_prot);
+        VirtualProtect(
+            page as _,
+            0x1000,
+            old_prot | 0x100, /* PAGE_GUARD */
+            &mut old_prot,
+        );
     }
     G_GUARD_PAGE_OLDPROT = old_prot;
 
-    if !shm.is_null() { shm_write_u32(shm, OFF_ERROR_CODE, 0xD6FF); } // success
+    if !shm.is_null() {
+        shm_write_u32(shm, OFF_ERROR_CODE, 0xD6FF);
+    } // success
     true
+}
+
+unsafe fn uninstall_game_thread_hook() {
+    if G_GUARD_PAGE_ADDR != 0 {
+        let page = G_GUARD_PAGE_ADDR & !0xFFF;
+        let restore_prot = if G_GUARD_PAGE_OLDPROT != 0 {
+            G_GUARD_PAGE_OLDPROT
+        } else {
+            0x04 /* PAGE_READWRITE */
+        };
+        let mut old_prot: u32 = 0;
+        let _ = VirtualProtect(page as _, 0x1000, restore_prot, &mut old_prot);
+    }
+    if !G_GUARD_VEH_HANDLE.is_null() {
+        RemoveVectoredExceptionHandler(G_GUARD_VEH_HANDLE);
+        G_GUARD_VEH_HANDLE = core::ptr::null_mut();
+    }
+    G_GUARD_PENDING = false;
+    G_GUARD_REARM_COUNT = 0;
+    G_GUARD_PAGE_ADDR = 0;
+    G_GUARD_PAGE_OLDPROT = 0;
 }
 
 /// DEAD CODE — kept for reference. Original inline detour approach (blocked by Arxan).
@@ -3529,50 +5412,65 @@ unsafe fn install_game_thread_hook_old() -> bool {
     // No code patching. No SetThreadContext. Just stack memory write.
 
     let shm = G_SHM;
-    let game_tid = if !shm.is_null() {
-        shm_read_u32(shm as *const SharedBuffer, OFF_GAME_THREAD_ID)
-    } else { 0 };
+    let game_tid = resolve_game_thread_id(shm);
     if game_tid == 0 {
-        if !shm.is_null() { shm_write_u32(shm, OFF_ERROR_CODE, 0xD501); }
+        if !shm.is_null() {
+            shm_write_u32(shm, OFF_ERROR_CODE, 0xD501);
+        }
         return false;
     }
 
     let h = OpenThread(0x1FFFFF, 0, game_tid); // THREAD_ALL_ACCESS
     if h.is_null() {
-        if !shm.is_null() { shm_write_u32(shm, OFF_ERROR_CODE, 0xD502); }
+        if !shm.is_null() {
+            shm_write_u32(shm, OFF_ERROR_CODE, 0xD502);
+        }
         return false;
     }
 
     SuspendThread(h);
-    if !shm.is_null() { shm_write_u32(shm, OFF_ERROR_CODE, 0xD503); }
+    if !shm.is_null() {
+        shm_write_u32(shm, OFF_ERROR_CODE, 0xD503);
+    }
 
     // Get TEB via NtQueryInformationThread (bypass GetThreadContext which Arxan blocks)
     let mut tbi: [u8; 48] = [0u8; 48];
     let mut ret_len: u32 = 0;
     let st = NtQueryInformationThread(h, 0, tbi.as_mut_ptr() as _, 48, &mut ret_len);
     if st != 0 {
-        if !shm.is_null() { shm_write_u32(shm, OFF_ERROR_CODE, 0xD505); }
-        ResumeThread(h); CloseHandle(h);
+        if !shm.is_null() {
+            shm_write_u32(shm, OFF_ERROR_CODE, 0xD505);
+        }
+        ResumeThread(h);
+        CloseHandle(h);
         return false;
     }
 
     // TEB address at offset 4 in THREAD_BASIC_INFORMATION (after ExitStatus u32 + pad)
     let teb_addr = core::ptr::read_unaligned(tbi.as_ptr().add(8) as *const u64) as usize;
     if teb_addr == 0 {
-        if !shm.is_null() { shm_write_u32(shm, OFF_ERROR_CODE, 0xD506); }
-        ResumeThread(h); CloseHandle(h);
+        if !shm.is_null() {
+            shm_write_u32(shm, OFF_ERROR_CODE, 0xD506);
+        }
+        ResumeThread(h);
+        CloseHandle(h);
         return false;
     }
 
     // Read TEB: StackBase at +0x08, StackLimit at +0x10
     let stack_base = core::ptr::read_unaligned((teb_addr + 8) as *const u64) as usize;
     let stack_limit = core::ptr::read_unaligned((teb_addr + 16) as *const u64) as usize;
-    if !shm.is_null() { shm_write_u32(shm, OFF_ERROR_CODE, 0xD507); }
+    if !shm.is_null() {
+        shm_write_u32(shm, OFF_ERROR_CODE, 0xD507);
+    }
 
     let kernelbase = GetModuleHandleA(b"KERNELBASE.dll\0".as_ptr()) as usize;
     if kernelbase == 0 {
-        if !shm.is_null() { shm_write_u32(shm, OFF_ERROR_CODE, 0xD508); }
-        ResumeThread(h); CloseHandle(h);
+        if !shm.is_null() {
+            shm_write_u32(shm, OFF_ERROR_CODE, 0xD508);
+        }
+        ResumeThread(h);
+        CloseHandle(h);
         return false;
     }
     let target_ret = kernelbase + 0x226EE;
@@ -3594,19 +5492,25 @@ unsafe fn install_game_thread_hook_old() -> bool {
     }
 
     if !found {
-        if !shm.is_null() { shm_write_u32(shm, OFF_ERROR_CODE, 0xD509); }
-        ResumeThread(h); CloseHandle(h);
+        if !shm.is_null() {
+            shm_write_u32(shm, OFF_ERROR_CODE, 0xD509);
+        }
+        ResumeThread(h);
+        CloseHandle(h);
         return false;
     }
     let ret_offset = ret_stack_addr - scan_start; // for compatibility
 
-    if !shm.is_null() { shm_write_u32(shm, OFF_ERROR_CODE, 0xD490); } // found, building shellcode
+    if !shm.is_null() {
+        shm_write_u32(shm, OFF_ERROR_CODE, 0xD490);
+    } // found, building shellcode
 
     // Build shellcode: dispatch + jump to original return
     let sc_size = 256;
     let sc = VirtualAlloc(core::ptr::null(), sc_size, 0x3000, 0x40) as *mut u8;
     if sc.is_null() {
-        ResumeThread(h); CloseHandle(h);
+        ResumeThread(h);
+        CloseHandle(h);
         return false;
     }
 
@@ -3651,7 +5555,9 @@ unsafe fn install_game_thread_hook_old() -> bool {
 
     G_GAME_HOOK_TRAMPOLINE = sc; // mark as installed
 
-    if !shm.is_null() { shm_write_u32(shm, OFF_ERROR_CODE, 0xD4FF); } // SUCCESS
+    if !shm.is_null() {
+        shm_write_u32(shm, OFF_ERROR_CODE, 0xD4FF);
+    } // SUCCESS
 
     ResumeThread(h);
     CloseHandle(h);
@@ -3661,47 +5567,72 @@ unsafe fn install_game_thread_hook_old() -> bool {
 unsafe fn install_game_hook_at(target: usize) -> bool {
     let shm = G_SHM;
     // Breadcrumb 1: entering install
-    if !shm.is_null() { shm_write_u32(shm, OFF_ERROR_CODE, 0xD401); }
+    if !shm.is_null() {
+        shm_write_u32(shm, OFF_ERROR_CODE, 0xD401);
+    }
 
     let steal_bytes: usize = 18;
 
     // Breadcrumb 2: reading target bytes
-    if !shm.is_null() { shm_write_u32(shm, OFF_ERROR_CODE, 0xD402); }
+    if !shm.is_null() {
+        shm_write_u32(shm, OFF_ERROR_CODE, 0xD402);
+    }
     let orig_disp = core::ptr::read_unaligned((target + 12 + 3) as *const i32);
     let cookie_addr = ((target + 12 + 7) as i64 + orig_disp as i64) as u64;
-    if !shm.is_null() { shm_write_u32(shm, OFF_ERROR_CODE, 0xD403); }
+    if !shm.is_null() {
+        shm_write_u32(shm, OFF_ERROR_CODE, 0xD403);
+    }
 
     // Allocate trampoline (any address — we use absolute addressing)
     // Layout: [push rsi; push rdi; sub rsp,0x58; mov rsi,r8; mov edi,ecx]  (12 bytes, no fixup needed)
     //         [mov rax, imm64; mov rax,[rax]]  (12 bytes, replaces rip-relative mov)
     //         [jmp abs target+18]
-    if !shm.is_null() { shm_write_u32(shm, OFF_ERROR_CODE, 0xD410); } // alloc tramp
+    if !shm.is_null() {
+        shm_write_u32(shm, OFF_ERROR_CODE, 0xD410);
+    } // alloc tramp
 
     let tramp_size = 12 + 12 + 14 + 16;
     let tramp = VirtualAlloc(core::ptr::null(), tramp_size, 0x3000, 0x40) as *mut u8;
-    if tramp.is_null() { return false; }
+    if tramp.is_null() {
+        return false;
+    }
 
-    if !shm.is_null() { shm_write_u32(shm, OFF_ERROR_CODE, 0xD420); } // copy stolen
+    if !shm.is_null() {
+        shm_write_u32(shm, OFF_ERROR_CODE, 0xD420);
+    } // copy stolen
 
-    let mut tw = ThunkWriter { buf: tramp, offset: 0 };
+    let mut tw = ThunkWriter {
+        buf: tramp,
+        offset: 0,
+    };
     let src = target as *const u8;
     for i in 0..12usize {
         tw.emit(&[*src.add(i)]);
     }
-    tw.emit(&[0x48, 0xB8]); tw.emit(&cookie_addr.to_le_bytes());
+    tw.emit(&[0x48, 0xB8]);
+    tw.emit(&cookie_addr.to_le_bytes());
     tw.emit(&[0x48, 0x8B, 0x00]);
     write_abs_jmp(tw.current(), target + steal_bytes);
     G_GAME_HOOK_TRAMPOLINE = tramp;
 
-    if !shm.is_null() { shm_write_u32(shm, OFF_ERROR_CODE, 0xD430); } // alloc thunk
+    if !shm.is_null() {
+        shm_write_u32(shm, OFF_ERROR_CODE, 0xD430);
+    } // alloc thunk
 
     let thunk_size = 256;
     let thunk = VirtualAlloc(core::ptr::null(), thunk_size, 0x3000, 0x40) as *mut u8;
-    if thunk.is_null() { return false; }
+    if thunk.is_null() {
+        return false;
+    }
 
-    if !shm.is_null() { shm_write_u32(shm, OFF_ERROR_CODE, 0xD440); } // build thunk
+    if !shm.is_null() {
+        shm_write_u32(shm, OFF_ERROR_CODE, 0xD440);
+    } // build thunk
 
-    let mut w = ThunkWriter { buf: thunk, offset: 0 };
+    let mut w = ThunkWriter {
+        buf: thunk,
+        offset: 0,
+    };
     w.emit(&[0x50]);
     w.emit(&[0x51]);
     w.emit(&[0x52]);
@@ -3724,24 +5655,32 @@ unsafe fn install_game_hook_at(target: usize) -> bool {
     w.emit(&[0x58]);
     write_abs_jmp(w.current(), tramp as usize);
 
-    if !shm.is_null() { shm_write_u32(shm, OFF_ERROR_CODE, 0xD450); } // VirtualProtect
+    if !shm.is_null() {
+        shm_write_u32(shm, OFF_ERROR_CODE, 0xD450);
+    } // VirtualProtect
 
     let mut old_prot: u32 = 0;
     VirtualProtect(target as _, steal_bytes, 0x40, &mut old_prot);
 
-    if !shm.is_null() { shm_write_u32(shm, OFF_ERROR_CODE, 0xD460); } // write detour
+    if !shm.is_null() {
+        shm_write_u32(shm, OFF_ERROR_CODE, 0xD460);
+    } // write detour
 
     write_abs_jmp(target as *mut u8, thunk as usize);
     for i in 14..steal_bytes {
         *((target + i) as *mut u8) = 0x90;
     }
 
-    if !shm.is_null() { shm_write_u32(shm, OFF_ERROR_CODE, 0xD470); } // restore prot
+    if !shm.is_null() {
+        shm_write_u32(shm, OFF_ERROR_CODE, 0xD470);
+    } // restore prot
 
     VirtualProtect(target as _, steal_bytes, old_prot, &mut old_prot);
     FlushInstructionCache(GetCurrentProcess(), target as _, steal_bytes);
 
-    if !shm.is_null() { shm_write_u32(shm, OFF_ERROR_CODE, 0xD4FF); } // SUCCESS
+    if !shm.is_null() {
+        shm_write_u32(shm, OFF_ERROR_CODE, 0xD4FF);
+    } // SUCCESS
 
     true
 }
@@ -3752,34 +5691,46 @@ unsafe fn install_game_hook_at(target: usize) -> bool {
 /// The wrapper calls game_tick_dispatch() then chains to the real GTC64.
 /// IAT is in D2R's .data section — safe to patch, no system DLL modification.
 unsafe fn install_gtc64_hook() -> bool {
-    // Diagnostic: write install progress/result to SHM at 0x2084 so we can
+    // Diagnostic: write install progress/result to SHM so we can
     // see from /debug/hwbp/status whether install succeeded and where it
     // failed if it didn't.
     let write_diag = |code: u32| {
         if !G_SHM.is_null() {
-            shm_write_u32(G_SHM, 0x2084, code);
+            shm_write_u32(G_SHM, OFF_GTC64_INSTALL_DIAG, code);
         }
     };
     write_diag(0x1001); // entered
 
     // Resolve real GetTickCount64 address
     let kernel32 = GetModuleHandleA(b"kernel32.dll\0".as_ptr());
-    if kernel32.is_null() { write_diag(0x1E02); return false; }
+    if kernel32.is_null() {
+        write_diag(0x1E02);
+        return false;
+    }
     let real_gtc64 = GetProcAddress(kernel32, b"GetTickCount64\0".as_ptr());
-    if real_gtc64.is_null() { write_diag(0x1E03); return false; }
+    if real_gtc64.is_null() {
+        write_diag(0x1E03);
+        return false;
+    }
     G_GTC64_TRAMPOLINE = real_gtc64 as *const u8;
     write_diag(0x1002);
 
     // Find D2R's IAT entry for GetTickCount64 by scanning the PE header
     let d2r_base = GetModuleHandleA(core::ptr::null()) as usize;
-    if d2r_base == 0 { write_diag(0x1E04); return false; }
+    if d2r_base == 0 {
+        write_diag(0x1E04);
+        return false;
+    }
 
     let iat_entry = find_iat_entry(d2r_base, real_gtc64 as usize);
     if iat_entry == 0 {
         // Try GetTickCount (32-bit) as fallback — some D2R code uses that.
         write_diag(0x1005);
         let real_gtc = GetProcAddress(kernel32, b"GetTickCount\0".as_ptr());
-        if real_gtc.is_null() { write_diag(0x1E06); return false; }
+        if real_gtc.is_null() {
+            write_diag(0x1E06);
+            return false;
+        }
         let iat_entry2 = find_iat_entry(d2r_base, real_gtc as usize);
         if iat_entry2 == 0 {
             // Try timeGetTime
@@ -3856,79 +5807,130 @@ unsafe fn install_gtc64_hook() -> bool {
 
 unsafe fn install_gtc64_hook_at(iat_entry: usize, real_fn: usize) -> bool {
     let write_diag = |code: u32| {
-        if !G_SHM.is_null() { shm_write_u32(G_SHM, 0x2084, code); }
+        if !G_SHM.is_null() {
+            shm_write_u32(G_SHM, OFF_GTC64_INSTALL_DIAG, code);
+        }
     };
     write_diag(0x2001); // entered hook_at
 
     // Build wrapper: call game_tick_dispatch, then tail-call real GTC64
     let thunk_size = 128;
     let thunk = VirtualAlloc(core::ptr::null(), thunk_size, 0x3000, 0x40) as *mut u8;
-    if thunk.is_null() { write_diag(0x2E02); return false; }
+    if thunk.is_null() {
+        write_diag(0x2E02);
+        return false;
+    }
     let _ = real_fn; // silence unused warning (addr captured below via G_GTC64_TRAMPOLINE)
     write_diag(0x2002);
 
-    let mut w = ThunkWriter { buf: thunk, offset: 0 };
+    let mut w = ThunkWriter {
+        buf: thunk,
+        offset: 0,
+    };
 
     // Save volatile regs (GTC64 clobbers rax, rcx, rdx, r8-r11)
-    w.emit(&[0x50]);                         // push rax
-    w.emit(&[0x51]);                         // push rcx
-    w.emit(&[0x52]);                         // push rdx
-    w.emit(&[0x41, 0x50]);                   // push r8
-    w.emit(&[0x41, 0x51]);                   // push r9
-    w.emit(&[0x41, 0x52]);                   // push r10
-    w.emit(&[0x41, 0x53]);                   // push r11
-    w.emit(&[0x48, 0x83, 0xEC, 0x28]);       // sub rsp, 0x28
+    w.emit(&[0x50]); // push rax
+    w.emit(&[0x51]); // push rcx
+    w.emit(&[0x52]); // push rdx
+    w.emit(&[0x41, 0x50]); // push r8
+    w.emit(&[0x41, 0x51]); // push r9
+    w.emit(&[0x41, 0x52]); // push r10
+    w.emit(&[0x41, 0x53]); // push r11
+    w.emit(&[0x48, 0x83, 0xEC, 0x28]); // sub rsp, 0x28
 
     // call game_tick_dispatch
     let dispatch_addr = game_tick_dispatch as *const () as usize;
-    w.emit(&[0x48, 0xB8]);                   // mov rax, imm64
+    w.emit(&[0x48, 0xB8]); // mov rax, imm64
     w.emit(&(dispatch_addr as u64).to_le_bytes());
-    w.emit(&[0xFF, 0xD0]);                   // call rax
+    w.emit(&[0xFF, 0xD0]); // call rax
 
     // Restore
-    w.emit(&[0x48, 0x83, 0xC4, 0x28]);       // add rsp, 0x28
-    w.emit(&[0x41, 0x5B]);                   // pop r11
-    w.emit(&[0x41, 0x5A]);                   // pop r10
-    w.emit(&[0x41, 0x59]);                   // pop r9
-    w.emit(&[0x41, 0x58]);                   // pop r8
-    w.emit(&[0x5A]);                         // pop rdx
-    w.emit(&[0x59]);                         // pop rcx
-    w.emit(&[0x58]);                         // pop rax
+    w.emit(&[0x48, 0x83, 0xC4, 0x28]); // add rsp, 0x28
+    w.emit(&[0x41, 0x5B]); // pop r11
+    w.emit(&[0x41, 0x5A]); // pop r10
+    w.emit(&[0x41, 0x59]); // pop r9
+    w.emit(&[0x41, 0x58]); // pop r8
+    w.emit(&[0x5A]); // pop rdx
+    w.emit(&[0x59]); // pop rcx
+    w.emit(&[0x58]); // pop rax
 
     // JMP to real target (tail call to GTC64 or fallback timeGetTime etc.)
     let real_addr = real_fn;
-    w.emit(&[0x48, 0xB8]);                   // mov rax, imm64
+    w.emit(&[0x48, 0xB8]); // mov rax, imm64
     w.emit(&(real_addr as u64).to_le_bytes());
-    w.emit(&[0xFF, 0xE0]);                   // jmp rax
+    w.emit(&[0xFF, 0xE0]); // jmp rax
     write_diag(0x2003);
 
     // Patch IAT entry: overwrite pointer with our thunk address
     let mut old_prot: u32 = 0;
-    VirtualProtect(iat_entry as _, 8, 0x04 /* PAGE_READWRITE */, &mut old_prot);
+    VirtualProtect(
+        iat_entry as _,
+        8,
+        0x04, /* PAGE_READWRITE */
+        &mut old_prot,
+    );
     *(iat_entry as *mut usize) = thunk as usize;
     VirtualProtect(iat_entry as _, 8, old_prot, &mut old_prot);
     write_diag(0x20FF); // success
+    G_GTC64_IAT_ENTRY = iat_entry;
+    G_GTC64_TRAMPOLINE = real_fn as *const u8;
+    G_GTC64_HOOK_THUNK = thunk;
 
     true
 }
 
+unsafe fn uninstall_gtc64_hook() {
+    let iat_entry = G_GTC64_IAT_ENTRY;
+    let real_fn = G_GTC64_TRAMPOLINE as usize;
+    if iat_entry == 0 || real_fn == 0 {
+        G_GTC64_IAT_ENTRY = 0;
+        G_GTC64_HOOK_THUNK = core::ptr::null_mut();
+        return;
+    }
+
+    let mut old_prot: u32 = 0;
+    if VirtualProtect(
+        iat_entry as _,
+        8,
+        0x04, /* PAGE_READWRITE */
+        &mut old_prot,
+    ) != 0
+    {
+        *(iat_entry as *mut usize) = real_fn;
+        let mut dummy: u32 = 0;
+        VirtualProtect(iat_entry as _, 8, old_prot, &mut dummy);
+    }
+
+    G_GTC64_IAT_ENTRY = 0;
+    G_GTC64_TRAMPOLINE = core::ptr::null();
+    G_GTC64_HOOK_THUNK = core::ptr::null_mut();
+}
+
 /// Dump first 8 IAT entries' values to SHM 0x2088..0x20C8 for diagnostics.
 unsafe fn dump_first_iat_entries(module_base: usize) {
-    if G_SHM.is_null() { return; }
+    if G_SHM.is_null() {
+        return;
+    }
     let dos = module_base as *const u8;
     let e_lfanew = *(dos.add(0x3C) as *const u32) as usize;
     let nt = dos.add(e_lfanew);
     let import_dir_rva = *(nt.add(0x18 + 0x70 + 8) as *const u32) as usize;
-    if import_dir_rva == 0 { return; }
+    if import_dir_rva == 0 {
+        return;
+    }
     let mut desc = module_base + import_dir_rva;
     let mut count = 0;
     loop {
         let first_thunk = *((desc as *const u32).add(4)) as usize;
-        if first_thunk == 0 { break; }
+        if first_thunk == 0 {
+            break;
+        }
         let mut iat_slot = module_base + first_thunk;
         loop {
             let entry = *(iat_slot as *const usize);
-            if entry == 0 { break; }
+            if entry == 0 {
+                break;
+            }
             if count < 8 {
                 shm_write_u64(G_SHM, 0x2088 + count * 8, entry as u64);
                 count += 1;
@@ -3936,7 +5938,9 @@ unsafe fn dump_first_iat_entries(module_base: usize) {
             iat_slot += 8;
         }
         desc += 20;
-        if count >= 8 { break; }
+        if count >= 8 {
+            break;
+        }
     }
 }
 
@@ -3950,16 +5954,22 @@ unsafe fn find_any_kernel32_iat_entry(module_base: usize, kernel32_base: usize) 
     let e_lfanew = *(dos.add(0x3C) as *const u32) as usize;
     let nt = dos.add(e_lfanew);
     let import_dir_rva = *(nt.add(0x18 + 0x70 + 8) as *const u32) as usize;
-    if import_dir_rva == 0 { return (0, 0); }
+    if import_dir_rva == 0 {
+        return (0, 0);
+    }
     let kernel32_end = kernel32_base + 0x200000; // ~2MB conservative bound
     let mut desc = module_base + import_dir_rva;
     loop {
         let first_thunk = *((desc as *const u32).add(4)) as usize;
-        if first_thunk == 0 { break; }
+        if first_thunk == 0 {
+            break;
+        }
         let mut iat_slot = module_base + first_thunk;
         loop {
             let entry = *(iat_slot as *const usize);
-            if entry == 0 { break; }
+            if entry == 0 {
+                break;
+            }
             if entry >= kernel32_base && entry < kernel32_end {
                 return (iat_slot, entry);
             }
@@ -3977,20 +5987,26 @@ unsafe fn find_iat_entry(module_base: usize, target_fn_addr: usize) -> usize {
     let nt = dos.add(e_lfanew);
     // OptionalHeader offset for x64: nt + 0x18, DataDirectory at +0x70 (Import Table = index 1)
     let import_dir_rva = *(nt.add(0x18 + 0x70 + 8) as *const u32) as usize; // DD[1].VirtualAddress
-    if import_dir_rva == 0 { return 0; }
+    if import_dir_rva == 0 {
+        return 0;
+    }
 
     let mut desc = module_base + import_dir_rva;
     // IMAGE_IMPORT_DESCRIPTOR: 5 DWORDs (20 bytes each)
     loop {
         let orig_first_thunk = *(desc as *const u32) as usize; // OriginalFirstThunk (name table)
         let first_thunk = *((desc as *const u32).add(4)) as usize; // FirstThunk (IAT)
-        if orig_first_thunk == 0 && first_thunk == 0 { break; }
+        if orig_first_thunk == 0 && first_thunk == 0 {
+            break;
+        }
 
         // Walk IAT entries
         let mut iat_slot = module_base + first_thunk;
         loop {
             let entry = *(iat_slot as *const usize);
-            if entry == 0 { break; }
+            if entry == 0 {
+                break;
+            }
             if entry == target_fn_addr {
                 return iat_slot;
             }
@@ -4044,8 +6060,12 @@ unsafe fn dispatch_dr_probe(shm: *mut SharedBuffer) {
 
     let mut te = THREADENTRY32 {
         dwSize: core::mem::size_of::<THREADENTRY32>() as u32,
-        cntUsage: 0, th32ThreadID: 0, th32OwnerProcessID: 0,
-        tpBasePri: 0, tpDeltaPri: 0, dwFlags: 0,
+        cntUsage: 0,
+        th32ThreadID: 0,
+        th32OwnerProcessID: 0,
+        tpBasePri: 0,
+        tpDeltaPri: 0,
+        dwFlags: 0,
     };
 
     if Thread32First(snap, &mut te) == 0 {
@@ -4107,7 +6127,7 @@ unsafe fn dispatch_dr_probe(shm: *mut SharedBuffer) {
 }
 
 struct DrProbeResult {
-    step_failed: u32,  // 0=ok 1=open 2=suspend 3=getctx1 4=setctx 5=getctx2
+    step_failed: u32, // 0=ok 1=open 2=suspend 3=getctx1 4=setctx 5=getctx2
     last_err: u32,
     dr0_orig: u64,
     dr7_orig: u64,
@@ -4115,7 +6135,13 @@ struct DrProbeResult {
 }
 
 unsafe fn probe_thread(tid: u32) -> DrProbeResult {
-    let mut r = DrProbeResult { step_failed: 0, last_err: 0, dr0_orig: 0, dr7_orig: 0, dr0_after: 0 };
+    let mut r = DrProbeResult {
+        step_failed: 0,
+        last_err: 0,
+        dr0_orig: 0,
+        dr7_orig: 0,
+        dr0_after: 0,
+    };
 
     // THREAD_ALL_ACCESS = 0x1FFFFF
     let h = OpenThread(0x1FFFFF, 0, tid);
@@ -4235,7 +6261,11 @@ unsafe fn ensure_dr_ctx_buf() -> *mut u8 {
 unsafe fn dispatch_hwbp_install(shm: *mut SharedBuffer) {
     // Resolve target: explicit VA in payload OR fall back to G_DUAL_SEND_WRAP
     let target_arg = shm_read_u64(shm as *const SharedBuffer, OFF_PACKET_DATA);
-    let target = if target_arg != 0 { target_arg as usize } else { G_DUAL_SEND_WRAP };
+    let target = if target_arg != 0 {
+        target_arg as usize
+    } else {
+        G_DUAL_SEND_WRAP
+    };
     if target == 0 {
         shm_write_u32(shm, OFF_ERROR_CODE, 0xE610);
         shm_write_u32(shm, OFF_STATUS_FLAG, STATUS_ERROR);
@@ -4331,7 +6361,9 @@ struct DrArmArgs {
 /// never fire for packet sends from the bot.
 unsafe extern "system" fn dr_arm_worker(param: *mut core::ffi::c_void) -> DWORD {
     let args = param as *mut DrArmArgs;
-    if args.is_null() { return 1; }
+    if args.is_null() {
+        return 1;
+    }
     // Sentinel — proves worker ran. Should appear in install_ok=12345.
     (*args).ok = 12345;
     // Mark worker entered. Diagnostic offset 0x2060 = OFF_HWBP_WORKER_PROGRESS.
@@ -4352,18 +6384,26 @@ unsafe extern "system" fn dr_arm_worker(param: *mut core::ffi::c_void) -> DWORD 
 
     let snap = CreateToolhelp32Snapshot(0x00000004, 0);
     if snap.is_null() || snap == (-1isize as HANDLE) {
-        if !G_SHM.is_null() { shm_write_u32(G_SHM, 0x2060, 0xC003); }
+        if !G_SHM.is_null() {
+            shm_write_u32(G_SHM, 0x2060, 0xC003);
+        }
         (*args).fail = 1;
         return 0;
     }
     let mut te = THREADENTRY32 {
         dwSize: core::mem::size_of::<THREADENTRY32>() as u32,
-        cntUsage: 0, th32ThreadID: 0, th32OwnerProcessID: 0,
-        tpBasePri: 0, tpDeltaPri: 0, dwFlags: 0,
+        cntUsage: 0,
+        th32ThreadID: 0,
+        th32OwnerProcessID: 0,
+        tpBasePri: 0,
+        tpDeltaPri: 0,
+        dwFlags: 0,
     };
     if Thread32First(snap, &mut te) == 0 {
         CloseHandle(snap);
-        if !G_SHM.is_null() { shm_write_u32(G_SHM, 0x2060, 0xC004); }
+        if !G_SHM.is_null() {
+            shm_write_u32(G_SHM, 0x2060, 0xC004);
+        }
         (*args).fail = 1;
         return 0;
     }
@@ -4414,8 +6454,12 @@ unsafe fn set_dr0_all_threads(dr0: u64, dr7: u64) -> (u32, u32) {
     }
     let mut te = THREADENTRY32 {
         dwSize: core::mem::size_of::<THREADENTRY32>() as u32,
-        cntUsage: 0, th32ThreadID: 0, th32OwnerProcessID: 0,
-        tpBasePri: 0, tpDeltaPri: 0, dwFlags: 0,
+        cntUsage: 0,
+        th32ThreadID: 0,
+        th32OwnerProcessID: 0,
+        tpBasePri: 0,
+        tpDeltaPri: 0,
+        dwFlags: 0,
     };
     if Thread32First(snap, &mut te) == 0 {
         CloseHandle(snap);
@@ -4450,8 +6494,12 @@ unsafe fn reenum_dr0_all_threads(target_dr0: u64, dr7: u64) -> u32 {
     }
     let mut te = THREADENTRY32 {
         dwSize: core::mem::size_of::<THREADENTRY32>() as u32,
-        cntUsage: 0, th32ThreadID: 0, th32OwnerProcessID: 0,
-        tpBasePri: 0, tpDeltaPri: 0, dwFlags: 0,
+        cntUsage: 0,
+        th32ThreadID: 0,
+        th32OwnerProcessID: 0,
+        tpBasePri: 0,
+        tpDeltaPri: 0,
+        dwFlags: 0,
     };
     if Thread32First(snap, &mut te) == 0 {
         CloseHandle(snap);
@@ -4488,8 +6536,12 @@ unsafe fn verify_dr0_all_threads(target_dr0: u64) -> (u32, u32) {
     }
     let mut te = THREADENTRY32 {
         dwSize: core::mem::size_of::<THREADENTRY32>() as u32,
-        cntUsage: 0, th32ThreadID: 0, th32OwnerProcessID: 0,
-        tpBasePri: 0, tpDeltaPri: 0, dwFlags: 0,
+        cntUsage: 0,
+        th32ThreadID: 0,
+        th32OwnerProcessID: 0,
+        tpBasePri: 0,
+        tpDeltaPri: 0,
+        dwFlags: 0,
     };
     if Thread32First(snap, &mut te) == 0 {
         CloseHandle(snap);
@@ -4515,10 +6567,15 @@ unsafe fn verify_dr0_all_threads(target_dr0: u64) -> (u32, u32) {
 
 unsafe fn try_set_dr_on_thread(tid: u32, dr0: u64, dr7: u64) -> bool {
     let h = OpenThread(0x1FFFFF, 0, tid);
-    if h.is_null() { return false; }
+    if h.is_null() {
+        return false;
+    }
 
     let suspended = SuspendThread(h);
-    if suspended == 0xFFFFFFFF { CloseHandle(h); return false; }
+    if suspended == 0xFFFFFFFF {
+        CloseHandle(h);
+        return false;
+    }
 
     let ctx = ensure_dr_ctx_buf();
     if ctx.is_null() {
@@ -4548,9 +6605,14 @@ unsafe fn try_set_dr_on_thread(tid: u32, dr0: u64, dr7: u64) -> bool {
 
 unsafe fn read_dr0_on_thread(tid: u32) -> u64 {
     let h = OpenThread(0x1FFFFF, 0, tid);
-    if h.is_null() { return 0; }
+    if h.is_null() {
+        return 0;
+    }
     let suspended = SuspendThread(h);
-    if suspended == 0xFFFFFFFF { CloseHandle(h); return 0; }
+    if suspended == 0xFFFFFFFF {
+        CloseHandle(h);
+        return 0;
+    }
 
     let ctx = ensure_dr_ctx_buf();
     if ctx.is_null() {
@@ -4573,9 +6635,13 @@ unsafe fn read_dr0_on_thread(tid: u32) -> u64 {
 
 /// VEH SS handler. Catches EXCEPTION_SINGLE_STEP at G_HWBP_TARGET.
 unsafe extern "system" fn hwbp_ss_veh(info: *mut EXCEPTION_POINTERS) -> i32 {
-    if info.is_null() { return EXCEPTION_CONTINUE_SEARCH; }
+    if info.is_null() {
+        return EXCEPTION_CONTINUE_SEARCH;
+    }
     let rec = (*info).ExceptionRecord;
-    if rec.is_null() { return EXCEPTION_CONTINUE_SEARCH; }
+    if rec.is_null() {
+        return EXCEPTION_CONTINUE_SEARCH;
+    }
 
     let code = (*rec).ExceptionCode;
 
@@ -4606,13 +6672,21 @@ unsafe extern "system" fn hwbp_ss_veh(info: *mut EXCEPTION_POINTERS) -> i32 {
         }
     }
 
-    if code != EXCEPTION_SINGLE_STEP { return EXCEPTION_CONTINUE_SEARCH; }
-    if !G_HWBP_INSTALLED { return EXCEPTION_CONTINUE_SEARCH; }
+    if code != EXCEPTION_SINGLE_STEP {
+        return EXCEPTION_CONTINUE_SEARCH;
+    }
+    if !G_HWBP_INSTALLED {
+        return EXCEPTION_CONTINUE_SEARCH;
+    }
     let target = G_HWBP_TARGET as u64;
-    if target == 0 { return EXCEPTION_CONTINUE_SEARCH; }
+    if target == 0 {
+        return EXCEPTION_CONTINUE_SEARCH;
+    }
 
     let ctx = (*info).ContextRecord as *mut u8;
-    if ctx.is_null() { return EXCEPTION_CONTINUE_SEARCH; }
+    if ctx.is_null() {
+        return EXCEPTION_CONTINUE_SEARCH;
+    }
 
     let rip = core::ptr::read_unaligned(ctx.add(0xF8) as *const u64);
 
@@ -4673,8 +6747,8 @@ unsafe fn push_hwbp_entry(shm: *mut SharedBuffer, ctx: *mut u8) {
     let rax = read_reg(0x78);
     let rcx = read_reg(0x80);
     let rdx = read_reg(0x88);
-    let r8  = read_reg(0xB8);
-    let r9  = read_reg(0xC0);
+    let r8 = read_reg(0xB8);
+    let r9 = read_reg(0xC0);
     let r10 = read_reg(0xC8);
     let r11 = read_reg(0xD0);
 
@@ -4689,29 +6763,19 @@ unsafe fn push_hwbp_entry(shm: *mut SharedBuffer, ctx: *mut u8) {
     core::ptr::write_unaligned(entry.add(0x50) as *mut u64, r10);
     core::ptr::write_unaligned(entry.add(0x58) as *mut u64, r11);
 
-    // Callstack via RBP unwind. We're ON the thread, so we can just deref RBP.
-    // Each frame: [rbp+0] = saved_rbp, [rbp+8] = return_addr.
-    // (Works for MSVC frame-pointer-omission-disabled binaries; D2R may FPO,
-    // in which case we get garbage for some slots, but tail RIPs may still
-    // resolve.)
-    let mut cur_rbp = rbp;
+    // Store raw entry-stack qwords instead of walking RBP. Vendor/native call
+    // arg capture needs stack args, and D2R frequently omits frame pointers.
     let cs_off = entry.add(0x60);
-    // First slot = current RIP.
-    core::ptr::write_unaligned(cs_off as *mut u64, rip);
-    let mut i = 1;
+    let mut i = 0;
     while i < 16 {
-        if cur_rbp < 0x10000 || cur_rbp >= 0x0000_7FFF_FFFF_FFFF || (cur_rbp & 7) != 0 {
-            core::ptr::write_unaligned(cs_off.add(i * 8) as *mut u64, 0);
-            break;
-        }
+        let addr = rsp.wrapping_add((i * 8) as u64) as usize;
+        let val = if is_user_va(addr) {
+            core::ptr::read_unaligned(addr as *const u64)
+        } else {
+            0
+        };
         // Defensive read — if RBP is bad we'll AV; wrapping in SEH would be
-        // ideal but no_std makes that awkward. RBP-walk on FPO code can
-        // dereference unmapped pages. For now, accept best-effort.
-        let saved_rbp = core::ptr::read_unaligned(cur_rbp as *const u64);
-        let ret_addr  = core::ptr::read_unaligned((cur_rbp + 8) as *const u64);
-        core::ptr::write_unaligned(cs_off.add(i * 8) as *mut u64, ret_addr);
-        if saved_rbp <= cur_rbp { break; }
-        cur_rbp = saved_rbp;
+        core::ptr::write_unaligned(cs_off.add(i * 8) as *mut u64, val);
         i += 1;
     }
 
@@ -4759,10 +6823,15 @@ extern "system" {
 ///   rcx = plaintext packet pointer (pre-encrypt buffer in D2R heap)
 ///   rdx = packet size in bytes
 #[no_mangle]
-unsafe extern "C" fn capture_recorder(pkt_ptr: *const u8, size: u32) {
-    if !G_CAP_INSTALLED { return; }
+unsafe extern "C" fn capture_recorder(pkt_ptr: *const u8, size: u32) -> u32 {
+    if !G_CAP_INSTALLED {
+        return 0;
+    }
     let shm = G_SHM;
-    if shm.is_null() { return; }
+    if shm.is_null() {
+        return 0;
+    }
+    let suppress = should_suppress_vendor_packet(pkt_ptr, size);
 
     // Bump "fires" counter — repurposes OFF_HWBP_FIRES for capture total.
     let prev = shm_read_u32(shm as *const SharedBuffer, OFF_HWBP_FIRES);
@@ -4776,7 +6845,7 @@ unsafe extern "C" fn capture_recorder(pkt_ptr: *const u8, size: u32) {
         // Ring full; drop.
         let dropped = shm_read_u32(shm as *const SharedBuffer, OFF_HWBP_RING_DROPPED);
         shm_write_u32(shm, OFF_HWBP_RING_DROPPED, dropped.wrapping_add(1));
-        return;
+        return suppress;
     }
 
     let entry = (shm as *mut u8).add(OFF_HWBP_RING + (head as usize) * HWBP_ENTRY_SIZE);
@@ -4790,8 +6859,15 @@ unsafe extern "C" fn capture_recorder(pkt_ptr: *const u8, size: u32) {
     // +0x10 pkt_ptr (u64)
     core::ptr::write_unaligned(entry.add(0x10) as *mut u64, pkt_ptr as u64);
     // +0x18 payload (up to CAP_PAYLOAD_MAX bytes)
-    let copy_n = if (size as usize) < CAP_PAYLOAD_MAX { size as usize } else { CAP_PAYLOAD_MAX };
-    if !pkt_ptr.is_null() && (pkt_ptr as usize) > 0x10000 && (pkt_ptr as usize) < 0x0000_7FFF_FFFF_FFFF {
+    let copy_n = if (size as usize) < CAP_PAYLOAD_MAX {
+        size as usize
+    } else {
+        CAP_PAYLOAD_MAX
+    };
+    if !pkt_ptr.is_null()
+        && (pkt_ptr as usize) > 0x10000
+        && (pkt_ptr as usize) < 0x0000_7FFF_FFFF_FFFF
+    {
         let dst = entry.add(CAP_PAYLOAD_OFF);
         let mut i = 0;
         while i < copy_n {
@@ -4803,48 +6879,93 @@ unsafe extern "C" fn capture_recorder(pkt_ptr: *const u8, size: u32) {
     shm_write_u32(shm, OFF_HWBP_RING_HEAD, next_head);
     let total = shm_read_u32(shm as *const SharedBuffer, OFF_HWBP_RING_TOTAL);
     shm_write_u32(shm, OFF_HWBP_RING_TOTAL, total.wrapping_add(1));
+    suppress
+}
+
+unsafe fn should_suppress_vendor_packet(pkt_ptr: *const u8, size: u32) -> u32 {
+    if G_CAP_SUPPRESS_VENDOR.load(Ordering::Relaxed) == 0 {
+        return 0;
+    }
+    if pkt_ptr.is_null()
+        || size == 0
+        || (pkt_ptr as usize) <= 0x10000
+        || (pkt_ptr as usize) >= 0x0000_7FFF_FFFF_FFFF
+    {
+        return 0;
+    }
+    let opcode = *pkt_ptr;
+    if opcode == 0x32 || opcode == 0x33 {
+        1
+    } else {
+        0
+    }
 }
 
 /// Build the handler thunk in RWX memory. Layout:
 ///   push rax; push rcx; push rdx; push r8; push r9; push r10; push r11
 ///   sub rsp, 0x28                 ; shadow space + align
 ///   mov rax, imm64 (capture_recorder)
-///   call rax                      ; rcx/rdx unchanged from caller = pkt_ptr, size
+///   call rax                      ; returns eax=1 to suppress current send
+///   test eax,eax; jnz suppress
 ///   add rsp, 0x28
 ///   pop r11; pop r10; pop r9; pop r8; pop rdx; pop rcx; pop rax
 ///   jmp [rip+0]
 ///   dq trampoline_addr
+/// suppress:
+///   restore thunk pushes, unwind send_fn's partial prologue, return to caller
 unsafe fn build_capture_thunk(dst: *mut u8, trampoline_addr: usize) -> usize {
-    let mut i: usize = 0;
-    let mut emit = |bytes: &[u8]| {
+    unsafe fn emit(dst: *mut u8, i: &mut usize, bytes: &[u8]) {
         for &b in bytes {
-            *dst.add(i) = b;
-            i += 1;
+            *dst.add(*i) = b;
+            *i += 1;
         }
-    };
-    emit(&[0x50]);                              // push rax
-    emit(&[0x51]);                              // push rcx
-    emit(&[0x52]);                              // push rdx
-    emit(&[0x41, 0x50]);                        // push r8
-    emit(&[0x41, 0x51]);                        // push r9
-    emit(&[0x41, 0x52]);                        // push r10
-    emit(&[0x41, 0x53]);                        // push r11
-    emit(&[0x48, 0x83, 0xEC, 0x28]);           // sub rsp, 0x28
+    }
+    let mut i: usize = 0;
+    emit(dst, &mut i, &[0x50]); // push rax
+    emit(dst, &mut i, &[0x51]); // push rcx
+    emit(dst, &mut i, &[0x52]); // push rdx
+    emit(dst, &mut i, &[0x41, 0x50]); // push r8
+    emit(dst, &mut i, &[0x41, 0x51]); // push r9
+    emit(dst, &mut i, &[0x41, 0x52]); // push r10
+    emit(dst, &mut i, &[0x41, 0x53]); // push r11
+    emit(dst, &mut i, &[0x48, 0x83, 0xEC, 0x28]); // sub rsp, 0x28
     let rec_addr = capture_recorder as *const () as u64;
-    emit(&[0x48, 0xB8]);                        // mov rax, imm64
-    emit(&rec_addr.to_le_bytes());
-    emit(&[0xFF, 0xD0]);                        // call rax
-    emit(&[0x48, 0x83, 0xC4, 0x28]);           // add rsp, 0x28
-    emit(&[0x41, 0x5B]);                        // pop r11
-    emit(&[0x41, 0x5A]);                        // pop r10
-    emit(&[0x41, 0x59]);                        // pop r9
-    emit(&[0x41, 0x58]);                        // pop r8
-    emit(&[0x5A]);                              // pop rdx
-    emit(&[0x59]);                              // pop rcx
-    emit(&[0x58]);                              // pop rax
-    // abs JMP to trampoline: FF 25 00 00 00 00 <qword>
-    emit(&[0xFF, 0x25, 0x00, 0x00, 0x00, 0x00]);
-    emit(&(trampoline_addr as u64).to_le_bytes());
+    emit(dst, &mut i, &[0x48, 0xB8]); // mov rax, imm64
+    emit(dst, &mut i, &rec_addr.to_le_bytes());
+    emit(dst, &mut i, &[0xFF, 0xD0]); // call rax
+    emit(dst, &mut i, &[0x85, 0xC0]); // test eax, eax
+    emit(dst, &mut i, &[0x0F, 0x85]); // jnz rel32 suppress (patched below)
+    let suppress_jcc_disp = i;
+    emit(dst, &mut i, &[0x00, 0x00, 0x00, 0x00]);
+    emit(dst, &mut i, &[0x48, 0x83, 0xC4, 0x28]); // add rsp, 0x28
+    emit(dst, &mut i, &[0x41, 0x5B]); // pop r11
+    emit(dst, &mut i, &[0x41, 0x5A]); // pop r10
+    emit(dst, &mut i, &[0x41, 0x59]); // pop r9
+    emit(dst, &mut i, &[0x41, 0x58]); // pop r8
+    emit(dst, &mut i, &[0x5A]); // pop rdx
+    emit(dst, &mut i, &[0x59]); // pop rcx
+    emit(dst, &mut i, &[0x58]); // pop rax
+                                // abs JMP to trampoline: FF 25 00 00 00 00 <qword>
+    emit(dst, &mut i, &[0xFF, 0x25, 0x00, 0x00, 0x00, 0x00]);
+    emit(dst, &mut i, &(trampoline_addr as u64).to_le_bytes());
+    let suppress_label = i;
+    let rel = (suppress_label as isize - (suppress_jcc_disp as isize + 4)) as i32;
+    let rel_bytes = rel.to_le_bytes();
+    for j in 0..4 {
+        *dst.add(suppress_jcc_disp + j) = rel_bytes[j];
+    }
+    emit(dst, &mut i, &[0x48, 0x83, 0xC4, 0x28]); // add rsp, 0x28
+    emit(dst, &mut i, &[0x41, 0x5B]); // pop r11
+    emit(dst, &mut i, &[0x41, 0x5A]); // pop r10
+    emit(dst, &mut i, &[0x41, 0x59]); // pop r9
+    emit(dst, &mut i, &[0x41, 0x58]); // pop r8
+    emit(dst, &mut i, &[0x5A]); // pop rdx
+    emit(dst, &mut i, &[0x59]); // pop rcx
+    emit(dst, &mut i, &[0x58]); // pop rax
+    emit(dst, &mut i, &[0x48, 0x81, 0xC4, 0x50, 0x02, 0x00, 0x00]); // add rsp, 0x250
+    emit(dst, &mut i, &[0x5F]); // pop rdi
+    emit(dst, &mut i, &[0xB8, 0x01, 0x00, 0x00, 0x00]); // mov eax, 1
+    emit(dst, &mut i, &[0xC3]); // ret
     i
 }
 
@@ -4877,10 +6998,14 @@ const CAP_HOOK_OFFSET: usize = 31;
 const CAP_STEAL_BYTES: usize = 12;
 
 unsafe fn install_send_fn_capture_hook(shm: *mut SharedBuffer) -> bool {
-    if G_CAP_INSTALLED { return true; } // idempotent
+    if G_CAP_INSTALLED {
+        return true;
+    } // idempotent
 
     let target_base = shm_read_u64(shm as *const SharedBuffer, OFF_FN_SEND_PACKET) as usize;
-    if target_base == 0 { return false; }
+    if target_base == 0 {
+        return false;
+    }
     // Hook location = send_fn + 31 (past Arxan-scanned prologue). rcx/rdx
     // still carry the original caller args at this point.
     let hook = target_base + CAP_HOOK_OFFSET;
@@ -4892,7 +7017,9 @@ unsafe fn install_send_fn_capture_hook(shm: *mut SharedBuffer) -> bool {
         MEM_COMMIT | MEM_RESERVE,
         PAGE_EXECUTE_READWRITE,
     ) as *mut u8;
-    if page.is_null() { return false; }
+    if page.is_null() {
+        return false;
+    }
 
     // 2. Copy stolen CAP_STEAL_BYTES (12) from hook point into trampoline.
     let src = hook as *const u8;
@@ -4915,7 +7042,8 @@ unsafe fn install_send_fn_capture_hook(shm: *mut SharedBuffer) -> bool {
         CAP_STEAL_BYTES,
         PAGE_EXECUTE_READWRITE,
         &mut old_prot,
-    ) == 0 {
+    ) == 0
+    {
         return false;
     }
     G_CAP_ORIG_PROT = old_prot;
@@ -4935,7 +7063,12 @@ unsafe fn install_send_fn_capture_hook(shm: *mut SharedBuffer) -> bool {
     FlushInstructionCache(GetCurrentProcess(), hook as _, CAP_STEAL_BYTES);
 
     let mut dummy: DWORD = 0;
-    VirtualProtect(hook as *const core::ffi::c_void, CAP_STEAL_BYTES, old_prot, &mut dummy);
+    VirtualProtect(
+        hook as *const core::ffi::c_void,
+        CAP_STEAL_BYTES,
+        old_prot,
+        &mut dummy,
+    );
 
     G_CAP_TRAMPOLINE = page;
     G_CAP_TARGET = target_base;
@@ -4951,10 +7084,14 @@ unsafe fn install_send_fn_capture_hook(shm: *mut SharedBuffer) -> bool {
 }
 
 unsafe fn uninstall_send_fn_capture_hook() {
-    if !G_CAP_INSTALLED { return; }
+    if !G_CAP_INSTALLED {
+        return;
+    }
     G_CAP_INSTALLED = false;
     let target_base = G_CAP_TARGET;
-    if target_base == 0 { return; }
+    if target_base == 0 {
+        return;
+    }
     let hook = target_base + CAP_HOOK_OFFSET;
 
     // Restore original CAP_STEAL_BYTES at hook point.
@@ -4964,19 +7101,264 @@ unsafe fn uninstall_send_fn_capture_hook() {
         CAP_STEAL_BYTES,
         PAGE_EXECUTE_READWRITE,
         &mut old_prot,
-    ) != 0 {
+    ) != 0
+    {
         let dst = hook as *mut u8;
         for i in 0..CAP_STEAL_BYTES {
             *dst.add(i) = G_CAP_ORIG_BYTES[i];
         }
         FlushInstructionCache(GetCurrentProcess(), hook as _, CAP_STEAL_BYTES);
         let mut dummy: DWORD = 0;
-        VirtualProtect(hook as *const core::ffi::c_void, CAP_STEAL_BYTES, old_prot, &mut dummy);
+        VirtualProtect(
+            hook as *const core::ffi::c_void,
+            CAP_STEAL_BYTES,
+            old_prot,
+            &mut dummy,
+        );
     }
     // Don't free trampoline immediately — an in-flight thunk might still be
     // running on another thread. Small permanent leak on uninstall is OK.
     G_CAP_TRAMPOLINE = core::ptr::null_mut();
     G_CAP_TARGET = 0;
+}
+
+#[no_mangle]
+unsafe extern "C" fn argtrace_recorder(saved: *const u64) {
+    let shm = G_SHM;
+    if shm.is_null() || !G_ARGTRACE_INSTALLED || saved.is_null() {
+        return;
+    }
+
+    let prev = shm_read_u32(shm as *const SharedBuffer, OFF_HWBP_FIRES);
+    shm_write_u32(shm, OFF_HWBP_FIRES, prev.wrapping_add(1));
+
+    let head = shm_read_u32(shm as *const SharedBuffer, OFF_HWBP_RING_HEAD);
+    let tail = shm_read_u32(shm as *const SharedBuffer, OFF_HWBP_RING_TAIL);
+    let max = HWBP_RING_ENTRIES as u32;
+    let next_head = (head + 1) % max;
+    if next_head == tail {
+        let dropped = shm_read_u32(shm as *const SharedBuffer, OFF_HWBP_RING_DROPPED);
+        shm_write_u32(shm, OFF_HWBP_RING_DROPPED, dropped.wrapping_add(1));
+        return;
+    }
+
+    // Thunk stack layout at `saved`:
+    //   [0]=r11 [1]=r10 [2]=r9 [3]=r8 [4]=rdx [5]=rcx [6]=rax [7]=rflags
+    let r11 = core::ptr::read_unaligned(saved.add(0));
+    let r10 = core::ptr::read_unaligned(saved.add(1));
+    let r9 = core::ptr::read_unaligned(saved.add(2));
+    let r8 = core::ptr::read_unaligned(saved.add(3));
+    let rdx = core::ptr::read_unaligned(saved.add(4));
+    let rcx = core::ptr::read_unaligned(saved.add(5));
+    let rax = core::ptr::read_unaligned(saved.add(6));
+    let orig_rsp = (saved as usize + 64) as u64;
+
+    let entry = (shm as *mut u8).add(OFF_HWBP_RING + (head as usize) * HWBP_ENTRY_SIZE);
+    core::ptr::write_unaligned(entry.add(0x00) as *mut u64, GetTickCount64());
+    core::ptr::write_unaligned(entry.add(0x08) as *mut u32, GetCurrentThreadId());
+    core::ptr::write_unaligned(entry.add(0x0C) as *mut u32, 0xA9A9_0001);
+    core::ptr::write_unaligned(entry.add(0x10) as *mut u64, G_ARGTRACE_HOOK as u64);
+    core::ptr::write_unaligned(entry.add(0x18) as *mut u64, orig_rsp);
+    core::ptr::write_unaligned(entry.add(0x20) as *mut u64, 0);
+    core::ptr::write_unaligned(entry.add(0x28) as *mut u64, rax);
+    core::ptr::write_unaligned(entry.add(0x30) as *mut u64, rcx);
+    core::ptr::write_unaligned(entry.add(0x38) as *mut u64, rdx);
+    core::ptr::write_unaligned(entry.add(0x40) as *mut u64, r8);
+    core::ptr::write_unaligned(entry.add(0x48) as *mut u64, r9);
+    core::ptr::write_unaligned(entry.add(0x50) as *mut u64, r10);
+    core::ptr::write_unaligned(entry.add(0x58) as *mut u64, r11);
+
+    // Reuse callstack slots for raw entry-stack qwords. For a normal MS x64
+    // callee entry, stack arg #5 is slot 5 ([rsp+0x28]) and arg #6 is slot 6.
+    let stack_base = orig_rsp as usize;
+    for i in 0..16 {
+        let val = if is_user_va(stack_base + i * 8) {
+            core::ptr::read_unaligned((stack_base + i * 8) as *const u64)
+        } else {
+            0
+        };
+        core::ptr::write_unaligned(entry.add(0x60 + i * 8) as *mut u64, val);
+    }
+    // Payload: for packet-wrapper hooks RCX points at the packet buffer and
+    // RDX is the packet length. Copy a small prefix immediately while the
+    // caller's stack/heap buffer is still valid; Go-side drain can then decode
+    // opcode/price without racing a post-return stack address.
+    let payload = entry.add(0xE0);
+    core::ptr::write_bytes(payload, 0, 32);
+    if is_user_va(rcx as usize) && rdx > 0 {
+        let copy_n = if rdx > 32 { 32usize } else { rdx as usize };
+        if page_readable(rcx as usize)
+            && page_readable((rcx as usize).saturating_add(copy_n).saturating_sub(1))
+        {
+            let pkt_ptr = rcx as *const u8;
+            let mut i = 0usize;
+            while i < copy_n {
+                *payload.add(i) = *pkt_ptr.add(i);
+                i += 1;
+            }
+        }
+    }
+
+    shm_write_u32(shm, OFF_HWBP_RING_HEAD, next_head);
+    let total = shm_read_u32(shm as *const SharedBuffer, OFF_HWBP_RING_TOTAL);
+    shm_write_u32(shm, OFF_HWBP_RING_TOTAL, total.wrapping_add(1));
+}
+
+unsafe fn build_argtrace_thunk(dst: *mut u8, trampoline_addr: usize) -> usize {
+    let mut i: usize = 0;
+    let mut emit = |bytes: &[u8]| {
+        for &b in bytes {
+            *dst.add(i) = b;
+            i += 1;
+        }
+    };
+    emit(&[0x9C]); // pushfq
+    emit(&[0x50]); // push rax
+    emit(&[0x51]); // push rcx
+    emit(&[0x52]); // push rdx
+    emit(&[0x41, 0x50]); // push r8
+    emit(&[0x41, 0x51]); // push r9
+    emit(&[0x41, 0x52]); // push r10
+    emit(&[0x41, 0x53]); // push r11
+    emit(&[0x48, 0x8B, 0xCC]); // mov rcx, rsp
+    emit(&[0x48, 0x83, 0xEC, 0x28]); // sub rsp, 0x28
+    let rec_addr = argtrace_recorder as *const () as u64;
+    emit(&[0x48, 0xB8]); // mov rax, imm64
+    emit(&rec_addr.to_le_bytes());
+    emit(&[0xFF, 0xD0]); // call rax
+    emit(&[0x48, 0x83, 0xC4, 0x28]); // add rsp, 0x28
+    emit(&[0x41, 0x5B]); // pop r11
+    emit(&[0x41, 0x5A]); // pop r10
+    emit(&[0x41, 0x59]); // pop r9
+    emit(&[0x41, 0x58]); // pop r8
+    emit(&[0x5A]); // pop rdx
+    emit(&[0x59]); // pop rcx
+    emit(&[0x58]); // pop rax
+    emit(&[0x9D]); // popfq
+    emit(&[0xFF, 0x25, 0x00, 0x00, 0x00, 0x00]);
+    emit(&(trampoline_addr as u64).to_le_bytes());
+    i
+}
+
+unsafe fn install_argtrace_hook(shm: *mut SharedBuffer) -> bool {
+    if G_ARGTRACE_INSTALLED {
+        let p = (shm as *const u8).add(OFF_PACKET_DATA);
+        let target = core::ptr::read_unaligned(p as *const u64) as usize;
+        let offset = core::ptr::read_unaligned(p.add(8) as *const u32) as usize;
+        if target != 0 && G_ARGTRACE_HOOK == target + offset {
+            return true;
+        }
+        uninstall_argtrace_hook();
+    }
+    let p = (shm as *const u8).add(OFF_PACKET_DATA);
+    let target = core::ptr::read_unaligned(p as *const u64) as usize;
+    let offset = core::ptr::read_unaligned(p.add(8) as *const u32) as usize;
+    if target == 0 || !is_user_va(target + offset) {
+        return false;
+    }
+    let hook = target + offset;
+
+    let page = VirtualAlloc(
+        core::ptr::null(),
+        4096,
+        MEM_COMMIT | MEM_RESERVE,
+        PAGE_EXECUTE_READWRITE,
+    ) as *mut u8;
+    if page.is_null() {
+        return false;
+    }
+
+    let src = hook as *const u8;
+    core::ptr::copy_nonoverlapping(src, page, ARGTRACE_STEAL_BYTES);
+    for i in 0..ARGTRACE_STEAL_BYTES {
+        G_ARGTRACE_ORIG_BYTES[i] = *src.add(i);
+    }
+    write_abs_jmp(page.add(ARGTRACE_STEAL_BYTES), hook + ARGTRACE_STEAL_BYTES);
+
+    let thunk = page.add(256);
+    build_argtrace_thunk(thunk, page as usize);
+
+    let mut old_prot: DWORD = 0;
+    if VirtualProtect(
+        hook as *const core::ffi::c_void,
+        ARGTRACE_STEAL_BYTES,
+        PAGE_EXECUTE_READWRITE,
+        &mut old_prot,
+    ) == 0
+    {
+        VirtualFree(page as _, 0, MEM_RELEASE);
+        return false;
+    }
+    G_ARGTRACE_ORIG_PROT = old_prot;
+
+    let dst = hook as *mut u8;
+    // Use RIP-relative absolute JMP instead of "mov rax; jmp rax".
+    // The recorder is specifically capturing entry registers, so the hook
+    // must not clobber RAX before the thunk saves it.
+    write_abs_jmp(dst, thunk as usize);
+    for i in 14..ARGTRACE_STEAL_BYTES {
+        *dst.add(i) = 0x90;
+    }
+    FlushInstructionCache(GetCurrentProcess(), hook as _, ARGTRACE_STEAL_BYTES);
+
+    let mut dummy: DWORD = 0;
+    VirtualProtect(
+        hook as *const core::ffi::c_void,
+        ARGTRACE_STEAL_BYTES,
+        old_prot,
+        &mut dummy,
+    );
+
+    G_ARGTRACE_TARGET = target;
+    G_ARGTRACE_HOOK = hook;
+    G_ARGTRACE_TRAMPOLINE = page;
+    G_ARGTRACE_INSTALLED = true;
+
+    shm_write_u32(shm, OFF_HWBP_INSTALLED, 1);
+    shm_write_u64(shm, OFF_HWBP_TARGET, hook as u64);
+    shm_write_u32(shm, OFF_HWBP_FIRES, 0);
+    shm_write_u32(shm, OFF_HWBP_RING_HEAD, 0);
+    shm_write_u32(shm, OFF_HWBP_RING_TAIL, 0);
+    shm_write_u32(shm, OFF_HWBP_RING_TOTAL, 0);
+    shm_write_u32(shm, OFF_HWBP_RING_DROPPED, 0);
+    true
+}
+
+unsafe fn uninstall_argtrace_hook() {
+    if !G_ARGTRACE_INSTALLED {
+        return;
+    }
+    G_ARGTRACE_INSTALLED = false;
+    let hook = G_ARGTRACE_HOOK;
+    if hook != 0 {
+        let mut old_prot: DWORD = 0;
+        if VirtualProtect(
+            hook as *const core::ffi::c_void,
+            ARGTRACE_STEAL_BYTES,
+            PAGE_EXECUTE_READWRITE,
+            &mut old_prot,
+        ) != 0
+        {
+            let dst = hook as *mut u8;
+            for i in 0..ARGTRACE_STEAL_BYTES {
+                *dst.add(i) = G_ARGTRACE_ORIG_BYTES[i];
+            }
+            FlushInstructionCache(GetCurrentProcess(), hook as _, ARGTRACE_STEAL_BYTES);
+            let mut dummy: DWORD = 0;
+            VirtualProtect(
+                hook as *const core::ffi::c_void,
+                ARGTRACE_STEAL_BYTES,
+                old_prot,
+                &mut dummy,
+            );
+        }
+    }
+    if !G_SHM.is_null() {
+        shm_write_u32(G_SHM, OFF_HWBP_INSTALLED, 0);
+    }
+    G_ARGTRACE_TARGET = 0;
+    G_ARGTRACE_HOOK = 0;
+    G_ARGTRACE_TRAMPOLINE = core::ptr::null_mut();
 }
 
 // ===========================================================================
@@ -4997,19 +7379,19 @@ mod sniffer_impl {
     pub const SHM_SIZE: usize = 65536;
 
     // Layout offsets in the sniffer SHM.
-    pub const OFF_MAGIC: usize     = 0x00; // u32: 0xCAFE0050
-    pub const OFF_ENABLED: usize   = 0x04; // u32: 1=capture on, 0=paused
-    pub const OFF_HEAD: usize      = 0x08; // u32: write cursor (entry index, wraps)
-    pub const OFF_TAIL: usize      = 0x0C; // u32: read cursor (Go advances this)
-    pub const OFF_TOTAL: usize     = 0x10; // u32: total entries ever written
-    pub const OFF_DROPPED: usize   = 0x14; // u32: overflow count (head caught tail)
-    pub const OFF_FRAME: usize     = 0x18; // u32: present frame counter
-    pub const OFF_BUF0_RVA: usize  = 0x20; // u32: RVA of buf0 (Go writes, e.g. 0x19ED886)
-    pub const OFF_BUF1_RVA: usize  = 0x24; // u32: RVA of buf1 (Go writes, e.g. 0x1F51330)
+    pub const OFF_MAGIC: usize = 0x00; // u32: 0xCAFE0050
+    pub const OFF_ENABLED: usize = 0x04; // u32: 1=capture on, 0=paused
+    pub const OFF_HEAD: usize = 0x08; // u32: write cursor (entry index, wraps)
+    pub const OFF_TAIL: usize = 0x0C; // u32: read cursor (Go advances this)
+    pub const OFF_TOTAL: usize = 0x10; // u32: total entries ever written
+    pub const OFF_DROPPED: usize = 0x14; // u32: overflow count (head caught tail)
+    pub const OFF_FRAME: usize = 0x18; // u32: present frame counter
+    pub const OFF_BUF0_RVA: usize = 0x20; // u32: RVA of buf0 (Go writes, e.g. 0x19ED886)
+    pub const OFF_BUF1_RVA: usize = 0x24; // u32: RVA of buf1 (Go writes, e.g. 0x1F51330)
     pub const OFF_BUF_WINDOW: usize = 0x28; // u32: capture window size (default 256)
     pub const OFF_PREV_BUF0: usize = 0x100; // 256B: previous buf0 snapshot
     pub const OFF_PREV_BUF1: usize = 0x200; // 256B: previous buf1 snapshot
-    pub const OFF_RING: usize      = 0x400; // ring entries start here
+    pub const OFF_RING: usize = 0x400; // ring entries start here
 
     // Ring entry: 272 bytes.
     // +0  u32 frame_no
@@ -5019,14 +7401,14 @@ mod sniffer_impl {
     // +10 u16 data_len
     // +12 u32 reserved
     // +16 u8[256] data
-    pub const ENTRY_SIZE: usize    = 272;
+    pub const ENTRY_SIZE: usize = 272;
     pub const ENTRY_DATA_OFF: usize = 16;
     pub const ENTRY_DATA_MAX: usize = 256;
 
-    pub const RING_BYTES: usize    = SHM_SIZE - OFF_RING;
-    pub const MAX_ENTRIES: usize   = RING_BYTES / ENTRY_SIZE; // ~239
+    pub const RING_BYTES: usize = SHM_SIZE - OFF_RING;
+    pub const MAX_ENTRIES: usize = RING_BYTES / ENTRY_SIZE; // ~239
 
-    pub const MAGIC_VALUE: u32     = 0xCAFE0050;
+    pub const MAGIC_VALUE: u32 = 0xCAFE0050;
 
     // Global state (only exists in sniffer builds).
     pub static mut G_SNIFF_SHM: *mut u8 = core::ptr::null_mut();
@@ -5109,7 +7491,9 @@ mod sniffer_impl {
                 SHM_SIZE as u32,
                 name_buf.as_ptr(),
             );
-            if h2.is_null() { return false; }
+            if h2.is_null() {
+                return false;
+            }
             h2
         } else {
             handle
@@ -5156,26 +7540,40 @@ mod sniffer_impl {
                 } else {
                     // Write failure marker
                     if !super::G_SHM.is_null() {
-                        super::shm_write_u32(super::G_SHM, super::OFF_ERROR_CODE, 0xCAFF0000 | INIT_ATTEMPTS);
+                        super::shm_write_u32(
+                            super::G_SHM,
+                            super::OFF_ERROR_CODE,
+                            0xCAFF0000 | INIT_ATTEMPTS,
+                        );
                     }
                 }
             }
-            if G_SNIFF_SHM.is_null() { return; }
+            if G_SNIFF_SHM.is_null() {
+                return;
+            }
         }
         let shm = G_SNIFF_SHM;
-        if shm.is_null() { return; }
-        if rd32(shm, OFF_ENABLED) == 0 { return; }
+        if shm.is_null() {
+            return;
+        }
+        if rd32(shm, OFF_ENABLED) == 0 {
+            return;
+        }
 
         G_FRAME_COUNTER = G_FRAME_COUNTER.wrapping_add(1);
         wr32(shm, OFF_FRAME, G_FRAME_COUNTER);
 
         let d2r_base = GetModuleHandleA(core::ptr::null()) as usize;
-        if d2r_base == 0 { return; }
+        if d2r_base == 0 {
+            return;
+        }
 
         let buf0_rva = rd32(shm, OFF_BUF0_RVA) as usize;
         let buf1_rva = rd32(shm, OFF_BUF1_RVA) as usize;
         let window = rd32(shm, OFF_BUF_WINDOW) as usize;
-        if window == 0 || window > 256 { return; }
+        if window == 0 || window > 256 {
+            return;
+        }
 
         // Read current buffer contents (in-process — just pointer deref)
         let buf0_ptr = (d2r_base + buf0_rva) as *const u8;
@@ -5232,7 +7630,14 @@ mod sniffer_impl {
     }
 
     /// Append one entry to the ring buffer.
-    unsafe fn write_entry(shm: *mut u8, buf_id: u8, opcode: u8, data: *const u8, len: u16, tick: u32) {
+    unsafe fn write_entry(
+        shm: *mut u8,
+        buf_id: u8,
+        opcode: u8,
+        data: *const u8,
+        len: u16,
+        tick: u32,
+    ) {
         let head = rd32(shm, OFF_HEAD) as usize;
         let tail = rd32(shm, OFF_TAIL) as usize;
 
@@ -5248,15 +7653,19 @@ mod sniffer_impl {
         let ep = shm.add(entry_off);
 
         // Write entry header
-        wr32(ep, 0, G_FRAME_COUNTER);       // frame_no
-        wr32(ep, 4, tick);                   // tick_ms
-        *ep.add(8) = buf_id;                 // buf_id
-        *ep.add(9) = opcode;                 // opcode
+        wr32(ep, 0, G_FRAME_COUNTER); // frame_no
+        wr32(ep, 4, tick); // tick_ms
+        *ep.add(8) = buf_id; // buf_id
+        *ep.add(9) = opcode; // opcode
         core::ptr::write_unaligned(ep.add(10) as *mut u16, len); // data_len
-        wr32(ep, 12, 0);                     // reserved
+        wr32(ep, 12, 0); // reserved
 
         // Copy data
-        let copy_len = if (len as usize) > ENTRY_DATA_MAX { ENTRY_DATA_MAX } else { len as usize };
+        let copy_len = if (len as usize) > ENTRY_DATA_MAX {
+            ENTRY_DATA_MAX
+        } else {
+            len as usize
+        };
         core::ptr::copy_nonoverlapping(data, ep.add(ENTRY_DATA_OFF), copy_len);
 
         // Advance head
@@ -5293,13 +7702,12 @@ unsafe fn sniffer_poll() {
 // stub, RBP unwind into ring buffer.
 // ===========================================================================
 
-
 // packet_trace module removed — Phase 6 work moved to fresh dedicated DLL
 // (rmod_tracer.dll) per project_packet_tracer_2026_04_15.md
 
 // ===========================================================================
 // SNAPSHOT (Phase A of P1-GID) — mirror D2R memory into SHM so bot reads
-// in-process, zero cross-process RPM. See PLAYER_UNIT_FIELDS.md.
+// in-process, zero cross-process RPM. See docs/archive/PLAYER_UNIT_FIELDS.md.
 // ===========================================================================
 
 /// Returns true if `va` is in canonical x64 user-space (above null page,
@@ -5317,13 +7725,13 @@ fn is_user_va(va: usize) -> bool {
 const VA_CACHE_SLOTS: usize = 64;
 struct VaCache {
     page_va: [usize; VA_CACHE_SLOTS],
-    valid:   [bool;  VA_CACHE_SLOTS],
+    valid: [bool; VA_CACHE_SLOTS],
     write_idx: usize,
 }
 
 static mut G_VA_CACHE: VaCache = VaCache {
     page_va: [0; VA_CACHE_SLOTS],
-    valid:   [false; VA_CACHE_SLOTS],
+    valid: [false; VA_CACHE_SLOTS],
     write_idx: 0,
 };
 
@@ -5363,9 +7771,8 @@ unsafe fn page_readable(va: usize) -> bool {
         &mut mbi as *mut MemoryBasicInformation as *mut core::ffi::c_void,
         mbi_size,
     );
-    let valid = got != 0
-        && mbi.state == MEM_COMMIT
-        && (mbi.protect & (PAGE_NOACCESS | PAGE_GUARD)) == 0;
+    let valid =
+        got != 0 && mbi.state == MEM_COMMIT && (mbi.protect & (PAGE_NOACCESS | PAGE_GUARD)) == 0;
 
     let idx = G_VA_CACHE.write_idx % VA_CACHE_SLOTS;
     G_VA_CACHE.page_va[idx] = page_va;
@@ -5428,7 +7835,10 @@ unsafe fn peb_find_module(target_name: &[u16]) -> usize {
         // BaseDllName UNICODE_STRING @ +0x58 (Length u16, MaxLength u16, _pad u32, Buffer *u16)
         let name_len = *((dll_table + 0x58) as *const u16) as usize / 2;
         let name_ptr = *((dll_table + 0x58 + 8) as *const *const u16);
-        if name_len == target_len && name_ptr != core::ptr::null() && peb_name_eq_ci(name_ptr, target_name, name_len) {
+        if name_len == target_len
+            && name_ptr != core::ptr::null()
+            && peb_name_eq_ci(name_ptr, target_name, name_len)
+        {
             return dll_base;
         }
         entry = *(entry as *const usize);
@@ -5451,9 +7861,15 @@ unsafe fn peb_name_eq_ci(a: *const u16, b: &[u16], n: usize) -> bool {
     for i in 0..n {
         let mut ca = *a.add(i);
         let mut cb = b[i];
-        if ca >= b'A' as u16 && ca <= b'Z' as u16 { ca += 32; }
-        if cb >= b'A' as u16 && cb <= b'Z' as u16 { cb += 32; }
-        if ca != cb { return false; }
+        if ca >= b'A' as u16 && ca <= b'Z' as u16 {
+            ca += 32;
+        }
+        if cb >= b'A' as u16 && cb <= b'Z' as u16 {
+            cb += 32;
+        }
+        if ca != cb {
+            return false;
+        }
     }
     true
 }
@@ -5467,7 +7883,9 @@ unsafe fn peb_name_eq_ci(a: *const u16, b: &[u16], n: usize) -> bool {
 /// pointers through → AV in Present callback → Arxan VEH cascade → zombie.
 #[inline(always)]
 unsafe fn d2r_read_u64(va: usize) -> u64 {
-    if !is_safe_va(va) { return 0; }
+    if !is_safe_va(va) {
+        return 0;
+    }
     // NtReadVirtualMemory kernel-probes the page. Unmapped / NOACCESS /
     // GUARD / mid-teardown pages return non-zero NTSTATUS instead of
     // raising an AV that cascades through crash_diag_veh and takes D2R
@@ -5483,13 +7901,17 @@ unsafe fn d2r_read_u64(va: usize) -> u64 {
         8,
         &mut br as *mut usize,
     );
-    if status != 0 || br != 8 { return 0; }
+    if status != 0 || br != 8 {
+        return 0;
+    }
     v
 }
 
 #[inline(always)]
 unsafe fn d2r_read_u32(va: usize) -> u32 {
-    if !is_safe_va(va) { return 0; }
+    if !is_safe_va(va) {
+        return 0;
+    }
     let mut v: u32 = 0;
     let mut br: usize = 0;
     let status = NtReadVirtualMemory(
@@ -5499,13 +7921,17 @@ unsafe fn d2r_read_u32(va: usize) -> u32 {
         4,
         &mut br as *mut usize,
     );
-    if status != 0 || br != 4 { return 0; }
+    if status != 0 || br != 4 {
+        return 0;
+    }
     v
 }
 
 #[inline(always)]
 unsafe fn d2r_read_u16(va: usize) -> u16 {
-    if !is_safe_va(va) { return 0; }
+    if !is_safe_va(va) {
+        return 0;
+    }
     let mut v: u16 = 0;
     let mut br: usize = 0;
     let status = NtReadVirtualMemory(
@@ -5515,13 +7941,17 @@ unsafe fn d2r_read_u16(va: usize) -> u16 {
         2,
         &mut br as *mut usize,
     );
-    if status != 0 || br != 2 { return 0; }
+    if status != 0 || br != 2 {
+        return 0;
+    }
     v
 }
 
 #[inline(always)]
 unsafe fn d2r_read_u8(va: usize) -> u8 {
-    if !is_safe_va(va) { return 0; }
+    if !is_safe_va(va) {
+        return 0;
+    }
     let mut v: u8 = 0;
     let mut br: usize = 0;
     let status = NtReadVirtualMemory(
@@ -5531,7 +7961,9 @@ unsafe fn d2r_read_u8(va: usize) -> u8 {
         1,
         &mut br as *mut usize,
     );
-    if status != 0 || br != 1 { return 0; }
+    if status != 0 || br != 1 {
+        return 0;
+    }
     v
 }
 
@@ -5584,11 +8016,14 @@ unsafe fn snapshot_add_region(
     // Write RegionEntry at index `region_count`.
     let entry_off = OFF_SNAPSHOT_REGIONS + region_count * SNAPSHOT_REGION_ENTRY_SIZE;
     let entry = base.add(entry_off) as *mut RegionEntry;
-    core::ptr::write(entry, RegionEntry {
-        va: va as u64,
-        len: len as u32,
-        offset: data_cursor as u32,
-    });
+    core::ptr::write(
+        entry,
+        RegionEntry {
+            va: va as u64,
+            len: len as u32,
+            offset: data_cursor as u32,
+        },
+    );
 
     (data_cursor + len, region_count + 1)
 }
@@ -5598,21 +8033,24 @@ unsafe fn snapshot_add_region(
 /// We copy them into globals, resolve D2R base, set enabled flag.
 unsafe fn dispatch_snapshot_init(shm: *mut SharedBuffer) {
     shm_write_u32(shm, OFF_DEBUG_STEP, 0x50); // enter snapshot init
-    // Phase C: derive per-boot XOR key from rdtsc (defeats static-scan
-    // signatures on D2R offset constants in rmod memory).
+                                              // Phase C: derive per-boot XOR key from rdtsc (defeats static-scan
+                                              // signatures on D2R offset constants in rmod memory).
     if G_SNAP_VA_XOR_KEY == 0 {
         // Mix high + low rdtsc bits + base addr for non-zero key. Re-keying on
         // re-init is fine — values get re-encoded with new key on each init.
         G_SNAP_VA_XOR_KEY = (rdtsc_u64() as usize ^ 0xA5A5_5A5A_3C3C_C3C3) | 1;
     }
     shm_write_u32(shm, OFF_DEBUG_STEP, 0x51); // XOR key set
-    // Fresh read of bot-supplied offsets — XOR-encode before storing.
+                                              // Fresh read of bot-supplied offsets — XOR-encode before storing.
     let key = G_SNAP_VA_XOR_KEY;
-    G_SNAP_UNIT_TABLE_VA_XOR = (shm_read_u64(shm as *const SharedBuffer, OFF_SNAP_UNIT_TABLE) as usize) ^ key;
+    G_SNAP_UNIT_TABLE_VA_XOR =
+        (shm_read_u64(shm as *const SharedBuffer, OFF_SNAP_UNIT_TABLE) as usize) ^ key;
     shm_write_u32(shm, OFF_DEBUG_STEP, 0x52); // unit table read
-    G_SNAP_EXPANSION_VA_XOR  = (shm_read_u64(shm as *const SharedBuffer, OFF_SNAP_EXPANSION) as usize) ^ key;
+    G_SNAP_EXPANSION_VA_XOR =
+        (shm_read_u64(shm as *const SharedBuffer, OFF_SNAP_EXPANSION) as usize) ^ key;
     shm_write_u32(shm, OFF_DEBUG_STEP, 0x53); // expansion read
-    G_SNAP_WAYPOINT_VA_XOR   = (shm_read_u64(shm as *const SharedBuffer, OFF_SNAP_WAYPOINT_TABLE) as usize) ^ key;
+    G_SNAP_WAYPOINT_VA_XOR =
+        (shm_read_u64(shm as *const SharedBuffer, OFF_SNAP_WAYPOINT_TABLE) as usize) ^ key;
     shm_write_u32(shm, OFF_DEBUG_STEP, 0x54); // waypoint read
 
     // D2R module base — Phase C: PEB->ImageBaseAddress (no kernel32 call).
@@ -5634,8 +8072,14 @@ unsafe fn dispatch_snapshot_init(shm: *mut SharedBuffer) {
     let xor_key = core::ptr::read_unaligned(shm_u8.add(OFF_SNAP_XOR_KEY) as *const u32);
     let xor_key64: u64 = ((xor_key as u64) << 32) | (xor_key as u64);
     core::ptr::write_unaligned(shm_u8.add(OFF_SNAP_MAGIC) as *mut u32, SNAP_MAGIC ^ xor_key);
-    core::ptr::write_unaligned(shm_u8.add(OFF_SNAP_VERSION) as *mut u32, SNAP_VERSION_A ^ xor_key);
-    core::ptr::write_unaligned(shm_u8.add(OFF_SNAP_D2R_BASE) as *mut u64, (base as u64) ^ xor_key64);
+    core::ptr::write_unaligned(
+        shm_u8.add(OFF_SNAP_VERSION) as *mut u32,
+        SNAP_VERSION_A ^ xor_key,
+    );
+    core::ptr::write_unaligned(
+        shm_u8.add(OFF_SNAP_D2R_BASE) as *mut u64,
+        (base as u64) ^ xor_key64,
+    );
     // Walker starts MINIMAL by default — the only stable shape under Arxan
     // as of 14:35 live (full scan with hardcoded R1..R4 reads or entity/
     // main-player sweeps trips count=55..338 AVs in seconds). Bot clears
@@ -5736,9 +8180,8 @@ unsafe fn snapshot_walker_scan_inner(shm: *mut SharedBuffer, force: bool) {
 
     // Frame throttle. Bot-controlled via OFF_SNAP_WALKER_PERIOD; clamp into
     // [1, 600] so a zero or runaway write can't brick the scan.
-    let raw_period = core::ptr::read_volatile(
-        (shm as *const u8).add(OFF_SNAP_WALKER_PERIOD) as *const u32,
-    );
+    let raw_period =
+        core::ptr::read_volatile((shm as *const u8).add(OFF_SNAP_WALKER_PERIOD) as *const u32);
     let period = if raw_period == 0 {
         WALKER_FRAME_PERIOD_DEFAULT
     } else if raw_period > 600 {
@@ -5783,75 +8226,83 @@ unsafe fn snapshot_walker_scan_inner(shm: *mut SharedBuffer, force: bool) {
     if !minimal {
         // R1: UnitTable slots (128 pointers × 8 B).
         let (c, r) = snapshot_add_region(shm, cursor, regions, snap_unit_table_va(), 128 * 8);
-        cursor = c; regions = r;
+        cursor = c;
+        regions = r;
 
         shm_write_u32(shm, OFF_DEBUG_STEP, 0x62); // R1b
-        // R1b: 8-byte ptr slot at snap_expansion_va(). Go reads
-        //   `gd.Process.ReadUInt(moduleBase + offset.Expansion, Uint64)`
-        // to get the expansion struct address. SnapshotReader must be able to serve
-        // that read, so the 8 bytes AT the static slot must be mirrored too —
-        // separate from the dereferenced target below.
+                                                  // R1b: 8-byte ptr slot at snap_expansion_va(). Go reads
+                                                  //   `gd.Process.ReadUInt(moduleBase + offset.Expansion, Uint64)`
+                                                  // to get the expansion struct address. SnapshotReader must be able to serve
+                                                  // that read, so the 8 bytes AT the static slot must be mirrored too —
+                                                  // separate from the dereferenced target below.
         let (c, r) = snapshot_add_region(shm, cursor, regions, snap_expansion_va(), 8);
-        cursor = c; regions = r;
+        cursor = c;
+        regions = r;
 
         shm_write_u32(shm, OFF_DEBUG_STEP, 0x63); // R2
-        // R2: expansion struct target (dereferenced — needs +0x5C for LoD flag).
+                                                  // R2: expansion struct target (dereferenced — needs +0x5C for LoD flag).
         let exp_ptr_target = d2r_read_u64(snap_expansion_va()) as usize;
         if exp_ptr_target != 0 {
             let (c, r) = snapshot_add_region(shm, cursor, regions, exp_ptr_target, 0x80);
-            cursor = c; regions = r;
+            cursor = c;
+            regions = r;
         }
 
         shm_write_u32(shm, OFF_DEBUG_STEP, 0x64); // R2b
-        // R2b: 8-byte ptr slot at snap_waypoint_va(). Go reads
-        //   `gd.Process.ReadUInt(moduleBase + offset.WaypointTableOffset, Uint64)`
-        // in WaypointTableData.
+                                                  // R2b: 8-byte ptr slot at snap_waypoint_va(). Go reads
+                                                  //   `gd.Process.ReadUInt(moduleBase + offset.WaypointTableOffset, Uint64)`
+                                                  // in WaypointTableData.
         let (c, r) = snapshot_add_region(shm, cursor, regions, snap_waypoint_va(), 8);
-        cursor = c; regions = r;
+        cursor = c;
+        regions = r;
 
         shm_write_u32(shm, OFF_DEBUG_STEP, 0x65); // R3+R4 waypoint
-        // R3 + R4: waypoint struct + data (decodeWaypointMasks).
+                                                  // R3 + R4: waypoint struct + data (decodeWaypointMasks).
         let wp_struct_va = d2r_read_u64(snap_waypoint_va()) as usize;
-    if wp_struct_va != 0 {
-        let (c, r) = snapshot_add_region(shm, cursor, regions, wp_struct_va, 0x100);
-        cursor = c; regions = r;
-        // waypoint data buffer at struct+0x10 → dereference
-        let wp_data_va = d2r_read_u64(wp_struct_va + 0x10) as usize;
-        if wp_data_va != 0 {
-            let (c, r) = snapshot_add_region(shm, cursor, regions, wp_data_va, 0x200);
-            cursor = c; regions = r;
-        }
+        if wp_struct_va != 0 {
+            let (c, r) = snapshot_add_region(shm, cursor, regions, wp_struct_va, 0x100);
+            cursor = c;
+            regions = r;
+            // waypoint data buffer at struct+0x10 → dereference
+            let wp_data_va = d2r_read_u64(wp_struct_va + 0x10) as usize;
+            if wp_data_va != 0 {
+                let (c, r) = snapshot_add_region(shm, cursor, regions, wp_data_va, 0x200);
+                cursor = c;
+                regions = r;
+            }
         }
     } // end `if !minimal` gate for R1..R4
 
     shm_write_u32(shm, OFF_DEBUG_STEP, 0x66); // static regions about to process
-    // Generic static-region table — bot enqueues {va, len, role} triples in
-    // SHM before CmdSnapshotInit. We mirror each head verbatim every tick so
-    // bot can read hover / UI / WidgetStates / FPS / KeyBindings / Quest / TZ
-    // / etc. via the same SnapshotReader region lookup. role != REGULAR means
-    // "also dereference this head and mirror the chain's inner targets" — B2b.
-    //
-    // In the TRULY-minimal diagnostic mode we skip this block too, so we can
-    // confirm whether Arxan is tripped by any walker read at all or only by
-    // specific chains. Gated by OFF_SNAP_WALKER_PERIOD high bit — any write
-    // with bit 31 set also zeroes the static-region sweep, letting the bot
-    // A/B from HTTP without a rmod rebuild.
-    // High bit of OFF_SNAP_WALKER_PERIOD additionally suppresses every
-    // static-region mirror, letting the bot bisect "is it a chain walker
-    // dereference or a literal head read that trips Arxan?" without a rmod
-    // rebuild. In minimal mode we still honour the literal head writes so
-    // the bot can progressively add regions; clearing this bit plus the
-    // MINIMAL flag gets the full scan back.
+                                              // Generic static-region table — bot enqueues {va, len, role} triples in
+                                              // SHM before CmdSnapshotInit. We mirror each head verbatim every tick so
+                                              // bot can read hover / UI / WidgetStates / FPS / KeyBindings / Quest / TZ
+                                              // / etc. via the same SnapshotReader region lookup. role != REGULAR means
+                                              // "also dereference this head and mirror the chain's inner targets" — B2b.
+                                              //
+                                              // In the TRULY-minimal diagnostic mode we skip this block too, so we can
+                                              // confirm whether Arxan is tripped by any walker read at all or only by
+                                              // specific chains. Gated by OFF_SNAP_WALKER_PERIOD high bit — any write
+                                              // with bit 31 set also zeroes the static-region sweep, letting the bot
+                                              // A/B from HTTP without a rmod rebuild.
+                                              // High bit of OFF_SNAP_WALKER_PERIOD additionally suppresses every
+                                              // static-region mirror, letting the bot bisect "is it a chain walker
+                                              // dereference or a literal head read that trips Arxan?" without a rmod
+                                              // rebuild. In minimal mode we still honour the literal head writes so
+                                              // the bot can progressively add regions; clearing this bit plus the
+                                              // MINIMAL flag gets the full scan back.
     let no_statics = (raw_period & 0x8000_0000) != 0;
     let shm_u8_entries = shm as *const u8;
     let static_count = if no_statics {
         0
     } else {
-        core::ptr::read_unaligned(
-            shm_u8_entries.add(OFF_SNAP_STATIC_COUNT) as *const u32,
-        ) as usize
+        core::ptr::read_unaligned(shm_u8_entries.add(OFF_SNAP_STATIC_COUNT) as *const u32) as usize
     };
-    let clamped = if static_count > SNAP_STATIC_MAX { SNAP_STATIC_MAX } else { static_count };
+    let clamped = if static_count > SNAP_STATIC_MAX {
+        SNAP_STATIC_MAX
+    } else {
+        static_count
+    };
     for i in 0..clamped {
         let entry_va = shm_u8_entries.add(OFF_SNAP_STATIC_TABLE + i * 16) as *const StaticRegion;
         let entry = core::ptr::read_unaligned(entry_va);
@@ -5859,8 +8310,10 @@ unsafe fn snapshot_walker_scan_inner(shm: *mut SharedBuffer, force: bool) {
             continue;
         }
         // Mirror head region.
-        let (c, r) = snapshot_add_region(shm, cursor, regions, entry.va as usize, entry.len as usize);
-        cursor = c; regions = r;
+        let (c, r) =
+            snapshot_add_region(shm, cursor, regions, entry.va as usize, entry.len as usize);
+        cursor = c;
+        regions = r;
 
         // Role-specific chain walkers. is_safe_va guard (NtQueryVirtualMemory
         // page-mapped check) keeps Present-thread AV-free even on garbage VAs.
@@ -5878,7 +8331,8 @@ unsafe fn snapshot_walker_scan_inner(shm: *mut SharedBuffer, force: bool) {
                 let struct_ptr = d2r_read_u64(entry.va as usize) as usize;
                 if struct_ptr != 0 {
                     let (c, r) = snapshot_add_region(shm, cursor, regions, struct_ptr, 40);
-                    cursor = c; regions = r;
+                    cursor = c;
+                    regions = r;
                 }
             }
             STATIC_ROLE_QUEST_CHAIN => {
@@ -5888,11 +8342,13 @@ unsafe fn snapshot_walker_scan_inner(shm: *mut SharedBuffer, force: bool) {
                 let quest_data = d2r_read_u64(entry.va as usize) as usize;
                 if quest_data != 0 {
                     let (c, r) = snapshot_add_region(shm, cursor, regions, quest_data, 8);
-                    cursor = c; regions = r;
+                    cursor = c;
+                    regions = r;
                     let flags_buf = d2r_read_u64(quest_data) as usize;
                     if flags_buf != 0 {
                         let (c, r) = snapshot_add_region(shm, cursor, regions, flags_buf, 82);
-                        cursor = c; regions = r;
+                        cursor = c;
+                        regions = r;
                     }
                 }
             }
@@ -5903,10 +8359,13 @@ unsafe fn snapshot_walker_scan_inner(shm: *mut SharedBuffer, force: bool) {
                 // Cap at 8 zones defensively (real-world count is 1-3).
                 let zones_ptr = d2r_read_u64(entry.va as usize) as usize;
                 let mut count = d2r_read_u8(entry.va as usize + 8) as usize;
-                if count > 8 { count = 8; }
+                if count > 8 {
+                    count = 8;
+                }
                 if zones_ptr != 0 && count > 0 {
                     let (c, r) = snapshot_add_region(shm, cursor, regions, zones_ptr, count * 4);
-                    cursor = c; regions = r;
+                    cursor = c;
+                    regions = r;
                 }
             }
             STATIC_ROLE_ROSTER_CHAIN => {
@@ -5921,12 +8380,14 @@ unsafe fn snapshot_walker_scan_inner(shm: *mut SharedBuffer, force: bool) {
                 if party_head != 0 {
                     // Mirror the head struct itself so Go's first ReadUInt(partyStruct+0x148) hits.
                     let (c, r) = snapshot_add_region(shm, cursor, regions, party_head, 0x150);
-                    cursor = c; regions = r;
+                    cursor = c;
+                    regions = r;
                     let mut next = d2r_read_u64(party_head + 0x148) as usize;
                     let mut safety = 0usize;
                     while next != 0 && safety < 16 {
                         let (c, r) = snapshot_add_region(shm, cursor, regions, next, 0x150);
-                        cursor = c; regions = r;
+                        cursor = c;
+                        regions = r;
                         next = d2r_read_u64(next + 0x148) as usize;
                         safety += 1;
                     }
@@ -5937,61 +8398,95 @@ unsafe fn snapshot_walker_scan_inner(shm: *mut SharedBuffer, force: bool) {
     }
 
     shm_write_u32(shm, OFF_DEBUG_STEP, 0x67); // B3 walker rows about to start
-    // MINIMAL mode skips every deep D2R walk — entity rows and main-player
-    // scan both rely on snap_unit_table_va() and chase pointer chains, which
-    // is exactly the shape that triggered count=338 AVs at period=60 when
-    // walker went full (live 14:22). Literal static regions bot enqueues
-    // still get mirrored above.
+                                              // MINIMAL mode skips every deep D2R walk — entity rows and main-player
+                                              // scan both rely on snap_unit_table_va() and chase pointer chains, which
+                                              // is exactly the shape that triggered count=338 AVs at period=60 when
+                                              // walker went full (live 14:22). Literal static regions bot enqueues
+                                              // still get mirrored above.
     if !minimal {
+        // B3 walkers — is_safe_va guard (canonical + 8-byte alignment) blocks
+        // most garbage pointers; future SEH wrap will harden further.
+        snap_walk_entity_row(
+            shm,
+            &mut cursor,
+            &mut regions,
+            snap_unit_table_va() + 1 * 1024,
+            true,
+        ); // monsters/corpses
+        shm_write_u32(shm, OFF_DEBUG_STEP, 0x67 | 0x1000); // monsters done
+        snap_walk_entity_row(
+            shm,
+            &mut cursor,
+            &mut regions,
+            snap_unit_table_va() + 2 * 1024,
+            false,
+        ); // objects
+        shm_write_u32(shm, OFF_DEBUG_STEP, 0x67 | 0x2000); // objects done
+        snap_walk_entity_row(
+            shm,
+            &mut cursor,
+            &mut regions,
+            snap_unit_table_va() + 4 * 1024,
+            false,
+        ); // items (B3.2)
+        shm_write_u32(shm, OFF_DEBUG_STEP, 0x67 | 0x3000); // items done
+        snap_walk_entity_row(
+            shm,
+            &mut cursor,
+            &mut regions,
+            snap_unit_table_va() + 5 * 1024,
+            false,
+        ); // entrances
+        shm_write_u32(shm, OFF_DEBUG_STEP, 0x68); // B3 done, main player scan about to start
 
-    // B3 walkers — is_safe_va guard (canonical + 8-byte alignment) blocks
-    // most garbage pointers; future SEH wrap will harden further.
-    snap_walk_entity_row(shm, &mut cursor, &mut regions, snap_unit_table_va() + 1 * 1024, true);  // monsters/corpses
-    shm_write_u32(shm, OFF_DEBUG_STEP, 0x67 | 0x1000); // monsters done
-    snap_walk_entity_row(shm, &mut cursor, &mut regions, snap_unit_table_va() + 2 * 1024, false); // objects
-    shm_write_u32(shm, OFF_DEBUG_STEP, 0x67 | 0x2000); // objects done
-    snap_walk_entity_row(shm, &mut cursor, &mut regions, snap_unit_table_va() + 4 * 1024, false); // items (B3.2)
-    shm_write_u32(shm, OFF_DEBUG_STEP, 0x67 | 0x3000); // items done
-    snap_walk_entity_row(shm, &mut cursor, &mut regions, snap_unit_table_va() + 5 * 1024, false); // entrances
-    shm_write_u32(shm, OFF_DEBUG_STEP, 0x68); // B3 done, main player scan about to start
+        // Scan UnitTable for main player (128 slots × 8 bytes, each a linked list head)
+        for i in 0..128usize {
+            let slot_va = snap_unit_table_va() + i * 8;
+            let mut player_unit_va = d2r_read_u64(slot_va) as usize;
+            while player_unit_va != 0 {
+                // Copy playerUnit struct (0x200 bytes — covers all fixed offsets used)
+                let (c, r) = snapshot_add_region(shm, cursor, regions, player_unit_va, 0x200);
+                cursor = c;
+                regions = r;
 
-    // Scan UnitTable for main player (128 slots × 8 bytes, each a linked list head)
-    for i in 0..128usize {
-        let slot_va = snap_unit_table_va() + i * 8;
-        let mut player_unit_va = d2r_read_u64(slot_va) as usize;
-        while player_unit_va != 0 {
-            // Copy playerUnit struct (0x200 bytes — covers all fixed offsets used)
-            let (c, r) = snapshot_add_region(shm, cursor, regions, player_unit_va, 0x200);
-            cursor = c; regions = r;
+                // Read inventory ptr to determine isMainPlayer
+                let inventory_va = d2r_read_u64(player_unit_va + 0x90) as usize;
+                let is_main = if inventory_va != 0 {
+                    let exp_char_ptr = d2r_read_u64(snap_expansion_va()) as usize;
+                    let is_lod = if exp_char_ptr != 0 {
+                        d2r_read_u16(exp_char_ptr + 0x5C) >= 1 // CharLoD == 1
+                    } else {
+                        false
+                    };
+                    let offset = if is_lod { 0x70 } else { 0x30 };
+                    d2r_read_u16(inventory_va + offset) > 0
+                } else {
+                    false
+                };
 
-            // Read inventory ptr to determine isMainPlayer
-            let inventory_va = d2r_read_u64(player_unit_va + 0x90) as usize;
-            let is_main = if inventory_va != 0 {
-                let exp_char_ptr = d2r_read_u64(snap_expansion_va()) as usize;
-                let is_lod = if exp_char_ptr != 0 {
-                    d2r_read_u16(exp_char_ptr + 0x5C) >= 1 // CharLoD == 1
-                } else { false };
-                let offset = if is_lod { 0x70 } else { 0x30 };
-                d2r_read_u16(inventory_va + offset) > 0
-            } else { false };
+                if is_main && inventory_va != 0 {
+                    flags |= SNAP_FLAG_MAIN_PLAYER_FOUND;
 
-            if is_main && inventory_va != 0 {
-                flags |= SNAP_FLAG_MAIN_PLAYER_FOUND;
+                    // Mirror main player's rich pointer chain.
+                    snap_walk_main_player(
+                        shm,
+                        &mut cursor,
+                        &mut regions,
+                        player_unit_va,
+                        inventory_va,
+                    );
+                } else if inventory_va != 0 {
+                    // Non-main player (e.g. party member or corpse) — include inventory
+                    // so state checks work. Phase A doesn't traverse their full chain.
+                    let (c, r) = snapshot_add_region(shm, cursor, regions, inventory_va, 0x80);
+                    cursor = c;
+                    regions = r;
+                }
 
-                // Mirror main player's rich pointer chain.
-                snap_walk_main_player(shm, &mut cursor, &mut regions, player_unit_va, inventory_va);
-            } else if inventory_va != 0 {
-                // Non-main player (e.g. party member or corpse) — include inventory
-                // so state checks work. Phase A doesn't traverse their full chain.
-                let (c, r) = snapshot_add_region(shm, cursor, regions, inventory_va, 0x80);
-                cursor = c; regions = r;
+                // Next player in this chain
+                player_unit_va = d2r_read_u64(player_unit_va + 0x158) as usize;
             }
-
-            // Next player in this chain
-            player_unit_va = d2r_read_u64(player_unit_va + 0x158) as usize;
         }
-    }
-
     } // end `if !minimal` gate for B3 walkers + main player scan
 
     // Write header fields (magic/version/base already set by init).
@@ -6000,7 +8495,10 @@ unsafe fn snapshot_walker_scan_inner(shm: *mut SharedBuffer, force: bool) {
     // plain on every tick refresh). REGION_COUNT/DATA_BYTES/LAST_RDTSC
     // are inherently variable — masking them buys nothing.
     let xor_key = core::ptr::read_unaligned(shm_u8.add(OFF_SNAP_XOR_KEY) as *const u32);
-    core::ptr::write_unaligned(shm_u8.add(OFF_SNAP_REGION_COUNT) as *mut u32, regions as u32);
+    core::ptr::write_unaligned(
+        shm_u8.add(OFF_SNAP_REGION_COUNT) as *mut u32,
+        regions as u32,
+    );
     core::ptr::write_unaligned(shm_u8.add(OFF_SNAP_DATA_BYTES) as *mut u32, cursor as u32);
     core::ptr::write_unaligned(shm_u8.add(OFF_SNAP_FLAGS) as *mut u32, flags ^ xor_key);
     core::ptr::write_unaligned(shm_u8.add(OFF_SNAP_LAST_RDTSC) as *mut u64, rdtsc_u64());
@@ -6068,7 +8566,11 @@ unsafe extern "system" fn rop_scan_worker_thread_fn(param: *mut core::ffi::c_voi
         Sleep(30);
         // Prefer the param-captured shm; fall back to the global only
         // after startup has clearly settled.
-        let shm = if !initial_shm.is_null() { initial_shm } else { core::ptr::read_volatile(&raw const G_ROP_WORKER_SHM) };
+        let shm = if !initial_shm.is_null() {
+            initial_shm
+        } else {
+            core::ptr::read_volatile(&raw const G_ROP_WORKER_SHM)
+        };
         if shm.is_null() {
             continue;
         }
@@ -6080,10 +8582,10 @@ unsafe extern "system" fn rop_scan_worker_thread_fn(param: *mut core::ffi::c_voi
         // Volatile read — without this the compiler can hoist the flag
         // check out of the loop and we spin forever without seeing the
         // Present thread flipping it to true.
-        let pending_ptr  = &raw mut G_ROP_REQ_PENDING;
+        let pending_ptr = &raw mut G_ROP_REQ_PENDING;
         let complete_ptr = &raw mut G_ROP_WORKER_COMPLETE;
-        let base_ptr     = &raw mut G_ROP_REQ_BASE;
-        let len_ptr      = &raw mut G_ROP_REQ_LEN;
+        let base_ptr = &raw mut G_ROP_REQ_BASE;
+        let len_ptr = &raw mut G_ROP_REQ_LEN;
         if !core::ptr::read_volatile(pending_ptr) {
             continue;
         }
@@ -6118,16 +8620,21 @@ unsafe extern "system" fn rop_scan_worker_thread_fn(param: *mut core::ffi::c_voi
                 let kind_val = core::ptr::read(&(*g).kind);
                 let regs = core::ptr::read(&(*g).regs_touched);
                 let idx: usize = match kind_val {
-                    rop_gadgets::GadgetKind::Unknown    => 0,
-                    rop_gadgets::GadgetKind::PopReg     => { pop_mask |= regs; 1 },
-                    rop_gadgets::GadgetKind::MovRegMem  => 2,
-                    rop_gadgets::GadgetKind::MovMemReg  => 3,
-                    rop_gadgets::GadgetKind::RepMovsb   => 4,
-                    rop_gadgets::GadgetKind::RepMovsq   => 5,
-                    rop_gadgets::GadgetKind::XchgReg    => 6,
-                    rop_gadgets::GadgetKind::Ret        => 7,
+                    rop_gadgets::GadgetKind::Unknown => 0,
+                    rop_gadgets::GadgetKind::PopReg => {
+                        pop_mask |= regs;
+                        1
+                    }
+                    rop_gadgets::GadgetKind::MovRegMem => 2,
+                    rop_gadgets::GadgetKind::MovMemReg => 3,
+                    rop_gadgets::GadgetKind::RepMovsb => 4,
+                    rop_gadgets::GadgetKind::RepMovsq => 5,
+                    rop_gadgets::GadgetKind::XchgReg => 6,
+                    rop_gadgets::GadgetKind::Ret => 7,
                 };
-                if idx < 8 { kind_counts[idx] += 1; }
+                if idx < 8 {
+                    kind_counts[idx] += 1;
+                }
             }
         }
         shm_write_u32(shm, OFF_ROP_DBG, 0xCAFE0003);
@@ -6162,19 +8669,22 @@ unsafe fn snap_walk_main_player(
 ) {
     // inventory struct (main-player flags)
     let (c, r) = snapshot_add_region(shm, *cursor, *regions, inventory_va, 0x80);
-    *cursor = c; *regions = r;
+    *cursor = c;
+    *regions = r;
 
     // pUnitData (name struct) at playerUnit+0x10 — bumped 0x40 → 0xB0 to
     // match snap_walk_entity_row's item coverage (item.go uses +0x9C/+0xA0).
     let p_unit_data_va = d2r_read_u64(player_unit_va + 0x10) as usize;
     if p_unit_data_va != 0 {
         let (c, r) = snapshot_add_region(shm, *cursor, *regions, p_unit_data_va, 0xB0);
-        *cursor = c; *regions = r;
+        *cursor = c;
+        *regions = r;
         // playerName at pUnitData+0x00
         let name_va = d2r_read_u64(p_unit_data_va) as usize;
         if name_va != 0 {
             let (c, r) = snapshot_add_region(shm, *cursor, *regions, name_va, 0x40);
-            *cursor = c; *regions = r;
+            *cursor = c;
+            *regions = r;
         }
     }
 
@@ -6182,19 +8692,23 @@ unsafe fn snap_walk_main_player(
     let path_va = d2r_read_u64(player_unit_va + 0x38) as usize;
     if path_va != 0 {
         let (c, r) = snapshot_add_region(shm, *cursor, *regions, path_va, 0x100);
-        *cursor = c; *regions = r;
+        *cursor = c;
+        *regions = r;
         let room1_va = d2r_read_u64(path_va + 0x20) as usize;
         if room1_va != 0 {
             let (c, r) = snapshot_add_region(shm, *cursor, *regions, room1_va, 0x40);
-            *cursor = c; *regions = r;
+            *cursor = c;
+            *regions = r;
             let room2_va = d2r_read_u64(room1_va + 0x18) as usize;
             if room2_va != 0 {
                 let (c, r) = snapshot_add_region(shm, *cursor, *regions, room2_va, 0x100);
-                *cursor = c; *regions = r;
+                *cursor = c;
+                *regions = r;
                 let level_va = d2r_read_u64(room2_va + 0x90) as usize;
                 if level_va != 0 {
                     let (c, r) = snapshot_add_region(shm, *cursor, *regions, level_va, 0x200);
-                    *cursor = c; *regions = r;
+                    *cursor = c;
+                    *regions = r;
                 }
             }
         }
@@ -6204,7 +8718,8 @@ unsafe fn snap_walk_main_player(
     let sle_va = d2r_read_u64(player_unit_va + 0x88) as usize;
     if sle_va != 0 {
         let (c, r) = snapshot_add_region(shm, *cursor, *regions, sle_va, 0xB20);
-        *cursor = c; *regions = r;
+        *cursor = c;
+        *regions = r;
         // base stats flat array at statsListExPtr+0x30
         snap_add_stats_array(shm, cursor, regions, sle_va + 0x30);
         // full stats flat array at statsListExPtr+0xA8
@@ -6215,7 +8730,8 @@ unsafe fn snap_walk_main_player(
     let skill_list_va = d2r_read_u64(player_unit_va + 0x100) as usize;
     if skill_list_va != 0 {
         let (c, r) = snapshot_add_region(shm, *cursor, *regions, skill_list_va, 0x20);
-        *cursor = c; *regions = r;
+        *cursor = c;
+        *regions = r;
 
         // Left skill txt
         let left_ptr = d2r_read_u64(skill_list_va + 0x08) as usize;
@@ -6223,9 +8739,11 @@ unsafe fn snap_walk_main_player(
             let left_txt = d2r_read_u64(left_ptr) as usize;
             if left_txt != 0 {
                 let (c, r) = snapshot_add_region(shm, *cursor, *regions, left_ptr, 0x10);
-                *cursor = c; *regions = r;
+                *cursor = c;
+                *regions = r;
                 let (c, r) = snapshot_add_region(shm, *cursor, *regions, left_txt, 0x10);
-                *cursor = c; *regions = r;
+                *cursor = c;
+                *regions = r;
             }
         }
         // Right skill txt
@@ -6234,9 +8752,11 @@ unsafe fn snap_walk_main_player(
             let right_txt = d2r_read_u64(right_ptr) as usize;
             if right_txt != 0 {
                 let (c, r) = snapshot_add_region(shm, *cursor, *regions, right_ptr, 0x10);
-                *cursor = c; *regions = r;
+                *cursor = c;
+                *regions = r;
                 let (c, r) = snapshot_add_region(shm, *cursor, *regions, right_txt, 0x10);
-                *cursor = c; *regions = r;
+                *cursor = c;
+                *regions = r;
             }
         }
 
@@ -6246,11 +8766,13 @@ unsafe fn snap_walk_main_player(
         while skill_ptr != 0 && count < 256 {
             // Skill node: +0x00 txtPtr, +0x08 next, +0x40 lvl, +0x48 qty, +0x50 charges
             let (c, r) = snapshot_add_region(shm, *cursor, *regions, skill_ptr, 0x60);
-            *cursor = c; *regions = r;
+            *cursor = c;
+            *regions = r;
             let txt = d2r_read_u64(skill_ptr) as usize;
             if txt != 0 {
                 let (c, r) = snapshot_add_region(shm, *cursor, *regions, txt, 0x10);
-                *cursor = c; *regions = r;
+                *cursor = c;
+                *regions = r;
             }
             skill_ptr = d2r_read_u64(skill_ptr + 0x08) as usize;
             count += 1;
@@ -6270,14 +8792,16 @@ unsafe fn snap_add_stats_array(
     // region needed. But bot's Go code re-reads via ReadBytes(header_va, 0x10),
     // so we mirror that exact call: 0x10 bytes at header_va.
     let (c, r) = snapshot_add_region(shm, *cursor, *regions, header_va, 0x10);
-    *cursor = c; *regions = r;
+    *cursor = c;
+    *regions = r;
 
     let head_va = d2r_read_u64(header_va) as usize;
     let count = d2r_read_u64(header_va + 0x08) as usize;
     if head_va != 0 && count > 0 && count <= 512 {
         let body_len = count * 10; // Go allocates count*10 even though entry is 8 B
         let (c, r) = snapshot_add_region(shm, *cursor, *regions, head_va, body_len);
-        *cursor = c; *regions = r;
+        *cursor = c;
+        *regions = r;
     }
 }
 
@@ -6302,7 +8826,8 @@ unsafe fn snap_walk_entity_row(
 ) {
     // Mirror the row table itself — Go reads 128*8 B via ReadBytes.
     let (c, r) = snapshot_add_region(shm, *cursor, *regions, row_head_va, 128 * 8);
-    *cursor = c; *regions = r;
+    *cursor = c;
+    *regions = r;
 
     const MAX_UNITS_PER_ROW: usize = 32; // safety cap vs region budget + stack burn rate
     let mut mirrored = 0usize;
@@ -6319,7 +8844,8 @@ unsafe fn snap_walk_entity_row(
             // txtFileNo @0x04, unitID @0x08, mode @0x0C, unitData @0x10,
             // pathAddr @0x38, statsListEx @0x88, next @0x158, isCorpse @0x1AE).
             let (c, r) = snapshot_add_region(shm, *cursor, *regions, unit_va, 0x1B0);
-            *cursor = c; *regions = r;
+            *cursor = c;
+            *regions = r;
 
             // unitData (+0x10 deref) — 0xB0 B covers interactType @+0x08,
             // owner string @+0x34 (32 B extending to +0x54), PLUS item.go
@@ -6328,7 +8854,8 @@ unsafe fn snap_walk_entity_row(
             let unit_data_va = d2r_read_u64(unit_va + 0x10) as usize;
             if unit_data_va != 0 {
                 let (c, r) = snapshot_add_region(shm, *cursor, *regions, unit_data_va, 0xB0);
-                *cursor = c; *regions = r;
+                *cursor = c;
+                *regions = r;
             }
 
             // path (+0x38 deref) — 0x20 B covers posX/posY at either +0x02/+0x06
@@ -6336,7 +8863,8 @@ unsafe fn snap_walk_entity_row(
             let path_va = d2r_read_u64(unit_va + 0x38) as usize;
             if path_va != 0 {
                 let (c, r) = snapshot_add_region(shm, *cursor, *regions, path_va, 0x20);
-                *cursor = c; *regions = r;
+                *cursor = c;
+                *regions = r;
             }
 
             if with_stats {
@@ -6347,16 +8875,25 @@ unsafe fn snap_walk_entity_row(
                 let sle_va = d2r_read_u64(unit_va + 0x88) as usize;
                 if sle_va != 0 {
                     let (c, r) = snapshot_add_region(shm, *cursor, *regions, sle_va, 0x60);
-                    *cursor = c; *regions = r;
+                    *cursor = c;
+                    *regions = r;
                     let (c, r) = snapshot_add_region(shm, *cursor, *regions, sle_va + 0xAF0, 0x30);
-                    *cursor = c; *regions = r;
+                    *cursor = c;
+                    *regions = r;
                     // Monster stat array body: Go reads statPtr+0x2 for statCount*8 B.
                     let stat_hdr_ptr = d2r_read_u64(sle_va + 0x30) as usize;
                     let stat_count = d2r_read_u64(sle_va + 0x38) as usize;
                     // Cap at 64 (typical monster: 20-40 stats; super uniques up to ~50).
                     if is_user_va(stat_hdr_ptr) && stat_count > 0 && stat_count <= 64 {
-                        let (c, r) = snapshot_add_region(shm, *cursor, *regions, stat_hdr_ptr + 0x2, stat_count * 8);
-                        *cursor = c; *regions = r;
+                        let (c, r) = snapshot_add_region(
+                            shm,
+                            *cursor,
+                            *regions,
+                            stat_hdr_ptr + 0x2,
+                            stat_count * 8,
+                        );
+                        *cursor = c;
+                        *regions = r;
                     }
                 }
             }

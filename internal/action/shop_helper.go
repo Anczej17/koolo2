@@ -1,12 +1,12 @@
 package action
 
 import (
+	"local/internal/svc/internal/action/step"
+	"local/internal/svc/internal/context"
 	"local/internal/svc/internal/gamelib/data/area"
 	"local/internal/svc/internal/gamelib/data/item"
 	"local/internal/svc/internal/gamelib/data/npc"
 	"local/internal/svc/internal/gamelib/data/stat"
-	"local/internal/svc/internal/action/step"
-	"local/internal/svc/internal/context"
 	"local/internal/svc/internal/town"
 	"local/internal/svc/internal/utils"
 )
@@ -56,7 +56,11 @@ func BuyAct2Flails(ctx *context.Status) error {
 			ctx.Logger.Error("Failed to interact with Fara", "error", err)
 			continue
 		}
-		SelectNPCTradeOption(npc.Fara)
+		if !SelectNPCTradeOption(npc.Fara) {
+			ctx.Logger.Debug("Shop menu not open after AMB trade option, closing and retrying")
+			step.CloseAllMenus()
+			continue
+		}
 		utils.Sleep(1000)
 
 		ctx.GameReader.GetData()
@@ -161,7 +165,11 @@ func BuyAct2BoneWands(ctx *context.Status) error {
 			ctx.Logger.Error("Failed to interact with Drognan", "error", err)
 			continue
 		}
-		SelectNPCTradeOption(npc.Drognan)
+		if !SelectNPCTradeOption(npc.Drognan) {
+			ctx.Logger.Debug("Shop menu not open after AMB trade option, closing and retrying")
+			step.CloseAllMenus()
+			continue
+		}
 		utils.Sleep(1000)
 
 		ctx.GameReader.GetData()

@@ -5,11 +5,11 @@ import (
 	"fmt"
 	"time"
 
-	"local/internal/svc/internal/gamelib/data/item"
-	"local/internal/svc/internal/gamelib/data/skill"
 	"local/internal/svc/internal/action/step"
 	"local/internal/svc/internal/config"
 	"local/internal/svc/internal/context"
+	"local/internal/svc/internal/gamelib/data/item"
+	"local/internal/svc/internal/gamelib/data/skill"
 	"local/internal/svc/internal/utils"
 )
 
@@ -110,7 +110,9 @@ func PreRun(firstRun bool) error {
 	}
 
 	// Identify - either via Cain or Tome
-	IdentifyAll(false)
+	if err := IdentifyAll(false); err != nil {
+		return err
+	}
 
 	if ctx.CharacterCfg.Game.Leveling.AutoEquip && isLevelingChar {
 		AutoEquip()
@@ -120,7 +122,9 @@ func PreRun(firstRun bool) error {
 	Stash(false)
 
 	// Refill pots, sell, buy etc
-	VendorRefill(VendorRefillOpts{SellJunk: true, BuyConsumables: true})
+	if err := VendorRefill(VendorRefillOpts{SellJunk: true, BuyConsumables: true}); err != nil {
+		return err
+	}
 
 	// Gamble
 	Gamble()
@@ -205,7 +209,9 @@ func InRunReturnTownRoutine() error {
 		ctx.PauseIfNotPriority() // Check after Stash
 	}
 
-	IdentifyAll(false)
+	if err := IdentifyAll(false); err != nil {
+		return err
+	}
 
 	_, isLevelingChar := ctx.Char.(context.LevelingCharacter)
 	if ctx.CharacterCfg.Game.Leveling.AutoEquip && isLevelingChar {
@@ -213,7 +219,9 @@ func InRunReturnTownRoutine() error {
 		ctx.PauseIfNotPriority() // Check after AutoEquip
 	}
 
-	VendorRefill(VendorRefillOpts{SellJunk: true, BuyConsumables: true})
+	if err := VendorRefill(VendorRefillOpts{SellJunk: true, BuyConsumables: true}); err != nil {
+		return err
+	}
 	ctx.PauseIfNotPriority() // Check after VendorRefill
 	Stash(false)
 	ctx.PauseIfNotPriority() // Check after Stash

@@ -2,18 +2,22 @@ package game
 
 import (
 	"log/slog"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"golang.org/x/sys/windows"
 )
 
 type CrashDetector struct {
-	pid         int32
-	supervisor  string
-	hwnd        uintptr
-	logger      *slog.Logger
-	restartFunc func()
-	stopChan    chan struct{}
+	pid           int32
+	supervisor    string
+	hwnd          uintptr
+	logger        *slog.Logger
+	restartFunc   func()
+	stopChan      chan struct{}
+	stopOnce      sync.Once
+	stopRequested atomic.Bool
 }
 
 func NewCrashDetector(sup string, pid int32, hwnd uintptr, logger *slog.Logger, restartFunc func()) *CrashDetector {
@@ -53,6 +57,12 @@ func (cd *CrashDetector) Start() {
 			return
 		case <-ticker.C:
 			if !cd.isProcessRunning() {
+				if cd.stopRequested.Load() {
+					cd.logger.Info("Crash Detector: restart suppressed because stop was already requested",
+						slog.Int("PID", int(cd.pid)),
+						slog.String("Supervisor", cd.supervisor))
+					return
+				}
 				cd.logger.Error("Client crash detected ...", slog.Int("PID", int(cd.pid)), slog.String("Supervisor", cd.supervisor))
 				// Pre-restart zombie sweep: if D2R died via Arxan cascade our
 				// bot's handle still pins the EPROCESS. Drain external handles
@@ -64,6 +74,12 @@ func (cd *CrashDetector) Start() {
 						slog.Int("zombies", zombies))
 				}
 				if cd.restartFunc != nil {
+					if cd.stopRequested.Load() {
+						cd.logger.Info("Crash Detector: restart suppressed after zombie sweep because stop was requested",
+							slog.Int("PID", int(cd.pid)),
+							slog.String("Supervisor", cd.supervisor))
+						return
+					}
 					cd.logger.Info("Attempting to restart client ...", slog.String("Supervisor", cd.supervisor))
 					// Guard restartFunc panics so this goroutine logs + exits
 					// cleanly instead of dropping the whole process.
@@ -85,8 +101,15 @@ func (cd *CrashDetector) Start() {
 }
 
 func (cd *CrashDetector) Stop() {
-	cd.logger.Info("Stopping Crash Detector", slog.Int("PID", int(cd.pid)), slog.String("Supervisor", cd.supervisor))
-	close(cd.stopChan)
+	cd.stopRequested.Store(true)
+	cd.stopOnce.Do(func() {
+		cd.logger.Info("Stopping Crash Detector", slog.Int("PID", int(cd.pid)), slog.String("Supervisor", cd.supervisor))
+		close(cd.stopChan)
+	})
+}
+
+func (cd *CrashDetector) StopRequested() bool {
+	return cd.stopRequested.Load()
 }
 
 func (cd *CrashDetector) isProcessRunning() bool {

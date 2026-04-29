@@ -5,13 +5,14 @@ import (
 	"slices"
 	"strings"
 
+	"local/internal/svc/internal/action/step"
+	"local/internal/svc/internal/context"
+	"local/internal/svc/internal/game"
 	"local/internal/svc/internal/gamelib/data"
 	"local/internal/svc/internal/gamelib/data/difficulty"
 	"local/internal/svc/internal/gamelib/data/item"
 	"local/internal/svc/internal/gamelib/data/stat"
-	"local/internal/svc/internal/action/step"
-	"local/internal/svc/internal/context"
-	"local/internal/svc/internal/game"
+	"local/internal/svc/internal/packet/amb"
 	"local/internal/svc/internal/pickit"
 	"local/internal/svc/internal/ui"
 	"local/internal/svc/internal/utils"
@@ -148,6 +149,10 @@ func MakeRunewords() error {
 func SocketItems(ctx *context.Status, recipe Runeword, base data.Item, items ...data.Item) error {
 
 	ctx.SetLastAction("SocketItem")
+
+	if ctx.PacketSender != nil {
+		return socketItemsPacket(ctx, recipe, base, items...)
+	}
 
 	// Build location list - include RunesTab for DLC characters
 	insertLocations := []item.LocationType{item.LocationStash, item.LocationSharedStash, item.LocationInventory}
@@ -339,6 +344,167 @@ func SocketItems(ctx *context.Status, recipe Runeword, base data.Item, items ...
 		utils.Sleep(300)
 	}
 	return step.CloseAllMenus()
+}
+
+func socketItemsPacket(ctx *context.Status, recipe Runeword, base data.Item, items ...data.Item) error {
+	if len(items) == 0 {
+		return nil
+	}
+
+	if needsStashForSocketPacket(base, items...) && !ctx.Data.OpenMenus.Stash {
+		if err := OpenStash(); err != nil {
+			return fmt.Errorf("SocketItems packet: open stash failed: %w", err)
+		}
+		ctx.RefreshGameData()
+	}
+
+	occupied := inventoryOccupancy(ctx.Data.Inventory.ByLocation(item.LocationInventory), nil)
+	currentBase, err := moveSocketItemToInventoryPacket(ctx, base, &occupied)
+	if err != nil {
+		return fmt.Errorf("SocketItems packet: move base %s to inventory failed: %w", base.Name, err)
+	}
+
+	usedInsertIDs := make(map[data.UnitID]struct{})
+	requested := make([]data.Item, len(items))
+	copy(requested, items)
+
+	for _, requiredInsert := range recipe.Runes {
+		insert, ok := findSocketInsertForRecipe(ctx, requiredInsert, requested, usedInsertIDs)
+		if !ok {
+			return fmt.Errorf("SocketItems packet: required insert %s not found for %s", requiredInsert, recipe.Name)
+		}
+
+		currentInsert, err := moveSocketItemToInventoryPacket(ctx, insert, &occupied)
+		if err != nil {
+			return fmt.Errorf("SocketItems packet: move insert %s to inventory failed: %w", insert.Name, err)
+		}
+
+		ctx.Logger.Debug("SocketItems packet: inserting via AMB 0x28",
+			"runeword", recipe.Name,
+			"insert", currentInsert.Name,
+			"insertGID", currentInsert.UnitID,
+			"base", currentBase.Name,
+			"baseGID", currentBase.UnitID,
+			"baseX", currentBase.Position.X,
+			"baseY", currentBase.Position.Y)
+
+		if err := ctx.PacketSender.InsertItemToSocket(currentInsert, currentBase, uint32(amb.ContainerInventory)); err != nil {
+			return fmt.Errorf("SocketItems packet: insert %s into %s failed: %w", currentInsert.Name, currentBase.Name, err)
+		}
+
+		usedInsertIDs[currentInsert.UnitID] = struct{}{}
+		utils.PingSleep(utils.Medium, 300)
+		ctx.RefreshGameData()
+
+		if standalone, found := ctx.Data.Inventory.FindByID(currentInsert.UnitID); found && !standalone.IsInSocket {
+			return fmt.Errorf("SocketItems packet: insert %s still standalone after AMB 0x28", currentInsert.Name)
+		}
+		if refreshedBase, found := ctx.Data.Inventory.FindByID(currentBase.UnitID); found {
+			currentBase = refreshedBase
+		}
+	}
+
+	return step.CloseAllMenus()
+}
+
+func needsStashForSocketPacket(base data.Item, inserts ...data.Item) bool {
+	if isStashBackedSocketLocation(base.Location.LocationType) {
+		return true
+	}
+	for _, insert := range inserts {
+		if isStashBackedSocketLocation(insert.Location.LocationType) {
+			return true
+		}
+	}
+	return false
+}
+
+func isStashBackedSocketLocation(location item.LocationType) bool {
+	return location == item.LocationStash || location == item.LocationSharedStash
+}
+
+func findSocketInsertForRecipe(ctx *context.Status, requiredInsert string, requested []data.Item, used map[data.UnitID]struct{}) (data.Item, bool) {
+	for _, req := range requested {
+		if string(req.Name) != requiredInsert {
+			continue
+		}
+		if _, alreadyUsed := used[req.UnitID]; alreadyUsed {
+			continue
+		}
+		if current, found := ctx.Data.Inventory.FindByID(req.UnitID); found {
+			if _, alreadyUsed := used[current.UnitID]; !alreadyUsed {
+				return current, true
+			}
+		}
+	}
+
+	for _, current := range ctx.Data.Inventory.AllItems {
+		if string(current.Name) != requiredInsert {
+			continue
+		}
+		if _, alreadyUsed := used[current.UnitID]; alreadyUsed {
+			continue
+		}
+		switch current.Location.LocationType {
+		case item.LocationInventory, item.LocationStash, item.LocationSharedStash:
+			return current, true
+		}
+	}
+	return data.Item{}, false
+}
+
+func moveSocketItemToInventoryPacket(ctx *context.Status, itm data.Item, occupied *[4][10]bool) (data.Item, error) {
+	current, found := ctx.Data.Inventory.FindByID(itm.UnitID)
+	if found {
+		itm = current
+	}
+
+	switch itm.Location.LocationType {
+	case item.LocationInventory:
+		markGridSlotAt(occupied, itm.Position.X, itm.Position.Y, itm.Desc().InventoryWidth, itm.Desc().InventoryHeight)
+		return itm, nil
+	case item.LocationStash, item.LocationSharedStash:
+	case item.LocationGemsTab, item.LocationMaterialsTab, item.LocationRunesTab:
+		return data.Item{}, fmt.Errorf("DLC stash tab packet pull is not wired for %s", itm.Location.LocationType)
+	default:
+		return data.Item{}, fmt.Errorf("unsupported socket item location %s", itm.Location.LocationType)
+	}
+
+	toX, toY, ok := findFreeInventorySlot(occupied, itm)
+	if !ok {
+		return data.Item{}, fmt.Errorf("no free inventory slot for %s (%dx%d)", itm.Name, itm.Desc().InventoryWidth, itm.Desc().InventoryHeight)
+	}
+
+	ctx.Logger.Debug("SocketItems packet: moving item to inventory via AMB 0x19 -> 0x18",
+		"item", itm.Name,
+		"itemGID", itm.UnitID,
+		"from", itm.Location.LocationType,
+		"fromX", itm.Position.X,
+		"fromY", itm.Position.Y,
+		"toX", toX,
+		"toY", toY)
+
+	if err := pickItemToCursorPacket(ctx, itm); err != nil {
+		return data.Item{}, err
+	}
+	utils.PingSleep(utils.Light, 150)
+
+	if err := ctx.PacketSender.PutItemToInventory(uint32(itm.UnitID), uint32(toX), uint32(toY), uint32(amb.ContainerInventory)); err != nil {
+		return data.Item{}, err
+	}
+
+	markGridSlotAt(occupied, toX, toY, itm.Desc().InventoryWidth, itm.Desc().InventoryHeight)
+	utils.PingSleep(utils.Medium, 300)
+	ctx.RefreshGameData()
+
+	updated, found := ctx.Data.Inventory.FindByID(itm.UnitID)
+	if !found {
+		return data.Item{}, fmt.Errorf("item %s not found after inventory move", itm.Name)
+	}
+	if updated.Location.LocationType != item.LocationInventory {
+		return data.Item{}, fmt.Errorf("item %s moved to %s, expected inventory", itm.Name, updated.Location.LocationType)
+	}
+	return updated, nil
 }
 
 func currentRunewordBaseTier(ctx *context.Status, recipe Runeword, baseType string) (item.Tier, bool) {

@@ -25,11 +25,7 @@ extern "system" {
         flProtect: u32,
     ) -> *mut core::ffi::c_void;
 
-    fn VirtualFree(
-        lpAddress: *mut core::ffi::c_void,
-        dwSize: usize,
-        dwFreeType: u32,
-    ) -> i32;
+    fn VirtualFree(lpAddress: *mut core::ffi::c_void, dwSize: usize, dwFreeType: u32) -> i32;
 
     fn VirtualQuery(
         lpAddress: *const core::ffi::c_void,
@@ -45,28 +41,28 @@ extern "system" {
     ) -> i32;
 }
 
-const MEM_COMMIT:          u32 = 0x0000_1000;
-const MEM_RESERVE:         u32 = 0x0000_2000;
-const MEM_RELEASE:         u32 = 0x0000_8000;
-const MEM_FREE:            u32 = 0x0001_0000;
-const PAGE_READWRITE:      u32 = 0x0000_0004;
-const PAGE_EXECUTE_READ:   u32 = 0x0000_0020;
-const PAGE_EXECUTE_RW:     u32 = 0x0000_0040;
-const PAGE_NOACCESS:       u32 = 0x0000_0001;
+const MEM_COMMIT: u32 = 0x0000_1000;
+const MEM_RESERVE: u32 = 0x0000_2000;
+const MEM_RELEASE: u32 = 0x0000_8000;
+const MEM_FREE: u32 = 0x0001_0000;
+const PAGE_READWRITE: u32 = 0x0000_0004;
+const PAGE_EXECUTE_READ: u32 = 0x0000_0020;
+const PAGE_EXECUTE_RW: u32 = 0x0000_0040;
+const PAGE_NOACCESS: u32 = 0x0000_0001;
 
 /// MEMORY_BASIC_INFORMATION — x64 layout. We read enough fields to pick an
 /// alloc site inside a MEM_FREE region. Other fields are not inspected.
 #[repr(C)]
 struct MBI {
-    base_address:       *const core::ffi::c_void,
-    allocation_base:    *const core::ffi::c_void,
+    base_address: *const core::ffi::c_void,
+    allocation_base: *const core::ffi::c_void,
     allocation_protect: u32,
-    partition_id:       u16,
-    _pad:               u16,
-    region_size:        usize,
-    state:              u32, // MEM_COMMIT / MEM_FREE / MEM_RESERVE
-    protect:            u32,
-    type_:              u32,
+    partition_id: u16,
+    _pad: u16,
+    region_size: usize,
+    state: u32, // MEM_COMMIT / MEM_FREE / MEM_RESERVE
+    protect: u32,
+    type_: u32,
 }
 
 /// RAII wrapper for a VirtualAlloc'd RWX region. Dropping frees with
@@ -91,12 +87,8 @@ impl AllocatedMemory {
     /// afterwards. Plain data buffers (scratch stacks, chain payloads)
     /// never need execute permission.
     pub unsafe fn new(size: usize) -> Option<Self> {
-        let ptr = VirtualAlloc(
-            ptr::null(),
-            size,
-            MEM_COMMIT | MEM_RESERVE,
-            PAGE_READWRITE,
-        ) as *mut u8;
+        let ptr =
+            VirtualAlloc(ptr::null(), size, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE) as *mut u8;
         if ptr.is_null() {
             return None;
         }
@@ -106,12 +98,7 @@ impl AllocatedMemory {
     /// Allocate `size` RW bytes at a suggested address. See `new` for the
     /// rationale on PAGE_READWRITE (not RWX).
     pub unsafe fn new_at(hint: *const core::ffi::c_void, size: usize) -> Option<Self> {
-        let ptr = VirtualAlloc(
-            hint,
-            size,
-            MEM_COMMIT | MEM_RESERVE,
-            PAGE_READWRITE,
-        ) as *mut u8;
+        let ptr = VirtualAlloc(hint, size, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE) as *mut u8;
         if ptr.is_null() {
             return None;
         }
@@ -129,7 +116,12 @@ impl AllocatedMemory {
             self.size,
             PAGE_EXECUTE_READ,
             &mut old as *mut u32,
-        ) != 0 { old } else { 0 }
+        ) != 0
+        {
+            old
+        } else {
+            0
+        }
     }
 
     /// Flip back to PAGE_READWRITE for later edits.
@@ -140,7 +132,12 @@ impl AllocatedMemory {
             self.size,
             PAGE_READWRITE,
             &mut old as *mut u32,
-        ) != 0 { old } else { 0 }
+        ) != 0
+        {
+            old
+        } else {
+            0
+        }
     }
 
     /// Flip to legacy PAGE_EXECUTE_READWRITE. Reserved for the trampoline
@@ -155,14 +152,28 @@ impl AllocatedMemory {
             self.size,
             PAGE_EXECUTE_RW,
             &mut old as *mut u32,
-        ) != 0 { old } else { 0 }
+        ) != 0
+        {
+            old
+        } else {
+            0
+        }
     }
 
-    #[inline] pub fn as_ptr(&self) -> *mut u8 { self.base }
-    #[inline] pub fn size(&self) -> usize { self.size }
+    #[inline]
+    pub fn as_ptr(&self) -> *mut u8 {
+        self.base
+    }
+    #[inline]
+    pub fn size(&self) -> usize {
+        self.size
+    }
 
     /// Address as usize — convenient for RIP-rel disp math.
-    #[inline] pub fn addr(&self) -> usize { self.base as usize }
+    #[inline]
+    pub fn addr(&self) -> usize {
+        self.base as usize
+    }
 
     /// Leak the allocation (returns raw pointer, suppresses Drop).
     /// Use when the allocation is the backing for an active trampoline
@@ -202,9 +213,9 @@ impl Drop for AllocatedMemory {
 /// VAD traversal blew past d3d12's Present-callback watchdog. The fixed
 /// stride does ≤ 2048 VirtualQuery calls with no speculative allocations.
 pub unsafe fn alloc_near(target_va: usize, size: usize) -> Option<AllocatedMemory> {
-    const ONE_GB:   isize = 1 * 1024 * 1024 * 1024;
-    const STRIDE:   isize = 1 * 1024 * 1024;   // 1 MB — allocation granularity is 64 KB
-    const START:    isize = 64 * 1024;
+    const ONE_GB: isize = 1 * 1024 * 1024 * 1024;
+    const STRIDE: isize = 1 * 1024 * 1024; // 1 MB — allocation granularity is 64 KB
+    const START: isize = 64 * 1024;
 
     // Marching outward from target_va. We alternate signs so the closest
     // MEM_FREE slot wins, minimising the resulting rel32 displacement.
@@ -212,8 +223,12 @@ pub unsafe fn alloc_near(target_va: usize, size: usize) -> Option<AllocatedMemor
     while off < ONE_GB {
         for sign in [-1isize, 1] {
             let probe = (target_va as isize).wrapping_add(sign.wrapping_mul(off));
-            if probe < 0x1_0000 { continue; }
-            if probe > 0x0000_7FFF_FFFF_FFFF { continue; }
+            if probe < 0x1_0000 {
+                continue;
+            }
+            if probe > 0x0000_7FFF_FFFF_FFFF {
+                continue;
+            }
 
             let mut mbi: MBI = core::mem::zeroed();
             let got = VirtualQuery(
@@ -221,20 +236,28 @@ pub unsafe fn alloc_near(target_va: usize, size: usize) -> Option<AllocatedMemor
                 &mut mbi as *mut _ as *mut core::ffi::c_void,
                 core::mem::size_of::<MBI>(),
             );
-            if got == 0 { continue; }
-            if mbi.state != MEM_FREE { continue; }
-            if mbi.region_size < size + 0x10000 { continue; }
+            if got == 0 {
+                continue;
+            }
+            if mbi.state != MEM_FREE {
+                continue;
+            }
+            if mbi.region_size < size + 0x10000 {
+                continue;
+            }
 
             // Round up to 64 KB allocation granularity.
             let aligned = ((mbi.base_address as usize) + 0xFFFF) & !0xFFFFusize;
-            if aligned == 0 { continue; }
+            if aligned == 0 {
+                continue;
+            }
             // Ensure aligned + size fits inside the free region.
             let region_end = (mbi.base_address as usize).wrapping_add(mbi.region_size);
-            if aligned + size > region_end { continue; }
+            if aligned + size > region_end {
+                continue;
+            }
 
-            if let Some(mem) = AllocatedMemory::new_at(
-                aligned as *const core::ffi::c_void, size,
-            ) {
+            if let Some(mem) = AllocatedMemory::new_at(aligned as *const core::ffi::c_void, size) {
                 let delta = (mem.addr() as isize).wrapping_sub(target_va as isize);
                 if delta.abs() < 2 * ONE_GB {
                     return Some(mem);

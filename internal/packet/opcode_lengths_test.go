@@ -103,7 +103,7 @@ func TestTrimPacket_KnownFixedOpcodes(t *testing.T) {
 		{0x04, 18},
 		{0x18, 22},
 		{0x32, 22},
-		{0x33, 23},
+		{0x33, 24},
 		{0x38, 6},
 		{0x3C, 15},
 		{0x41, 13},

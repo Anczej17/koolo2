@@ -15,16 +15,16 @@ import (
 	"local/internal/svc/internal/town"
 	"local/internal/svc/internal/utils"
 
-	"local/internal/svc/internal/gamelib/data"
-	"local/internal/svc/internal/gamelib/data/area"
-	"local/internal/svc/internal/gamelib/data/object"
-	"local/internal/svc/internal/gamelib/data/stat"
-	"local/internal/svc/internal/gamelib/data/state"
 	"local/internal/svc/internal/action/step"
 	"local/internal/svc/internal/context"
 	"local/internal/svc/internal/drop"
 	"local/internal/svc/internal/event"
 	"local/internal/svc/internal/game"
+	"local/internal/svc/internal/gamelib/data"
+	"local/internal/svc/internal/gamelib/data/area"
+	"local/internal/svc/internal/gamelib/data/object"
+	"local/internal/svc/internal/gamelib/data/stat"
+	"local/internal/svc/internal/gamelib/data/state"
 	"local/internal/svc/internal/health"
 )
 
@@ -256,6 +256,8 @@ func MoveToArea(dst area.ID) (err error) {
 	}
 
 	// Areas that require a distance override for proper entrance interaction (Tower, Harem, Sewers)
+	moveOptions := []step.MoveOption{step.WithTimeout(75 * time.Second)}
+
 	if dst == area.HaremLevel1 && ctx.Data.PlayerUnit.Area == area.LutGholein ||
 		dst == area.SewersLevel3Act2 && ctx.Data.PlayerUnit.Area == area.SewersLevel2Act2 ||
 		dst == area.TowerCellarLevel1 && ctx.Data.PlayerUnit.Area == area.ForgottenTower ||
@@ -263,9 +265,10 @@ func MoveToArea(dst area.ID) (err error) {
 		dst == area.TowerCellarLevel3 && ctx.Data.PlayerUnit.Area == area.TowerCellarLevel2 ||
 		dst == area.TowerCellarLevel4 && ctx.Data.PlayerUnit.Area == area.TowerCellarLevel3 ||
 		dst == area.TowerCellarLevel5 && ctx.Data.PlayerUnit.Area == area.TowerCellarLevel4 {
-		err = MoveTo(toFun, step.WithDistanceToFinish(7))
+		moveOptions = append(moveOptions, step.WithDistanceToFinish(7))
+		err = MoveTo(toFun, moveOptions...)
 	} else {
-		err = MoveTo(toFun)
+		err = MoveTo(toFun, moveOptions...)
 	}
 
 	if err != nil {
@@ -421,8 +424,10 @@ func MoveTo(toFunc func() (data.Position, bool), options ...step.MoveOption) (er
 		return err
 	}
 
-	// Ensure no menus are open that might block movement
-	for ctx.Data.OpenMenus.IsMenuOpen() {
+	// Ensure no menus are open that might block movement. D2R leaves the
+	// waypoint panel flag set after packet-only travel; packet movement still
+	// works in that state, so do not force an ESC close for that stale flag.
+	for hasBlockingMenuForMovement(ctx) {
 		ctx.Logger.Debug("Found open menus while moving, closing them...")
 		if err := step.CloseAllMenus(); err != nil {
 			return err
@@ -902,6 +907,14 @@ func findClosestShrine(maxScanDistance float64) *data.Object {
 	}
 
 	return nil
+}
+
+func hasBlockingMenuForMovement(ctx *context.Status) bool {
+	openMenus := ctx.Data.OpenMenus
+	if !ctx.Data.PlayerUnit.Area.IsTown() {
+		openMenus.Waypoint = false
+	}
+	return openMenus.IsMenuOpen()
 }
 
 func getArcaneNextTeleportPadPosition(blacklistedPads []data.Object) (data.Object, error) {

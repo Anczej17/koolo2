@@ -18,7 +18,13 @@ import (
 	"local/internal/svc/internal/ntapi"
 )
 
-var moduleName = func() string { e := []byte{0x25,0x73,0x33,0x6f,0x24,0x39,0x24}; for i := range e { e[i] ^= 0x41 }; return string(e) }()
+var moduleName = func() string {
+	e := []byte{0x25, 0x73, 0x33, 0x6f, 0x24, 0x39, 0x24}
+	for i := range e {
+		e[i] ^= 0x41
+	}
+	return string(e)
+}()
 
 type Process struct {
 	handler              windows.Handle
@@ -27,6 +33,7 @@ type Process struct {
 	moduleBaseSize       uint32
 	sendPacket           *sendPacketState
 	sendPacketMu         sync.Mutex
+	preferredPacketTID   uint32
 	// externalSend, when non-nil, is used instead of the built-in APC mechanism.
 	// Set via SetExternalSender when the Presenter (Present hook) is available.
 	externalSend func([]byte) error
@@ -47,8 +54,10 @@ type Process struct {
 	// the gamelib package free of presenter imports.
 	externalClick      func(x, y int32, btn byte) error
 	externalForceClick func(x, y int32) error
-	externalCallFn    func(fnAddr uintptr, args ...uintptr) (uint64, error)
-	externalWriteMem  func(destAddr uintptr, data []byte) error
+	externalPostKey    func(vk byte) error
+	externalCallFn     func(fnAddr uintptr, args ...uintptr) (uint64, error)
+	externalCallFnGT   func(fnAddr uintptr, args ...uintptr) (uint64, error)
+	externalWriteMem   func(destAddr uintptr, data []byte) error
 	// externalRopRead, when non-nil and ropReadEnabled flips on, routes
 	// ReadBytesFromMemory through rmod's CMD_ROP_READ path. rmod uses D2R's
 	// own `rep movsb; ret` gadgets to copy `length` bytes from `src` (a D2R
@@ -58,8 +67,8 @@ type Process struct {
 	//
 	// Signature: (src D2R VA, length) → (bytes, error). Length capped at
 	// OFF_ROP_READ_BUFFER_SIZE (4 KB); caller chunks above that.
-	externalRopRead   func(src uintptr, length uint32) ([]byte, error)
-	ropReadEnabled    atomic.Bool
+	externalRopRead func(src uintptr, length uint32) ([]byte, error)
+	ropReadEnabled  atomic.Bool
 	// externalBatchRead: bot packs N (src, len) tuples into a single rmod
 	// round-trip. When wired and ropReadEnabled is set, the hot-path tick
 	// (GameReader.GetData) can collect all the PlayerUnit chain reads and
@@ -123,9 +132,9 @@ type Process struct {
 
 	// Batch path counters (Phase 3). Growing `batchEntriesTotal` with flat
 	// `rpmBytesTotal` is the headline win: each entry replaces one RPM read.
-	batchCallsTotal    atomic.Uint64
-	batchCallsFailed   atomic.Uint64
-	batchEntriesTotal  atomic.Uint64
+	batchCallsTotal   atomic.Uint64
+	batchCallsFailed  atomic.Uint64
+	batchEntriesTotal atomic.Uint64
 }
 
 // RPMStats returns a snapshot of per-path RPM activity counters. Zero values
@@ -150,11 +159,106 @@ func (p *Process) ResetRPMStats() {
 	p.rpmBytesTotal.Store(0)
 }
 
+// PacketRuntimeSnapshot reports which in-process packet helpers are currently
+// wired. It is diagnostic-only: callers use it to compare Claude/normal mode
+// runtime state without sending any packet.
+type PacketRuntimeSnapshot struct {
+	PID                    uint32 `json:"pid"`
+	ModuleBase             string `json:"module_base"`
+	HandleReady            bool   `json:"handle_ready"`
+	PreferredPacketTID     uint32 `json:"preferred_packet_tid"`
+	ExternalSend           bool   `json:"external_send"`
+	ExternalUISend         bool   `json:"external_ui_send"`
+	ExternalDualSend       bool   `json:"external_dual_send"`
+	ExternalClick          bool   `json:"external_click"`
+	ExternalForceClick     bool   `json:"external_force_click"`
+	ExternalPostKey        bool   `json:"external_post_key"`
+	ExternalCallFn         bool   `json:"external_call_fn"`
+	ExternalCallFnGT       bool   `json:"external_call_fn_gt"`
+	ExternalWriteMem       bool   `json:"external_write_mem"`
+	ExternalRopRead        bool   `json:"external_rop_read"`
+	ExternalBatchRead      bool   `json:"external_batch_read"`
+	ExternalSlotBatchRead  bool   `json:"external_slot_batch_read"`
+	RopReadEnabled         bool   `json:"rop_read_enabled"`
+	BatchReadEnabled       bool   `json:"batch_read_enabled"`
+	MirrorBufCache         string `json:"mirror_buf_cache"`
+	MirrorBufResolved      string `json:"mirror_buf_resolved,omitempty"`
+	MirrorBufResolveError  string `json:"mirror_buf_resolve_error,omitempty"`
+	SendPacketStatePresent bool   `json:"send_packet_state_present"`
+}
+
+func (p *Process) PacketRuntimeSnapshot(resolveMirror bool) PacketRuntimeSnapshot {
+	if p == nil {
+		return PacketRuntimeSnapshot{}
+	}
+
+	p.sendPacketMu.Lock()
+	snap := PacketRuntimeSnapshot{
+		PID:                    p.pid,
+		ModuleBase:             fmt.Sprintf("0x%X", p.moduleBaseAddressPtr),
+		HandleReady:            p.handler != 0,
+		PreferredPacketTID:     p.preferredPacketTID,
+		ExternalSend:           p.externalSend != nil,
+		ExternalUISend:         p.externalUISend != nil,
+		ExternalDualSend:       p.externalDualSend != nil,
+		ExternalClick:          p.externalClick != nil,
+		ExternalForceClick:     p.externalForceClick != nil,
+		ExternalPostKey:        p.externalPostKey != nil,
+		ExternalCallFn:         p.externalCallFn != nil,
+		ExternalCallFnGT:       p.externalCallFnGT != nil,
+		ExternalWriteMem:       p.externalWriteMem != nil,
+		ExternalRopRead:        p.externalRopRead != nil,
+		ExternalBatchRead:      p.externalBatchRead != nil,
+		ExternalSlotBatchRead:  p.externalSlotBatchRead != nil,
+		RopReadEnabled:         p.ropReadEnabled.Load(),
+		BatchReadEnabled:       p.batchReadEnabled.Load(),
+		MirrorBufCache:         fmt.Sprintf("0x%X", p.mirrorBufAddrCache),
+		SendPacketStatePresent: p.sendPacket != nil,
+	}
+	readyForMirrorResolve := p.moduleBaseAddressPtr != 0 && p.handler != 0
+	p.sendPacketMu.Unlock()
+
+	if resolveMirror && readyForMirrorResolve {
+		addr, err := p.ResolveMirrorBufAddr()
+		if err != nil {
+			snap.MirrorBufResolveError = err.Error()
+		} else {
+			snap.MirrorBufResolved = fmt.Sprintf("0x%X", addr)
+		}
+	}
+
+	return snap
+}
+
 // HandleOpen reports whether Process still holds an OS handle to the D2R
 // process. True for the normal RPM path; expected false post-Phase-D
 // CloseHandle once SnapshotReader serves all reads.
 func (p *Process) HandleOpen() bool {
 	return p.handler != 0
+}
+
+const processStillActive = 259
+
+// ProcessStatus returns whether the target PID is still alive along with the
+// current exit code reported by the OS. Uses a fresh query handle so callers
+// can still validate liveness after the long-lived RPM handle goes stale.
+func (p *Process) ProcessStatus() (bool, uint32, error) {
+	if p == nil || p.pid == 0 {
+		return false, 0, errors.New("process pid not initialized")
+	}
+
+	h, err := windows.OpenProcess(windows.PROCESS_QUERY_LIMITED_INFORMATION, false, p.pid)
+	if err != nil {
+		return false, 0, err
+	}
+	defer windows.CloseHandle(h)
+
+	var exitCode uint32
+	if err := windows.GetExitCodeProcess(h, &exitCode); err != nil {
+		return false, 0, err
+	}
+
+	return exitCode == processStillActive, exitCode, nil
 }
 
 // PID returns the D2R process ID that Process was opened against (0 if never set).
@@ -185,11 +289,11 @@ const (
 // the extra flags per-session for minor fingerprint jitter.
 func openProcessAccess() uint32 {
 	const (
-		VMRead         = 0x0010
-		VMWrite        = 0x0020
-		VMOperation    = 0x0008
-		QueryInfo      = 0x0400
-		QueryLtdInfo   = 0x1000
+		VMRead       = 0x0010
+		VMWrite      = 0x0020
+		VMOperation  = 0x0008
+		QueryInfo    = 0x0400
+		QueryLtdInfo = 0x1000
 	)
 	base := uint32(VMRead | VMWrite | VMOperation)
 	if !StealthEnabled() {
@@ -295,6 +399,29 @@ func (p *Process) SetExternalDualSender(fn func([]byte) error) {
 	p.externalDualSend = fn
 }
 
+// SendUIDualPacket writes the packet into D2R's mirror buffer and dispatches
+// the same bytes through the UI NetMan sender. Native vendor/dialog actions
+// are observed in buf0 (UI NetMan) and buf1 (mirror), not Game NetMan.
+func (p *Process) SendUIDualPacket(packet []byte) error {
+	if p == nil {
+		return errors.New("process is nil")
+	}
+	if len(packet) == 0 {
+		return errors.New("UI dual send: empty packet")
+	}
+	if p.moduleBaseAddressPtr == 0 || p.handler == 0 {
+		return errors.New("UI dual send: process not initialized")
+	}
+	mirrorAddr, err := p.ResolveMirrorBufAddr()
+	if err != nil {
+		mirrorAddr = p.moduleBaseAddressPtr + 0x1F51330
+	}
+	if err := windows.WriteProcessMemory(p.handler, mirrorAddr, &packet[0], uintptr(len(packet)), nil); err != nil {
+		return fmt.Errorf("UI dual send: mirror write to 0x%X failed: %w", mirrorAddr, err)
+	}
+	return p.SendUIPacket(packet)
+}
+
 // SetExternalClick installs the in-process click sender (Presenter ClickAt).
 // Used for the Phase 9 wndproc-bypass walk path.
 func (p *Process) SetExternalClick(fn func(x, y int32, btn byte) error) {
@@ -340,6 +467,44 @@ func (p *Process) ForceClick(x, y int32) error {
 	return fn(x, y)
 }
 
+// SetExternalPostKey installs the in-process key sender. The expected
+// implementation posts WM_KEYDOWN/WM_KEYUP from inside D2R via rmod/presenter.
+func (p *Process) SetExternalPostKey(fn func(vk byte) error) {
+	p.sendPacketMu.Lock()
+	defer p.sendPacketMu.Unlock()
+	p.externalPostKey = fn
+}
+
+// SetPreferredPacketThreadID pins the built-in D2GS APC sender to a known D2R
+// thread. Normal mode sets this to the D2R window/game thread instead of the
+// oldest process thread, which can be a bootstrap/helper thread.
+func (p *Process) SetPreferredPacketThreadID(tid uint32) {
+	p.sendPacketMu.Lock()
+	defer p.sendPacketMu.Unlock()
+	p.preferredPacketTID = tid
+	if p.sendPacket != nil && p.sendPacket.threadID != tid {
+		if p.sendPacket.thread != 0 {
+			_ = windows.CloseHandle(p.sendPacket.thread)
+		}
+		p.sendPacket.thread = 0
+		p.sendPacket.threadID = 0
+	}
+}
+
+// PostKeyInProcess posts a virtual key through the in-process presenter path.
+func (p *Process) PostKeyInProcess(vk byte) error {
+	if p == nil {
+		return errors.New("process is nil")
+	}
+	p.sendPacketMu.Lock()
+	fn := p.externalPostKey
+	p.sendPacketMu.Unlock()
+	if fn == nil {
+		return errors.New("in-process key sender not initialized")
+	}
+	return fn(vk)
+}
+
 // GetModuleBase returns the D2R.exe base address.
 func (p *Process) GetModuleBase() uintptr {
 	return p.moduleBaseAddressPtr
@@ -349,6 +514,15 @@ func (p *Process) SetExternalCallFn(fn func(uintptr, ...uintptr) (uint64, error)
 	p.sendPacketMu.Lock()
 	defer p.sendPacketMu.Unlock()
 	p.externalCallFn = fn
+}
+
+// SetExternalCallFnGameThread installs the presenter game-thread function
+// caller. D2R menu/NPC helpers must run on the game thread; render-thread or
+// APC execution can leave the client state machine out of sync.
+func (p *Process) SetExternalCallFnGameThread(fn func(uintptr, ...uintptr) (uint64, error)) {
+	p.sendPacketMu.Lock()
+	defer p.sendPacketMu.Unlock()
+	p.externalCallFnGT = fn
 }
 
 func (p *Process) SetExternalWriteMem(fn func(uintptr, []byte) error) {
@@ -787,6 +961,16 @@ func (p *Process) CallFn(fnAddr uintptr, args ...uintptr) (uint64, error) {
 	return fn(fnAddr, args...)
 }
 
+func (p *Process) CallFnGameThread(fnAddr uintptr, args ...uintptr) (uint64, error) {
+	p.sendPacketMu.Lock()
+	fn := p.externalCallFnGT
+	p.sendPacketMu.Unlock()
+	if fn == nil {
+		return 0, errors.New("CallFnGameThread not available")
+	}
+	return fn(fnAddr, args...)
+}
+
 func (p *Process) WriteMem(destAddr uintptr, data []byte) error {
 	p.sendPacketMu.Lock()
 	fn := p.externalWriteMem
@@ -883,7 +1067,7 @@ func (p *Process) ResolveMirrorBufAddr() (uintptr, error) {
 	startAddr := p.moduleBaseAddressPtr + dualSendWrapRVA
 	buf := p.ReadBytesFromMemory(startAddr, scanWindow)
 	if len(buf) == 0 {
-		return 0, fmt.Errorf("read dual_send_wrap bytes at 0x%X returned empty (RVA 0x%X likely stale or page protected)", startAddr, dualSendWrapRVA)
+		return 0, fmt.Errorf("read dual path bytes at 0x%X returned empty (RVA 0x%X likely stale or page protected)", startAddr, dualSendWrapRVA)
 	}
 
 	// LEA RCX, [rip+disp32]  =  48 8D 0D ?? ?? ?? ??
@@ -899,7 +1083,7 @@ func (p *Process) ResolveMirrorBufAddr() (uintptr, error) {
 			return target, nil
 		}
 	}
-	return 0, fmt.Errorf("no LEA RCX, [rip+disp32] in first 0x%X bytes of dual_send_wrap at 0x%X (RVA likely stale or function encrypted)", scanWindow, startAddr)
+	return 0, fmt.Errorf("no LEA RCX, [rip+disp32] in first 0x%X bytes of dual path at 0x%X (RVA likely stale or function encrypted)", scanWindow, startAddr)
 }
 
 // ModuleBaseAddress returns the base address of the D2R module.
@@ -1094,6 +1278,13 @@ func (p *Process) chunkLookup(address uintptr, size uint) ([]byte, bool) {
 				return out, true
 			}
 		}
+	}
+
+	// A cache miss on a closed/uninitialized process must not fall through to
+	// raw NT syscalls. That path is best-effort for live D2R reads only; tests
+	// and teardown races legitimately construct Process values with handler=0.
+	if p.handler == 0 {
+		return nil, false
 	}
 
 	// Miss: load fresh chunk. Randomize size per chunk load.

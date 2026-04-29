@@ -13,7 +13,7 @@ import (
 // stealth.go — Stealth RPM Layer utilities.
 //
 // Central policy + primitives for the Stealth RPM Layer described in
-// STEALTH_RPM_PLAN.md. All layers gate on stealthEnabled() so the code
+// docs/archive/STEALTH_RPM_PLAN.md. All layers gate on stealthEnabled() so the code
 // falls back to original (upstream-parity) behavior when STEALTH_READ
 // is unset or != "1".
 
@@ -40,9 +40,9 @@ func initStealthFlags() {
 	})
 }
 
-// StealthEnabled returns true unless STEALTH_READ=0 was set at startup.
-// Default true — stealth layers are the baseline. Set STEALTH_READ=0 to
-// revert to upstream koolo read pattern for comparison/debugging.
+// StealthEnabled returns true only when STEALTH_READ=1 was set at startup.
+// Current default is OFF for stability during early attach; future work can
+// flip this back to opt-out once the startup race is resolved and live-verified.
 func StealthEnabled() bool {
 	initStealthFlags()
 	return stealthFlag.Load()
@@ -112,8 +112,8 @@ func JitterDuration(base time.Duration, jitterPct float64) time.Duration {
 	}
 	// Symmetric jitter: ±jitterPct. cryptRand64 mod 1e6 gives 0..999_999.
 	// Center at 0, scale to ±jitterPct * base.
-	r := int64(cryptRand64() % 2_000_001)    // 0..2_000_000
-	offset := r - 1_000_000                  // -1_000_000..+1_000_000
+	r := int64(cryptRand64() % 2_000_001) // 0..2_000_000
+	offset := r - 1_000_000               // -1_000_000..+1_000_000
 	delta := time.Duration(float64(base) * jitterPct * float64(offset) / 1_000_000)
 	result := base + delta
 	if result < 1 {

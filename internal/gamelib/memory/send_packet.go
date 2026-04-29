@@ -20,6 +20,8 @@ import (
 const (
 	d2gsSendPacketPattern = "\xE8\x00\x00\x00\x00\x0F\xB6\x85\x00\x00\x00\x00\x48\x03\xF0"
 	d2gsSendPacketMask    = "x????xxx????xxx"
+	d2gsSendPacketAlt     = "\x48\x8D\x45\xE0\x48\x89\x45\xC0\xE8\x00\x00\x00\x00\x48\x69\x4D\x88\xE8\x02\x00\x00\x44\x8B\x44\x24\x60"
+	d2gsSendPacketAltMask = "xxxxxxxxx????xxxxxxxxxxxxx"
 	maxPacketSize         = 65536
 )
 
@@ -59,9 +61,10 @@ const (
 	sendPacketProcessAccess = windows.PROCESS_VM_OPERATION | windows.PROCESS_VM_READ | windows.PROCESS_VM_WRITE | windows.PROCESS_QUERY_INFORMATION
 
 	THREAD_SUSPEND_RESUME    = 0x0002
+	THREAD_GET_CONTEXT       = 0x0008
 	THREAD_SET_CONTEXT       = 0x0010
 	THREAD_QUERY_INFORMATION = 0x0040
-	sendPacketThreadAccess   = THREAD_SET_CONTEXT | THREAD_SUSPEND_RESUME | THREAD_QUERY_INFORMATION
+	sendPacketThreadAccess   = THREAD_SET_CONTEXT | THREAD_GET_CONTEXT | THREAD_SUSPEND_RESUME | THREAD_QUERY_INFORMATION
 
 	sendPacketStatusOffset = 24
 	sendPacketMetaSize     = 32
@@ -344,9 +347,13 @@ func (s *sendPacketState) ensureThreadHandle(p *Process) (windows.Handle, error)
 		s.processPID = 0
 	}
 
-	threadID, err := findMainThreadID(p.pid)
-	if err != nil {
-		return 0, err
+	threadID := p.preferredPacketTID
+	if threadID == 0 {
+		var err error
+		threadID, err = findMainThreadID(p.pid)
+		if err != nil {
+			return 0, err
+		}
 	}
 
 	handle, err := windows.OpenThread(sendPacketThreadAccess, false, threadID)
@@ -559,8 +566,12 @@ func validatePatternMatch(memory []byte, offset int) bool {
 	return true
 }
 
-// Known SendPacket RVA from offset scanner. Used as fallback when pattern
-// scan fails (Warden may protect the page containing the call site).
+// Known D2GS SendPacket RVA for D2R build 7723df1e10d79805.
+//
+// Live-verified working sessions resolve send_fn at base+0x146600. The older
+// alt pattern can match a caller/helper near base+0x1533B24; packets dispatched
+// there report success but are ignored by NPC flows. Keep the fallback on the
+// actual D2GS send_fn until a new baked build entry proves otherwise.
 const sendPacketKnownRVA uintptr = 0x146600
 
 // dual_send_wrap RVA: dedup wrapper that memcmp/memcpy to mirror buffer then
@@ -636,24 +647,32 @@ func (p *Process) scanForSendPacketPattern() (uintptr, error) {
 		}
 
 		offset := findPatternOffset(memory, d2gsSendPacketPattern, d2gsSendPacketMask)
-		if offset < 0 {
-			continue
+		if offset >= 0 && validatePatternMatch(memory, offset) {
+			patternAddr := module.ModuleBaseAddress + uintptr(offset)
+			relOffset := int32(binary.LittleEndian.Uint32(memory[offset+1 : offset+5]))
+			absolute := uintptr(int64(patternAddr+5) + int64(relOffset))
+
+			if absolute != 0 && absolute >= module.ModuleBaseAddress {
+				log.Printf("send fn resolved at 0x%X in module %s", absolute, module.ModuleName)
+				return absolute, nil
+			}
 		}
 
-		if !validatePatternMatch(memory, offset) {
-			continue
+		// The alt signature is useful only as a last-resort sanity check. On
+		// the current build it resolves to base+0x1533B24, which is not the
+		// D2GS send_fn and breaks NPC packets. Accept it only when it lands on
+		// the same verified RVA as the baked fallback.
+		if offset := findPatternOffset(memory, d2gsSendPacketAlt, d2gsSendPacketAltMask); offset >= 0 {
+			callOffset := offset + 8
+			patternAddr := module.ModuleBaseAddress + uintptr(callOffset)
+			relOffset := int32(binary.LittleEndian.Uint32(memory[callOffset+1 : callOffset+5]))
+			absolute := uintptr(int64(patternAddr+5) + int64(relOffset))
+			if absolute == module.ModuleBaseAddress+sendPacketKnownRVA {
+				log.Printf("send fn resolved by verified alt pattern at 0x%X in module %s", absolute, module.ModuleName)
+				return absolute, nil
+			}
+			log.Printf("send fn alt pattern ignored: resolved 0x%X, expected 0x%X", absolute, module.ModuleBaseAddress+sendPacketKnownRVA)
 		}
-
-		patternAddr := module.ModuleBaseAddress + uintptr(offset)
-		relOffset := int32(binary.LittleEndian.Uint32(memory[offset+1 : offset+5]))
-		absolute := uintptr(int64(patternAddr+5) + int64(relOffset))
-
-		if absolute == 0 || absolute < module.ModuleBaseAddress {
-			continue
-		}
-
-		log.Printf("send fn resolved at 0x%X in module %s", absolute, module.ModuleName)
-		return absolute, nil
 	}
 
 	return 0, errors.New("send fn pattern not found")
@@ -680,6 +699,7 @@ func (p *Process) SendPacketAPC(packet []byte) error {
 // SendDualPacketAPC replicates the 04-14 proven dual-send path:
 //  1. WriteProcessMemory to D2R mirror buffer
 //  2. send_fn APC on main thread (NOT render thread like the presenter path)
+//
 // Used for 0x50 and other opcodes that need main-thread local dispatch plus
 // a populated mirror buffer. Bypasses any presenter override.
 func (p *Process) SendDualPacketAPC(packet []byte) error {
@@ -769,6 +789,325 @@ func (p *Process) SendPacketViaDualWrap(packet []byte) error {
 	}
 
 	return p.waitForPacketCompletion(handle, state, 200*time.Millisecond)
+}
+
+// SendPacketViaSendFnHijack executes D2GS send_fn(pkt,len,0) immediately on
+// the selected D2R thread by temporarily redirecting RIP to a one-shot stub.
+// This is a controlled fallback for stateful AMB packets where queued APCs
+// complete but the server ignores the packet.
+func (p *Process) SendPacketViaSendFnHijack(packet []byte) error {
+	if p == nil {
+		return errors.New("process is nil")
+	}
+	if len(packet) == 0 || len(packet) > maxPacketSize {
+		return fmt.Errorf("invalid packet size: %d", len(packet))
+	}
+
+	p.sendPacketMu.Lock()
+	if p.sendPacket == nil {
+		p.sendPacket = &sendPacketState{}
+	}
+	state := p.sendPacket
+	state.mu.Lock()
+	p.sendPacketMu.Unlock()
+	defer state.mu.Unlock()
+
+	handle, err := state.ensureHandle(p.pid)
+	if err != nil {
+		return fmt.Errorf("open process: %w", err)
+	}
+	fnAddr, err := state.ensureFunction(p)
+	if err != nil {
+		return fmt.Errorf("resolve send fn: %w", err)
+	}
+	threadHandle, err := state.ensureThreadHandle(p)
+	if err != nil {
+		return fmt.Errorf("resolve packet thread: %w", err)
+	}
+
+	packetLen := uintptr(len(packet))
+	statusOff := alignUp(packetLen, 0x10)
+	scOff := statusOff + 0x10
+	blockSize := alignUp(scOff+0x800, 0x1000)
+	block, err := virtualAllocEx(handle, blockSize, windows.PAGE_EXECUTE_READWRITE)
+	if err != nil {
+		return fmt.Errorf("alloc hijack block: %w", err)
+	}
+	state.leakedBuffers = append(state.leakedBuffers, block)
+
+	pktAddr := block
+	statusAddr := block + statusOff
+	scAddr := block + scOff
+	stackTop := (block + blockSize - 0x10) &^ 0xF
+	if err := writeRemoteMemory(handle, pktAddr, packet); err != nil {
+		return fmt.Errorf("write hijack pkt: %w", err)
+	}
+	var zeroStatus [4]byte
+	if err := writeRemoteMemory(handle, statusAddr, zeroStatus[:]); err != nil {
+		return fmt.Errorf("write hijack status: %w", err)
+	}
+
+	if err := suspendThread(threadHandle); err != nil {
+		return fmt.Errorf("suspend packet thread: %w", err)
+	}
+	suspended := true
+	defer func() {
+		if suspended {
+			_ = resumeThread(threadHandle)
+		}
+	}()
+
+	var ctx CONTEXT64
+	if err := getThreadContext(threadHandle, &ctx); err != nil {
+		return fmt.Errorf("get packet thread context: %w", err)
+	}
+	origRip := ctx.Rip
+	origRsp := ctx.Rsp
+
+	sc := buildSendFnHijackStub(fnAddr, pktAddr, packetLen, statusAddr, uintptr(origRip), uintptr(origRsp))
+	if err := writeRemoteMemory(handle, scAddr, sc); err != nil {
+		return fmt.Errorf("write hijack stub: %w", err)
+	}
+
+	ctx.Rip = uint64(scAddr)
+	ctx.Rsp = uint64(stackTop)
+	if err := setThreadContext(threadHandle, &ctx); err != nil {
+		return fmt.Errorf("set packet thread context: %w", err)
+	}
+	if err := resumeThread(threadHandle); err != nil {
+		return fmt.Errorf("resume packet thread: %w", err)
+	}
+	suspended = false
+
+	deadline := time.Now().Add(500 * time.Millisecond)
+	var status uint32
+	for time.Now().Before(deadline) {
+		var buf [4]byte
+		var bytesRead uintptr
+		if err := windows.ReadProcessMemory(handle, statusAddr, &buf[0], 4, &bytesRead); err == nil && bytesRead == 4 {
+			status = binary.LittleEndian.Uint32(buf[:])
+			if status == 1 {
+				return nil
+			}
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+	return fmt.Errorf("send_fn hijack timeout status=%d opcode=0x%02X", status, packet[0])
+}
+
+func buildSendFnHijackStub(fnAddr, pktAddr, packetLen, statusAddr, returnRip, returnRsp uintptr) []byte {
+	var sc []byte
+	sc = append(sc, 0x9C) // pushfq
+	sc = append(sc, 0x50, 0x51, 0x52, 0x53, 0x55, 0x56, 0x57)
+	sc = append(sc,
+		0x41, 0x50,
+		0x41, 0x51,
+		0x41, 0x52,
+		0x41, 0x53,
+		0x41, 0x54,
+		0x41, 0x55,
+		0x41, 0x56,
+		0x41, 0x57,
+	)
+	sc = append(sc, 0x48, 0x83, 0xEC, 0x20) // shadow space; RSP is 16-byte aligned before CALL
+	sc = append(sc, 0x48, 0xB9)             // mov rcx, pktAddr
+	sc = appendU64LE(sc, uint64(pktAddr))
+	sc = append(sc, 0xBA) // mov edx, packetLen
+	var lenBuf [4]byte
+	binary.LittleEndian.PutUint32(lenBuf[:], uint32(packetLen))
+	sc = append(sc, lenBuf[:]...)
+	sc = append(sc, 0x45, 0x31, 0xC0) // xor r8d, r8d
+	sc = append(sc, 0x48, 0xB8)       // mov rax, fnAddr
+	sc = appendU64LE(sc, uint64(fnAddr))
+	sc = append(sc, 0xFF, 0xD0) // call rax
+	sc = append(sc, 0x48, 0xBB) // mov rbx, statusAddr
+	sc = appendU64LE(sc, uint64(statusAddr))
+	sc = append(sc, 0xC7, 0x03, 0x01, 0x00, 0x00, 0x00)
+	sc = append(sc, 0x48, 0x83, 0xC4, 0x20)
+	sc = append(sc,
+		0x41, 0x5F,
+		0x41, 0x5E,
+		0x41, 0x5D,
+		0x41, 0x5C,
+		0x41, 0x5B,
+		0x41, 0x5A,
+		0x41, 0x59,
+		0x41, 0x58,
+	)
+	sc = append(sc, 0x5F, 0x5E, 0x5D, 0x5B, 0x5A, 0x59, 0x58)
+	sc = append(sc, 0x9D)       // popfq
+	sc = append(sc, 0x48, 0xBC) // mov rsp, returnRsp
+	sc = appendU64LE(sc, uint64(returnRsp))
+	sc = append(sc, 0xFF, 0x25, 0x00, 0x00, 0x00, 0x00) // jmp qword ptr [rip+0]
+	sc = appendU64LE(sc, uint64(returnRip))
+	return sc
+}
+
+func appendU64LE(buf []byte, val uint64) []byte {
+	var tmp [8]byte
+	binary.LittleEndian.PutUint64(tmp[:], val)
+	return append(buf, tmp[:]...)
+}
+
+// CallFnViaThreadHijack executes an arbitrary D2R function on the selected
+// packet/game thread by temporarily redirecting RIP to a one-shot stub. It is
+// used for native client handlers when APC delivery never reaches an alertable
+// wait in the target thread.
+func (p *Process) CallFnViaThreadHijack(fnAddr uintptr, args ...uintptr) (uint64, error) {
+	if p == nil {
+		return 0, errors.New("process is nil")
+	}
+	if fnAddr == 0 {
+		return 0, errors.New("function address is zero")
+	}
+	if len(args) > 6 {
+		return 0, fmt.Errorf("too many args: %d", len(args))
+	}
+	var argv [6]uintptr
+	copy(argv[:], args)
+
+	p.sendPacketMu.Lock()
+	if p.sendPacket == nil {
+		p.sendPacket = &sendPacketState{}
+	}
+	state := p.sendPacket
+	state.mu.Lock()
+	p.sendPacketMu.Unlock()
+	defer state.mu.Unlock()
+
+	handle, err := state.ensureHandle(p.pid)
+	if err != nil {
+		return 0, fmt.Errorf("open process: %w", err)
+	}
+	threadHandle, err := state.ensureThreadHandle(p)
+	if err != nil {
+		return 0, fmt.Errorf("resolve packet thread: %w", err)
+	}
+
+	blockSize := uintptr(4096)
+	block, err := virtualAllocEx(handle, blockSize, windows.PAGE_EXECUTE_READWRITE)
+	if err != nil {
+		return 0, fmt.Errorf("alloc call hijack block: %w", err)
+	}
+	state.leakedBuffers = append(state.leakedBuffers, block)
+
+	statusAddr := block
+	retAddr := block + 0x08
+	scAddr := block + 0x100
+	stackTop := (block + blockSize - 0x10) &^ 0xF
+	var zero [16]byte
+	if err := writeRemoteMemory(handle, statusAddr, zero[:]); err != nil {
+		return 0, fmt.Errorf("write call hijack status: %w", err)
+	}
+
+	if err := suspendThread(threadHandle); err != nil {
+		return 0, fmt.Errorf("suspend packet thread: %w", err)
+	}
+	suspended := true
+	defer func() {
+		if suspended {
+			_ = resumeThread(threadHandle)
+		}
+	}()
+
+	var ctx CONTEXT64
+	if err := getThreadContext(threadHandle, &ctx); err != nil {
+		return 0, fmt.Errorf("get packet thread context: %w", err)
+	}
+	origRip := ctx.Rip
+	origRsp := ctx.Rsp
+
+	sc := buildCallFnHijackStub(fnAddr, argv, statusAddr, retAddr, uintptr(origRip), uintptr(origRsp))
+	if err := writeRemoteMemory(handle, scAddr, sc); err != nil {
+		return 0, fmt.Errorf("write call hijack stub: %w", err)
+	}
+
+	ctx.Rip = uint64(scAddr)
+	ctx.Rsp = uint64(stackTop)
+	if err := setThreadContext(threadHandle, &ctx); err != nil {
+		return 0, fmt.Errorf("set packet thread context: %w", err)
+	}
+	if err := resumeThread(threadHandle); err != nil {
+		return 0, fmt.Errorf("resume packet thread: %w", err)
+	}
+	suspended = false
+
+	deadline := time.Now().Add(2 * time.Second)
+	var status uint32
+	for time.Now().Before(deadline) {
+		var buf [4]byte
+		var bytesRead uintptr
+		if err := windows.ReadProcessMemory(handle, statusAddr, &buf[0], 4, &bytesRead); err == nil && bytesRead == 4 {
+			status = binary.LittleEndian.Uint32(buf[:])
+			if status == 1 {
+				var retBuf [8]byte
+				if err := windows.ReadProcessMemory(handle, retAddr, &retBuf[0], 8, &bytesRead); err != nil || bytesRead != 8 {
+					return 0, fmt.Errorf("read call hijack return: %w", err)
+				}
+				return binary.LittleEndian.Uint64(retBuf[:]), nil
+			}
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+	return 0, fmt.Errorf("call hijack timeout status=%d fn=%#x", status, fnAddr)
+}
+
+func buildCallFnHijackStub(fnAddr uintptr, args [6]uintptr, statusAddr, retAddr, returnRip, returnRsp uintptr) []byte {
+	var sc []byte
+	sc = append(sc, 0x9C) // pushfq
+	sc = append(sc, 0x50, 0x51, 0x52, 0x53, 0x55, 0x56, 0x57)
+	sc = append(sc,
+		0x41, 0x50,
+		0x41, 0x51,
+		0x41, 0x52,
+		0x41, 0x53,
+		0x41, 0x54,
+		0x41, 0x55,
+		0x41, 0x56,
+		0x41, 0x57,
+	)
+	sc = append(sc, 0x48, 0x83, 0xEC, 0x30)
+	sc = append(sc, 0x48, 0xB8)
+	sc = appendU64LE(sc, uint64(args[4]))
+	sc = append(sc, 0x48, 0x89, 0x44, 0x24, 0x20)
+	sc = append(sc, 0x48, 0xB8)
+	sc = appendU64LE(sc, uint64(args[5]))
+	sc = append(sc, 0x48, 0x89, 0x44, 0x24, 0x28)
+	sc = append(sc, 0x48, 0xB9)
+	sc = appendU64LE(sc, uint64(args[0]))
+	sc = append(sc, 0x48, 0xBA)
+	sc = appendU64LE(sc, uint64(args[1]))
+	sc = append(sc, 0x49, 0xB8)
+	sc = appendU64LE(sc, uint64(args[2]))
+	sc = append(sc, 0x49, 0xB9)
+	sc = appendU64LE(sc, uint64(args[3]))
+	sc = append(sc, 0x48, 0xB8)
+	sc = appendU64LE(sc, uint64(fnAddr))
+	sc = append(sc, 0xFF, 0xD0)
+	sc = append(sc, 0x48, 0xBB)
+	sc = appendU64LE(sc, uint64(retAddr))
+	sc = append(sc, 0x48, 0x89, 0x03)
+	sc = append(sc, 0x48, 0xBB)
+	sc = appendU64LE(sc, uint64(statusAddr))
+	sc = append(sc, 0xC7, 0x03, 0x01, 0x00, 0x00, 0x00)
+	sc = append(sc, 0x48, 0x83, 0xC4, 0x30)
+	sc = append(sc,
+		0x41, 0x5F,
+		0x41, 0x5E,
+		0x41, 0x5D,
+		0x41, 0x5C,
+		0x41, 0x5B,
+		0x41, 0x5A,
+		0x41, 0x59,
+		0x41, 0x58,
+	)
+	sc = append(sc, 0x5F, 0x5E, 0x5D, 0x5B, 0x5A, 0x59, 0x58)
+	sc = append(sc, 0x9D)
+	sc = append(sc, 0x48, 0xBC)
+	sc = appendU64LE(sc, uint64(returnRsp))
+	sc = append(sc, 0xFF, 0x25, 0x00, 0x00, 0x00, 0x00)
+	sc = appendU64LE(sc, uint64(returnRip))
+	return sc
 }
 
 // SendPacketWithTimeout sends a packet with a custom APC timeout
@@ -930,6 +1269,57 @@ var uiSendStub = []byte{
 	0xC3,
 }
 
+func readRemoteUint64(handle windows.Handle, addr uintptr) (uint64, error) {
+	var v uint64
+	if err := windows.ReadProcessMemory(handle, addr, (*byte)(unsafe.Pointer(&v)), 8, nil); err != nil {
+		return 0, err
+	}
+	return v, nil
+}
+
+func isRemoteExecutable(handle windows.Handle, addr uintptr) bool {
+	info, err := ntapi.QueryVirtualMemory(handle, addr)
+	if err != nil {
+		return false
+	}
+	if info.State != ntapi.MEM_COMMIT || info.Protect == ntapi.PAGE_NOACCESS || (info.Protect&ntapi.PAGE_GUARD) != 0 {
+		return false
+	}
+	return (info.Protect & (ntapi.PAGE_EXECUTE | 0x20 | 0x40 | 0x80)) != 0
+}
+
+func resolveUINetManSend(handle windows.Handle, candidate uintptr) (instanceAddr, vtableAddr, uiSendFn uint64, mode string, err error) {
+	vtable, err := readRemoteUint64(handle, candidate)
+	if err == nil && vtable != 0 {
+		if fn, readErr := readRemoteUint64(handle, uintptr(vtable)+0x28); readErr == nil && fn != 0 && isRemoteExecutable(handle, uintptr(fn)) {
+			return uint64(candidate), vtable, fn, "instance", nil
+		}
+	}
+
+	instance, err := readRemoteUint64(handle, candidate)
+	if err != nil {
+		return 0, 0, 0, "", fmt.Errorf("read UI NetMan candidate: %w", err)
+	}
+	if instance == 0 {
+		return 0, 0, 0, "", errors.New("UI NetMan instance is null")
+	}
+	vtable, err = readRemoteUint64(handle, uintptr(instance))
+	if err != nil {
+		return 0, 0, 0, "", fmt.Errorf("read UI NetMan vtable: %w", err)
+	}
+	if vtable == 0 {
+		return 0, 0, 0, "", errors.New("UI NetMan vtable is null")
+	}
+	uiSendFn, err = readRemoteUint64(handle, uintptr(vtable)+0x28)
+	if err != nil {
+		return 0, 0, 0, "", fmt.Errorf("read UI send fn: %w", err)
+	}
+	if uiSendFn == 0 || !isRemoteExecutable(handle, uintptr(uiSendFn)) {
+		return 0, 0, 0, "", fmt.Errorf("UI send fn is not executable: %#x", uiSendFn)
+	}
+	return instance, vtable, uiSendFn, "global", nil
+}
+
 // SendUIPacketViaMainThread sends a packet through UI NetMan vtable[5] via APC on the main thread.
 func (p *Process) SendUIPacketViaMainThread(packet []byte, uiNetManGlobalAddr uintptr) error {
 	if len(packet) == 0 || len(packet) > maxPacketSize {
@@ -958,22 +1348,12 @@ func (p *Process) SendUIPacketViaMainThread(packet []byte, uiNetManGlobalAddr ui
 	// Resolve UI NetMan: global → instance (fn ptr table), instance+0x28 → ui_send_fn
 	// The global points to an object whose fields ARE function pointers directly
 	// (not a C++ vtable with extra indirection). Slot 5 at offset 0x28.
-	var instanceAddr uint64
-	if err := windows.ReadProcessMemory(handle, uiNetManGlobalAddr, (*byte)(unsafe.Pointer(&instanceAddr)), 8, nil); err != nil {
-		return fmt.Errorf("read UI NetMan global: %w", err)
+	instanceAddr, vtableAddr, uiSendFn, resolveMode, err := resolveUINetManSend(handle, uiNetManGlobalAddr)
+	if err != nil {
+		return fmt.Errorf("resolve UI NetMan send: %w", err)
 	}
-	if instanceAddr == 0 {
-		return errors.New("UI NetMan instance is null")
-	}
-	var uiSendFn uint64
-	if err := windows.ReadProcessMemory(handle, uintptr(instanceAddr)+0x28, (*byte)(unsafe.Pointer(&uiSendFn)), 8, nil); err != nil {
-		return fmt.Errorf("read UI send fn: %w", err)
-	}
-	if uiSendFn == 0 {
-		return errors.New("UI send fn is null")
-	}
-	log.Printf("SendUIPacketViaMainThread: global=%#x instance=%#x fn=%#x (RVA %#x) pktSize=%d",
-		uiNetManGlobalAddr, instanceAddr, uiSendFn, uiSendFn-uint64(p.moduleBaseAddressPtr), len(packet))
+	log.Printf("SendUIPacketViaMainThread: candidate=%#x mode=%s instance=%#x vtable=%#x fn=%#x (RVA %#x) pktSize=%d",
+		uiNetManGlobalAddr, resolveMode, instanceAddr, vtableAddr, uiSendFn, uiSendFn-uint64(p.moduleBaseAddressPtr), len(packet))
 
 	stubSize := uintptr(len(uiSendStub))
 	stubAddr, err := virtualAllocEx(handle, stubSize, windows.PAGE_EXECUTE_READWRITE)
@@ -1357,8 +1737,8 @@ func buildPolymorphicStub() []byte {
 	case 0:
 		code = append(code, 0x53) // push rbx
 	default:
-		code = append(code, 0x48, 0x83, 0xEC, 0x08)       // sub rsp, 8
-		code = append(code, 0x48, 0x89, 0x1C, 0x24)       // mov [rsp], rbx
+		code = append(code, 0x48, 0x83, 0xEC, 0x08) // sub rsp, 8
+		code = append(code, 0x48, 0x89, 0x1C, 0x24) // mov [rsp], rbx
 	}
 
 	code = append(code, pktJunkBlock()...)
@@ -1370,7 +1750,7 @@ func buildPolymorphicStub() []byte {
 	case 1:
 		code = append(code, 0x48, 0x8B, 0xD9) // mov rbx, rcx (alt)
 	default:
-		code = append(code, 0x51, 0x5B)        // push rcx; pop rbx
+		code = append(code, 0x51, 0x5B) // push rcx; pop rbx
 	}
 
 	code = append(code, pktJunkBlock()...)
@@ -1437,8 +1817,8 @@ func buildPolymorphicStub() []byte {
 	case 0:
 		code = append(code, 0x5B) // pop rbx
 	default:
-		code = append(code, 0x48, 0x8B, 0x1C, 0x24)       // mov rbx, [rsp]
-		code = append(code, 0x48, 0x83, 0xC4, 0x08)       // add rsp, 8
+		code = append(code, 0x48, 0x8B, 0x1C, 0x24) // mov rbx, [rsp]
+		code = append(code, 0x48, 0x83, 0xC4, 0x08) // add rsp, 8
 	}
 
 	// ret

@@ -5,30 +5,37 @@ import (
 	"log/slog"
 	"strings"
 
-	"local/internal/svc/internal/gamelib/data"
 	"local/internal/svc/internal/event"
 	"local/internal/svc/internal/game"
+	"local/internal/svc/internal/gamelib/data"
+	"local/internal/svc/internal/packet/amb"
 )
 
 type BeltManager struct {
-	data       *game.Data
-	hid        *game.HID
-	logger     *slog.Logger
-	supervisor string
+	data         *game.Data
+	hid          *game.HID
+	packetSender *game.PacketSender
+	logger       *slog.Logger
+	supervisor   string
 }
 
-func NewBeltManager(data *game.Data, hid *game.HID, logger *slog.Logger, supervisor string) *BeltManager {
+func NewBeltManager(data *game.Data, hid *game.HID, packetSender *game.PacketSender, logger *slog.Logger, supervisor string) *BeltManager {
 	return &BeltManager{
-		data:       data,
-		hid:        hid,
-		logger:     logger,
-		supervisor: supervisor,
+		data:         data,
+		hid:          hid,
+		packetSender: packetSender,
+		logger:       logger,
+		supervisor:   supervisor,
 	}
 }
 
 func (bm BeltManager) DrinkPotion(potionType data.PotionType, merc bool) bool {
 	p, found := bm.data.Inventory.Belt.GetFirstPotion(potionType)
 	if found {
+		if bm.hid != nil && bm.hid.IsDisabled() {
+			return bm.drinkPotionPacket(potionType, p, merc)
+		}
+
 		binding := bm.data.KeyBindings.UseBelt[p.X]
 		if merc {
 			bm.hid.PressKeyWithModifier(binding.Key1[0], game.ShiftKey)
@@ -43,6 +50,101 @@ func (bm BeltManager) DrinkPotion(potionType data.PotionType, merc bool) bool {
 	}
 
 	return false
+}
+
+func (bm BeltManager) drinkPotionPacket(potionType data.PotionType, pos data.Position, merc bool) bool {
+	if bm.packetSender == nil {
+		bm.logger.Warn("Potion skipped: HID disabled and packet sender unavailable", slog.String("potion", string(potionType)))
+		return false
+	}
+
+	potion, found := bm.beltItemAt(pos)
+	if !found {
+		bm.logger.Warn("Potion skipped: belt item not found at selected slot",
+			slog.String("potion", string(potionType)),
+			slog.Int("x", pos.X),
+			slog.Int("y", pos.Y))
+		return false
+	}
+
+	if merc {
+		mercUnit, ok := bm.findMerc()
+		if !ok {
+			bm.logger.Warn("Mercenary potion skipped: mercenary unit not found",
+				slog.String("potion", string(potionType)))
+			return false
+		}
+		if err := bm.packetSender.UseItemOnUnit(
+			uint32(potion.UnitID),
+			uint32(mercUnit.UnitID),
+			1,
+			byte(pos.X),
+			byte(pos.Y),
+			4,
+			bm.otherBeltSlots(pos),
+		); err != nil {
+			bm.logger.Warn("Mercenary potion packet failed", slog.String("potion", string(potionType)), slog.Any("error", err))
+			return false
+		}
+		bm.logger.Debug(fmt.Sprintf("Using %s potion on Mercenary via packet [Column: %d]. HP: %d", potionType, pos.X+1, bm.data.MercHPPercent()))
+		event.Send(event.UsedPotion(event.Text(bm.supervisor, ""), potionType, true))
+		return true
+	}
+
+	if err := bm.packetSender.UseItemFromBelt(potion); err != nil {
+		bm.logger.Warn("Potion packet failed", slog.String("potion", string(potionType)), slog.Any("error", err))
+		return false
+	}
+	bm.logger.Debug(fmt.Sprintf("Using %s potion via packet [Column: %d]. HP: %d MP: %d", potionType, pos.X+1, bm.data.PlayerUnit.HPPercent(), bm.data.PlayerUnit.MPPercent()))
+	event.Send(event.UsedPotion(event.Text(bm.supervisor, ""), potionType, false))
+	return true
+}
+
+func (bm BeltManager) beltItemAt(pos data.Position) (data.Item, bool) {
+	for _, itm := range bm.data.Inventory.Belt.Items {
+		if itm.Position == pos {
+			return itm, true
+		}
+	}
+	return data.Item{}, false
+}
+
+func (bm BeltManager) findMerc() (data.Monster, bool) {
+	if !bm.data.HasMerc {
+		return data.Monster{}, false
+	}
+	for _, monster := range bm.data.Monsters {
+		if monster.IsMerc() {
+			return monster, true
+		}
+	}
+	return data.Monster{}, false
+}
+
+func (bm BeltManager) otherBeltSlots(used data.Position) [3]amb.BeltSlotState {
+	states := [3]amb.BeltSlotState{
+		{ItemUnitID: 0xFFFFFFFF},
+		{ItemUnitID: 0xFFFFFFFF},
+		{ItemUnitID: 0xFFFFFFFF},
+	}
+
+	idx := 0
+	for x := 0; x < 4 && idx < len(states); x++ {
+		if x == used.X {
+			continue
+		}
+		pos := data.Position{X: x, Y: used.Y}
+		if itm, ok := bm.beltItemAt(pos); ok {
+			states[idx] = amb.BeltSlotState{
+				ItemUnitID:   uint32(itm.UnitID),
+				PosXCurrent:  byte(pos.X),
+				PosXPrevious: byte(pos.X),
+			}
+		}
+		idx++
+	}
+
+	return states
 }
 
 // ShouldBuyPotions will return true if more than 25% of belt is empty (ignoring rejuv)

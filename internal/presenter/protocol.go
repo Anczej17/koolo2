@@ -20,33 +20,43 @@ const (
 	SharedVersion = 1
 
 	// Command types written by the Go side, read by the Rust DLL.
-	CmdNop            = 0
-	CmdSendPacket     = 1
-	CmdSetCursor      = 2 // Phase 8C
-	CmdSetKey         = 3 // Phase 8C
-	CmdSniffInstall   = 4 // Install INT3 sniff hook on send_fn
-	CmdSniffUninstall = 5 // Restore original send_fn byte
-	CmdHwbpInstall    = 6 // Install hardware breakpoint via Dr0 on all threads
-	CmdHwbpUninstall  = 7 // Clear Dr0/Dr7 on all threads
-	CmdHwbpVerify     = 8 // Re-read DR0 from all threads, count still-armed
-	CmdSendUIPacket   = 9  // Send packet via UI NetMan vtable[5] (identify/buy/sell/cube/gamble)
-	CmdClick          = 10 // Phase 9: in-process click via D2R real_click_worker
-	CmdSendDual       = 11 // memcpy to mirror buffer + send_fn (vendor/trade dual-send path)
-	CmdForceClick     = 12 // click with ForceMove key held (for movement)
-	CmdCallFn         = 13 // call arbitrary D2R function with up to 4 args (RENDER thread — deadlocks game-logic fns)
-	CmdWriteMem       = 14 // write bytes to arbitrary D2R memory address
-	CmdCallFnGT       = 15 // call D2R function on GAME THREAD via APC (no deadlock)
-	CmdSendDualGT     = 16 // send packet via dual_send_wrap FROM GAME THREAD (GetTickCount64 hook)
-	CmdTraceInstall   = 17 // PacketTracer: install trampoline JMP on send_fn + dual_send_wrap
-	CmdTraceUninstall = 18 // PacketTracer: restore original bytes
-	CmdDrProbe        = 22 // Diagnostic: probe whether SetThreadContext persists DR0 on D2R threads
-	CmdHwbpReenum     = 23 // HWBP: re-arm DR0 on threads created since last install (idempotent)
-	CmdSnapshotInit   = 24 // P1-GID Phase A: enable per-Present PlayerUnit snapshot into SHM
-	CmdUninstallDetour = 25 // Graceful shutdown — restore Present prologue + remove VEHs
-	CmdRopScan        = 26 // GID-4: scan D2R .text for ROP gadgets (ret-ending sequences), populate G_ROP_GADGETS
-	CmdRopRead        = 27 // GID-5: copy D2R bytes via chained D2R gadgets (memcpy ROP). Currently gated (returns status=2 until trigger encoding verified).
-	CmdRopReadBatch   = 29 // batch N (src_va, len) tuples in one Present frame — amortises round-trip
-	CmdRopCall3       = 30 // GID-4: 3-arg ROP call into D2R fn (RCX/RDX/R8); dry-run unless arg3 bit63=1
+	CmdNop               = 0
+	CmdSendPacket        = 1
+	CmdSetCursor         = 2  // Phase 8C
+	CmdSetKey            = 3  // Phase 8C
+	CmdSniffInstall      = 4  // Install INT3 sniff hook on send_fn
+	CmdSniffUninstall    = 5  // Restore original send_fn byte
+	CmdHwbpInstall       = 6  // Install hardware breakpoint via Dr0 on all threads
+	CmdHwbpUninstall     = 7  // Clear Dr0/Dr7 on all threads
+	CmdHwbpVerify        = 8  // Re-read DR0 from all threads, count still-armed
+	CmdSendUIPacket      = 9  // Send packet via UI NetMan vtable[5] (identify/buy/sell/cube/gamble)
+	CmdClick             = 10 // Phase 9: in-process click via D2R real_click_worker
+	CmdSendDual          = 11 // memcpy to mirror buffer + send_fn (vendor/trade dual-send path)
+	CmdForceClick        = 12 // click with ForceMove key held (for movement)
+	CmdCallFn            = 13 // call arbitrary D2R function with up to 4 args (RENDER thread — deadlocks game-logic fns)
+	CmdWriteMem          = 14 // write bytes to arbitrary D2R memory address
+	CmdCallFnGT          = 15 // call D2R function on GAME THREAD via APC (no deadlock)
+	CmdSendDualGT        = 16 // send packet via dual_send_wrap FROM GAME THREAD (GetTickCount64 hook)
+	CmdTraceInstall      = 17 // PacketTracer: install trampoline JMP on send_fn + dual_send_wrap
+	CmdTraceUninstall    = 18 // PacketTracer: restore original bytes
+	CmdDrProbe           = 22 // Diagnostic: probe whether SetThreadContext persists DR0 on D2R threads
+	CmdHwbpReenum        = 23 // HWBP: re-arm DR0 on threads created since last install (idempotent)
+	CmdSnapshotInit      = 24 // P1-GID Phase A: enable per-Present PlayerUnit snapshot into SHM
+	CmdUninstallDetour   = 25 // Graceful shutdown — restore Present prologue + remove VEHs
+	CmdRopScan           = 26 // GID-4: scan D2R .text for ROP gadgets (ret-ending sequences), populate G_ROP_GADGETS
+	CmdRopRead           = 27 // GID-5: copy D2R bytes via chained D2R gadgets (memcpy ROP). Currently gated (returns status=2 until trigger encoding verified).
+	CmdPostKey           = 28 // post WM_KEYDOWN/WM_KEYUP from inside rmod using D2R HWND
+	CmdRopReadBatch      = 29 // batch N (src_va, len) tuples in one Present frame — amortises round-trip
+	CmdRopCall3          = 30 // GID-4: 3-arg ROP call into D2R fn (RCX/RDX/R8); dry-run unless arg3 bit63=1
+	CmdPostClick         = 31 // post WM_MOUSEMOVE/down/up from inside rmod using D2R HWND
+	CmdNativeClick       = 32 // call D2R real_click_worker from rmod game-tick hook
+	CmdArgTraceInstall   = 33 // install short-lived arg capture hook at target VA + offset
+	CmdArgTraceUninstall = 34 // restore arg capture hook
+	CmdPostMove          = 35 // post WM_NCHITTEST/WM_SETCURSOR/WM_MOUSEMOVE from inside rmod
+	CmdSetD2RCursor      = 36 // call D2R set_cursor_screen_xy(x,y), no OS/global cursor
+	CmdResolveD2RHover   = 37 // run D2R UI hover/XY resolver after setting MouseXY
+	CmdCapSuppressVendor = 38 // suppress captured native vendor 0x32/0x33 sends for dry-run price reads
+	CmdVendorPrice       = 39 // compute vendor price via D2R native item value helpers
 
 	// Status values written by the Rust DLL, polled by Go.
 	StatusBusy  = 0
@@ -56,59 +66,72 @@ const (
 	// Byte offsets into the shared buffer.
 	offMagic           = 0x00
 	offVersion         = 0x04
-	offReadyFlag       = 0x08  // DLL sets to 1 once hook is installed
-	offCommandFlag     = 0x0C  // Go sets to 1 to trigger command
-	offStatusFlag      = 0x10  // DLL writes StatusDone/StatusError
-	offCommandType     = 0x14  // CmdSendPacket / CmdSetCursor / ...
-	offPacketSize      = 0x18  // Length of payload at offPacketData
-	offErrorCode       = 0x1C  // Win32 error set by DLL on failure
-	offFnSendPacket    = 0x20  // 8-byte ptr: game's send_packet fn
-	offCursorX         = 0x28  // int32 — cursor X for Phase 8C
-	offCursorY         = 0x2C  // int32 — cursor Y for Phase 8C
-	offTargetKey       = 0x30  // uint8 — virtual key code
-	offKeyActive       = 0x31  // uint8 — 1 = pressed, 0 = released
-	offOriginalPresent = 0x34  // 8-byte ptr: saved original Present
-	offDebugStep       = 0x3C  // DLL writes init progress step (debug)
-	offGameThreadID    = 0x40  // u32: game thread ID for APC dispatch
-	offRemoteViewAddr  = 0x48  // u64: DLL's MapViewOfFile address in D2R space
-	offUINetManAddr    = 0x50  // u64: address of D2R UI NetMan global (CmdSendUIPacket)
-	offFnRealClick     = 0x58  // u64: address of D2R real_click_worker (Phase 9)
-	offHwndD2R         = 0x60  // u64: D2R window handle (Phase 9)
-	offMirrorBufAddr   = 0x68  // u64: D2R global mirror buffer VA (dual-send)
-	offForceMoveAddr   = 0x70  // u64: D2R keystate ForceMove VK entry VA
-	offDualSendWrap    = 0x78  // u64: dual_send_wrap VA (game thread packet send)
-	offSkipPresentHook = 0xA0  // u32: 1 = skip Present detour install (GTC64-only dispatch)
+	offReadyFlag       = 0x08 // DLL sets to 1 once hook is installed
+	offCommandFlag     = 0x0C // Go sets to 1 to trigger command
+	offStatusFlag      = 0x10 // DLL writes StatusDone/StatusError
+	offCommandType     = 0x14 // CmdSendPacket / CmdSetCursor / ...
+	offPacketSize      = 0x18 // Length of payload at offPacketData
+	offErrorCode       = 0x1C // Win32 error set by DLL on failure
+	offFnSendPacket    = 0x20 // 8-byte ptr: game's send_packet fn
+	offCursorX         = 0x28 // int32 — cursor X for Phase 8C
+	offCursorY         = 0x2C // int32 — cursor Y for Phase 8C
+	offTargetKey       = 0x30 // uint8 — virtual key code
+	offKeyActive       = 0x31 // uint8 — 1 = pressed, 0 = released
+	offOriginalPresent = 0x34 // 8-byte ptr: saved original Present
+	offDebugStep       = 0x3C // DLL writes init progress step (debug)
+	offGameThreadID    = 0x40 // u32: game thread ID for APC dispatch
+	offRemoteViewAddr  = 0x48 // u64: DLL's MapViewOfFile address in D2R space
+	offUINetManAddr    = 0x50 // u64: address of D2R UI NetMan global (CmdSendUIPacket)
+	offFnRealClick     = 0x58 // u64: address of D2R real_click_worker (Phase 9)
+	offHwndD2R         = 0x60 // u64: D2R window handle (Phase 9)
+	offMirrorBufAddr   = 0x68 // u64: D2R global mirror buffer VA (dual-send)
+	offForceMoveAddr   = 0x70 // u64: D2R keystate ForceMove VK entry VA
+	offDualSendWrap    = 0x78 // u64: dual_send_wrap VA (game thread packet send)
+	offSkipPresentHook = 0x94 // u32: 1 = skip Present detour install (GTC64-only dispatch)
+	offCapabilities    = 0x98 // u32: runtime feature bits written by rmod
 	// offSessionPrefix: 8 wide chars + null term (18 bytes) holding the
 	// per-session random SHM prefix. The DLL reads this on Init() so its own
 	// SHM creates (sniffer, tracer) match Go-side names. Lives in the
 	// fallback buffer the APC shellcode passes via RCX.
-	offSessionPrefix   = 0x80  // u16[9]: 8-char wide prefix + null terminator
-	offPacketData      = 0x100 // Start of variable-length payload
-	maxPacketPayload   = 0xC00 - offPacketData // 2816 bytes (capped to leave room for sniff log)
+	offSessionPrefix = 0x80 // u16[9]: 8-char wide prefix + null terminator
+	// 0xA0..0xB0 is reserved for crash-diag counters. Do not put init flags
+	// there; ReadCrashDiag reads that range directly.
+	// Present-detour instrumentation band (0xD0..0x100). Filled by rmod's
+	// record_present_latency on each Present frame. Raw rdtsc cycle deltas
+	// — Go converts to µs via host CPU frequency (~3 GHz typical, so
+	// 1 µs ≈ 3000 cycles). See tools/rmod/src/lib.rs for field semantics.
+	OffPresentLatLastCyc = 0xD0                  // u64 — cycles in most recent dispatch
+	OffPresentLatMinCyc  = 0xD8                  // u64 — running min since Init
+	OffPresentLatMaxCyc  = 0xE0                  // u64 — running max since Init
+	OffPresentLatSumCyc  = 0xE8                  // u64 — running sum (avg = sum/count)
+	OffPresentLatCount   = 0xF0                  // u64 — sample count
+	OffPresentLatPaths   = 0xF8                  // u32 — bitmask of paths taken in LAST sample
+	offPacketData        = 0x100                 // Start of variable-length payload
+	maxPacketPayload     = 0xC00 - offPacketData // 2816 bytes (capped to leave room for sniff log)
 
 	// Sniff hook ring buffer (must match Rust DLL constants)
-	OffSniffHead       = 0xC00 // u32
-	OffSniffTotal      = 0xC04 // u32
-	OffSniffBpFired    = 0xC08 // u32 — VEH BP exception count (any BP)
-	OffSniffSsFired    = 0xC0C // u32 — VEH SS our matching count
-	OffSniffBpOurs     = 0xC10 // u32 — BPs at our send_fn addr
-	OffSniffInstall    = 0xC14 // u32 — install_sniff_hook calls
-	OffSniffUninstall  = 0xC18 // u32 — uninstall calls
-	OffSniffLastRip    = 0xC1C // u32 — packed install diag OR low32(unmatched SS RIP)
-	OffSniffEntries    = 0xC20
-	SniffNumEntries    = 12
-	SniffEntrySize     = 80
-	SniffDataMax       = 76
+	OffSniffHead      = 0xC00 // u32
+	OffSniffTotal     = 0xC04 // u32
+	OffSniffBpFired   = 0xC08 // u32 — VEH BP exception count (any BP)
+	OffSniffSsFired   = 0xC0C // u32 — VEH SS our matching count
+	OffSniffBpOurs    = 0xC10 // u32 — BPs at our send_fn addr
+	OffSniffInstall   = 0xC14 // u32 — install_sniff_hook calls
+	OffSniffUninstall = 0xC18 // u32 — uninstall calls
+	OffSniffLastRip   = 0xC1C // u32 — packed install diag OR low32(unmatched SS RIP)
+	OffSniffEntries   = 0xC20
+	SniffNumEntries   = 12
+	SniffEntrySize    = 80
+	SniffDataMax      = 76
 
 	// Periodic re-arm worker stats (lib.rs OFF_HWBP_*).
 	// These are SEPARATE from the install diag block — the worker writes here
 	// instead of calling write_hwbp_diag, so the diagnostic counters are never
 	// clobbered by the periodic re-arming activity.
-	OffHwbpTickCount    = 0xFE0 // u32 — total ticks executed by worker
-	OffHwbpNewArmed     = 0xFE4 // u32 — total threads newly armed across all ticks
-	OffHwbpLastNewTid   = 0xFE8 // u32 — most recent newly-armed TID
-	OffHwbpLastTickNew  = 0xFEC // u32 — newly-armed count from MOST RECENT tick
-	OffHwbpWorkerAlive  = 0xFF0 // u32 — worker heartbeat counter
+	OffHwbpTickCount   = 0xFE0 // u32 — total ticks executed by worker
+	OffHwbpNewArmed    = 0xFE4 // u32 — total threads newly armed across all ticks
+	OffHwbpLastNewTid  = 0xFE8 // u32 — most recent newly-armed TID
+	OffHwbpLastTickNew = 0xFEC // u32 — newly-armed count from MOST RECENT tick
+	OffHwbpWorkerAlive = 0xFF0 // u32 — worker heartbeat counter
 
 	// ---------------------------------------------------------------
 	// Crash diagnostic VEH (0x1000 .. 0x12FF). Filled in-process by rmod.dll
@@ -125,12 +148,12 @@ const (
 	OffCrashFaultVA   = 0x1020 // u64 — virtual address that faulted (AV only)
 	OffCrashRSP       = 0x1028 // u64 — stack pointer at exception
 	// Layout from 0x1030 — each block is tightly packed, no overlaps.
-	OffCrashFrames    = 0x1030 // u64 * 16 = 128 bytes (0x1030-0x10AF)
-	CrashFrameCount   = 16
+	OffCrashFrames  = 0x1030 // u64 * 16 = 128 bytes (0x1030-0x10AF)
+	CrashFrameCount = 16
 
 	// Full integer register file captured from CONTEXT. Order matches winnt.h.
-	OffCrashRegs      = 0x10B0 // 16 u64 = 128 bytes (0x10B0-0x112F)
-	CrashRegCount     = 16     // RAX RCX RDX RBX RSP RBP RSI RDI R8..R15
+	OffCrashRegs  = 0x10B0 // 16 u64 = 128 bytes (0x10B0-0x112F)
+	CrashRegCount = 16     // RAX RCX RDX RBX RSP RBP RSI RDI R8..R15
 
 	// In-process memory snapshots captured by the VEH for offline disassembly
 	// (Arxan encrypts call-site code until execution; the handler fires AFTER
@@ -152,18 +175,18 @@ const (
 	// or whether Arxan reverts it. If reverted, HWBP-based packet tracing is
 	// dead-on-arrival.
 	// ---------------------------------------------------------------
-	OffDrProbeValid    = 0x1600 // u32 — 0=not run, 1=running, 2=done, 0xEEnn=err
-	OffDrProbeTotal    = 0x1604 // u32 — total D2R threads enumerated
-	OffDrProbeOk       = 0x1608 // u32 — count where DR0 readback == test value (PERSISTED)
-	OffDrProbeRevert   = 0x160C // u32 — count where DR0 was reverted (Arxan stripped)
-	OffDrProbeErr      = 0x1610 // u32 — count of probe errors (open/suspend/get/set fails)
-	OffDrProbeNum      = 0x1614 // u32 — entries actually written to ring
-	OffDrProbeEntries  = 0x1620 // start of entries — 32 B each, max 60 entries
-	DrProbeEntrySize   = 32
-	DrProbeMaxEntries  = 60
+	OffDrProbeValid   = 0x1600 // u32 — 0=not run, 1=running, 2=done, 0xEEnn=err
+	OffDrProbeTotal   = 0x1604 // u32 — total D2R threads enumerated
+	OffDrProbeOk      = 0x1608 // u32 — count where DR0 readback == test value (PERSISTED)
+	OffDrProbeRevert  = 0x160C // u32 — count where DR0 was reverted (Arxan stripped)
+	OffDrProbeErr     = 0x1610 // u32 — count of probe errors (open/suspend/get/set fails)
+	OffDrProbeNum     = 0x1614 // u32 — entries actually written to ring
+	OffDrProbeEntries = 0x1620 // start of entries — 32 B each, max 60 entries
+	DrProbeEntrySize  = 32
+	DrProbeMaxEntries = 60
 
 	// Test pattern that rmod writes to DR0 (must match rmod DRPROBE_TEST_DR0).
-	DrProbeTestDR0     = 0x00007FFFBABEBEEF
+	DrProbeTestDR0 = 0x00007FFFBABEBEEF
 
 	// ---------------------------------------------------------------
 	// HWBP packet tracer (must match rmod lib.rs OFF_HWBP_*).
@@ -196,9 +219,15 @@ const (
 	OffHwbpWorkerFail   = 0x2070 // u32 — threads failed
 	OffGtc64HookCount   = 0x2080 // u32 — times IAT hook trampoline fired
 	OffGtc64InstallDiag = 0x2084 // u32 — progress/error codes during install
-	OffHwbpRing         = 0x2100 // ring start
-	HwbpEntrySize       = 256
-	HwbpRingEntries     = 30
+	// 0x2088..0x20C8 is reserved for rmod dump_first_iat_entries().
+	OffTimerQueueTicks      = 0x20D0 // u32 — TimerQueue callbacks observed
+	OffTimerCommandRuns     = 0x20D4 // u32 — commands dispatched by TimerQueue
+	OffTimerCommandDiag     = 0x20D8 // u32 — TimerQueue command progress marker
+	OffTimerLastStatus      = 0x20DC // u32 — status flag after last TimerQueue command
+	OffTimerLastCommandFlag = 0x20E0 // u32 — command flag after last TimerQueue command
+	OffHwbpRing             = 0x2100 // ring start
+	HwbpEntrySize           = 256
+	HwbpRingEntries         = 30
 
 	// HWBP entry layout
 	HwbpEntryOffTs        = 0x00 // u64 ts (currently fires counter, monotonic)
@@ -222,24 +251,24 @@ const (
 	// In-process sniffer (second SHM: "DispCache_{pid}_c", 64KB)
 	// Only present in rmod_sniffer.dll (--features sniffer).
 	// ---------------------------------------------------------------
-	CapShmSize       = 65536
-	CapMagic         = 0xCAFE0050
-	CapOffMagic      = 0x00
-	CapOffEnabled    = 0x04
-	CapOffHead       = 0x08
-	CapOffTail       = 0x0C
-	CapOffTotal      = 0x10
-	CapOffDropped    = 0x14
-	CapOffFrame      = 0x18
-	CapOffBuf0RVA    = 0x20
-	CapOffBuf1RVA    = 0x24
-	CapOffBufWindow  = 0x28
-	CapOffRing       = 0x400
-	CapEntrySize     = 272
-	CapEntryDataOff  = 16
-	CapEntryDataMax  = 256
-	CapRingBytes     = CapShmSize - CapOffRing
-	CapMaxEntries    = CapRingBytes / CapEntrySize
+	CapShmSize      = 65536
+	CapMagic        = 0xCAFE0050
+	CapOffMagic     = 0x00
+	CapOffEnabled   = 0x04
+	CapOffHead      = 0x08
+	CapOffTail      = 0x0C
+	CapOffTotal     = 0x10
+	CapOffDropped   = 0x14
+	CapOffFrame     = 0x18
+	CapOffBuf0RVA   = 0x20
+	CapOffBuf1RVA   = 0x24
+	CapOffBufWindow = 0x28
+	CapOffRing      = 0x400
+	CapEntrySize    = 272
+	CapEntryDataOff = 16
+	CapEntryDataMax = 256
+	CapRingBytes    = CapShmSize - CapOffRing
+	CapMaxEntries   = CapRingBytes / CapEntrySize
 
 	// ---------------------------------------------------------------
 	// PacketTracer SHM (third SHM: "DispCache_{pid}_t", 256 KB)
@@ -250,8 +279,8 @@ const (
 	// stash move) so we can CALL_FN_GT them on the game thread.
 	// Only present in rmod_sniffer.dll (--features sniffer).
 	// ---------------------------------------------------------------
-	TraceShmSize          = 262144 // 256 KB
-	TraceMagic            = 0xDC4A0010
+	TraceShmSize = 262144 // 256 KB
+	TraceMagic   = 0xDC4A0010
 
 	// Header (256 bytes reserved before ring start at 0x100).
 	TraceOffMagic           = 0x00 // u32
@@ -271,7 +300,7 @@ const (
 	TraceOffD2RTextEnd      = 0x68 // u64 — D2R .text end (frame filter)
 	TraceOffGameThreadID    = 0x70 // u32 — known game TID (filter optionally)
 
-	TraceOffRing            = 0x100
+	TraceOffRing = 0x100
 
 	// Ring entry layout (512 bytes per entry).
 	TraceEntrySize          = 512
@@ -326,18 +355,18 @@ const (
 	SnapStaticEntrySz  = 16 // va:u64 | len:u32 | pad:u32
 
 	// GID-4/5 ROP command offsets (0x3000 free band between HWBP and snapshot header).
-	OffRopScanBase    = 0x3000 // u64 — scan region base VA
-	OffRopScanLen     = 0x3008 // u64 — scan region length
-	OffRopScanCount   = 0x3010 // u32 — out: gadgets harvested
-	OffRopReadSrc     = 0x3018 // u64 — D2R VA to read from
-	OffRopReadDst     = 0x3020 // u64 — SHM scratch VA to write into
-	OffRopReadLen     = 0x3028 // u64 — bytes to copy
-	OffRopReadStatus  = 0x3030 // u32 — out: 0=ok, 1=pool-miss, 2=exec-fail
-	OffRopReady       = 0x3034 // u32 — 1 when ROP executor ready post-scan
-	OffRopDbg         = 0x3038 // u32 — step marker (0xAAAA00xx); read on timeout to locate hang
-	OffRopKindCounts  = 0x303C // u32[8] — [Unknown,PopReg,MovRegMem,MovMemReg,RepMovsb,RepMovsq,XchgReg,Ret]
-	OffRopPopRegMask  = 0x305C // u32 — bitmask of popable regs in pool (bit0=rax..bit15=r15)
-	OffRopWorkerHB    = 0x3060 // u32 — ROP worker thread heartbeat counter (Plan B diagnostic)
+	OffRopScanBase   = 0x3000 // u64 — scan region base VA
+	OffRopScanLen    = 0x3008 // u64 — scan region length
+	OffRopScanCount  = 0x3010 // u32 — out: gadgets harvested
+	OffRopReadSrc    = 0x3018 // u64 — D2R VA to read from
+	OffRopReadDst    = 0x3020 // u64 — SHM scratch VA to write into
+	OffRopReadLen    = 0x3028 // u64 — bytes to copy
+	OffRopReadStatus = 0x3030 // u32 — out: 0=ok, 1=pool-miss, 2=exec-fail
+	OffRopReady      = 0x3034 // u32 — 1 when ROP executor ready post-scan
+	OffRopDbg        = 0x3038 // u32 — step marker (0xAAAA00xx); read on timeout to locate hang
+	OffRopKindCounts = 0x303C // u32[8] — [Unknown,PopReg,MovRegMem,MovMemReg,RepMovsb,RepMovsq,XchgReg,Ret]
+	OffRopPopRegMask = 0x305C // u32 — bitmask of popable regs in pool (bit0=rax..bit15=r15)
+	OffRopWorkerHB   = 0x3060 // u32 — ROP worker thread heartbeat counter (Plan B diagnostic)
 	// GID-6 scratch buffer mirrored in SHM. rmod's CMD_ROP_READ_SCRATCH
 	// writes here; Go-side reads from its own SHM view at the same offset.
 	// CMD_ROP_READ_BATCH reuses the same buffer; entries' bytes are packed
@@ -355,16 +384,16 @@ const (
 	// arms the trigger; otherwise dry-run (chain built + gadgets verified,
 	// trigger not invoked). Status codes: 0=ok, 1=pool-miss, 2=gadget-miss,
 	// 3=exec-fail, 4=not-ready.
-	OffRopCall3Fn     = 0x3900 // u64 — target fn VA
-	OffRopCall3A1     = 0x3908 // u64 — arg1 → RCX
-	OffRopCall3A2     = 0x3910 // u64 — arg2 → RDX
-	OffRopCall3A3     = 0x3918 // u64 — arg3 → R8 (bit63 = arm trigger)
-	OffRopCall3Status = 0x3920 // u32 — 0=ok ... 4=not-ready
-	OffRopCall3Dbg    = 0x3924 // u32 — step marker (0xCA110001..)
-	OffRopBatchEntries  = 0x3080 // BatchEntry[128], 16 B each: src_va u64, len u32, _pad u32
-	OffRopBatchStatus   = 0x3880 // u8[128]
-	RopBatchMax         = 128
-	RopBatchEntrySize   = 16
+	OffRopCall3Fn      = 0x3900 // u64 — target fn VA
+	OffRopCall3A1      = 0x3908 // u64 — arg1 → RCX
+	OffRopCall3A2      = 0x3910 // u64 — arg2 → RDX
+	OffRopCall3A3      = 0x3918 // u64 — arg3 → R8 (bit63 = arm trigger)
+	OffRopCall3Status  = 0x3920 // u32 — 0=ok ... 4=not-ready
+	OffRopCall3Dbg     = 0x3924 // u32 — step marker (0xCA110001..)
+	OffRopBatchEntries = 0x3080 // BatchEntry[128], 16 B each: src_va u64, len u32, _pad u32
+	OffRopBatchStatus  = 0x3880 // u8[128]
+	RopBatchMax        = 128
+	RopBatchEntrySize  = 16
 
 	// Multi-slot batch pool — 8 slots at 0x8200, each 8 KB. Lets
 	// goroutines pipeline batch requests through independent slots, so
@@ -376,9 +405,9 @@ const (
 	//   0x10 entries[128] × 16
 	//   0x810 status[128]
 	//   0x1000 output[4096]
-	OffRopBatchSlots      = 0x8200
-	RopBatchSlotSize      = 0x2000
-	RopBatchSlotCount     = 8
+	OffRopBatchSlots        = 0x8200
+	RopBatchSlotSize        = 0x2000
+	RopBatchSlotCount       = 8
 	RopBatchSlotOffFlag     = 0x0000
 	RopBatchSlotOffCount    = 0x0004
 	RopBatchSlotOffTotalLen = 0x0008
@@ -387,17 +416,32 @@ const (
 	RopBatchSlotOffOutput   = 0x1000
 	RopBatchSlotOutputSize  = 0x1000
 
-	OffSnapRegions     = 0x4200 // RegionEntry[1024] × 16 B  (B3: grown 256→1024 for monster/object/entrance walker budget)
-	SnapRegionMax      = 1024
-	SnapRegionEntrySz  = 16 // va u64 | len u32 | offset u32
+	OffSnapRegions    = 0x4200 // RegionEntry[1024] × 16 B  (B3: grown 256→1024 for monster/object/entrance walker budget)
+	SnapRegionMax     = 1024
+	SnapRegionEntrySz = 16 // va u64 | len u32 | offset u32
 
-	OffSnapData        = 0x8200 // data blob base (0x4200 + 0x4000 region table)
-	SnapDataSize       = 131072 - 0x8200
+	OffSnapData  = 0x8200 // data blob base (0x4200 + 0x4000 region table)
+	SnapDataSize = 131072 - 0x8200
 
-	SnapMagic          = 0x50414E53 // 'SNAP'
-	SnapVersion        = 1
+	SnapMagic   = 0x50414E53 // 'SNAP'
+	SnapVersion = 1
 
-	SnapFlagEnabled          = 1 << 0
-	SnapFlagMainPlayerFound  = 1 << 1
-	SnapFlagError            = 1 << 2
+	SnapFlagEnabled         = 1 << 0
+	SnapFlagMainPlayerFound = 1 << 1
+	SnapFlagError           = 1 << 2
+
+	// Bits of OffPresentLatPaths — which sub-phases ran during the LAST
+	// measured frame. Bits 8..15 carry OffCommandType when PathCmdDispatched
+	// is set, so the operator can correlate cost to command kind.
+	PathSnapshotEnabled = 1 << 0
+	PathSnifferRan      = 1 << 1
+	PathWalkerFullScan  = 1 << 2
+	PathBatchHadWork    = 1 << 3
+	PathCmdDispatched   = 1 << 4
+
+	CapPostMoveNoSetCursorPos  = 1 << 0
+	CapPostClickNoSetCursorPos = 1 << 1
+	CapSetD2RCursor            = 1 << 2
+	CapVendorSendSuppress      = 1 << 3
+	CapVendorNativePrice       = 1 << 4
 )

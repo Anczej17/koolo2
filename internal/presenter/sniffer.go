@@ -20,12 +20,12 @@ type Sniffer struct {
 
 // CaptureEntry is a single captured packet from the ring buffer.
 type CaptureEntry struct {
-	FrameNo  uint32
-	TickMs   uint32
-	BufID    byte   // 0=buf0 (UI NetMan), 1=buf1 (mirror)
-	Opcode   byte
-	DataLen  uint16
-	Data     []byte // up to 256 bytes
+	FrameNo uint32
+	TickMs  uint32
+	BufID   byte // 0=buf0 (UI NetMan), 1=buf1 (mirror)
+	Opcode  byte
+	DataLen uint16
+	Data    []byte // up to 256 bytes
 }
 
 // sniffSectionName returns the named mapping for the sniffer SHM.
@@ -248,6 +248,11 @@ func FormatEntry(e CaptureEntry) string {
 		hexStr = hex.EncodeToString(e.Data[:showLen])
 	}
 
+	note := annotateCapturePayload(e.Data)
+	if note != "" {
+		return fmt.Sprintf("[%s] tick=%d frame=%d op=0x%02X len=%d %s hex=%s",
+			bufName, e.TickMs, e.FrameNo, e.Opcode, e.DataLen, note, hexStr)
+	}
 	return fmt.Sprintf("[%s] tick=%d frame=%d op=0x%02X len=%d hex=%s",
 		bufName, e.TickMs, e.FrameNo, e.Opcode, e.DataLen, hexStr)
 }
@@ -307,4 +312,47 @@ func FormatEntryFull(e CaptureEntry) string {
 	}
 
 	return b.String()
+}
+
+func annotateCapturePayload(p []byte) string {
+	if len(p) == 0 {
+		return ""
+	}
+	switch p[0] {
+	case 0x2F:
+		if len(p) >= 5 {
+			return fmt.Sprintf("NPCInit npc=0x%X", binary.LittleEndian.Uint32(p[1:5]))
+		}
+	case 0x30:
+		if len(p) >= 5 {
+			return fmt.Sprintf("NPCCancel npc=0x%X", binary.LittleEndian.Uint32(p[1:5]))
+		}
+	case 0x38:
+		if len(p) >= 9 {
+			return fmt.Sprintf("NPCAction9 action=%d npc=0x%X",
+				binary.LittleEndian.Uint32(p[1:5]), binary.LittleEndian.Uint32(p[5:9]))
+		}
+		if len(p) >= 6 {
+			return fmt.Sprintf("NPCAction6 action=%d term=0x%02X",
+				binary.LittleEndian.Uint32(p[1:5]), p[5])
+		}
+	case 0x40:
+		if len(p) >= 13 {
+			return fmt.Sprintf("UnitInteract type=%d gid=0x%X",
+				binary.LittleEndian.Uint32(p[1:5]), binary.LittleEndian.Uint32(p[5:9]))
+		}
+		if len(p) >= 5 {
+			return fmt.Sprintf("UnitInteract gid=0x%X", binary.LittleEndian.Uint32(p[1:5]))
+		}
+	case 0x41:
+		if len(p) >= 13 {
+			return fmt.Sprintf("InteractEx gid=0x%X action=%d",
+				binary.LittleEndian.Uint32(p[1:5]), binary.LittleEndian.Uint32(p[5:9]))
+		}
+	case 0x4D:
+		if len(p) >= 5 {
+			return fmt.Sprintf("PreInteract unit=0x%X", binary.LittleEndian.Uint32(p[1:5]))
+		}
+	}
+	return ""
 }

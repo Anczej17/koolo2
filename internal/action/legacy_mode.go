@@ -54,6 +54,10 @@ func enableLegacyMode(ctx *context.Status, closeMiniPanel bool) bool {
 		ctx.Logger.Warn("Legacy toggle key binding not configured, skipping legacy mode switch")
 		return false
 	}
+	if ctx.HID != nil && ctx.HID.IsDisabled() {
+		ctx.Logger.Debug("Legacy mode switch skipped because HID is disabled for full-packet run")
+		return false
+	}
 
 	ctx.Logger.Debug("Switching to legacy mode...")
 	ctx.HID.PressKey(ctx.Data.KeyBindings.LegacyToggle.Key1[0])

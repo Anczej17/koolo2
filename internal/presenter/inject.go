@@ -4,6 +4,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"os"
+	"strings"
 	"time"
 	"unsafe"
 
@@ -23,16 +24,29 @@ const (
 // into the release binary as identifiable strings ("LM pid=", "VirtualAllocEx",
 // "queueAPC") that Warden could signature-match. Errors still propagate via
 // the return chain. Set LM_TRACE=1 env var to re-enable inline tracing.
-func loadModule(pid uint32, modulePath string, remoteBuf uintptr) error {
+func loadModule(pid uint32, modulePath string, remoteBuf uintptr) (uintptr, error) {
+	traceActive := os.Getenv("LM_TRACE") == "1" || os.Getenv("PRESENTER_ATTACH_TRACE") == "1"
+	traceStart := time.Now()
+	trace := func(format string, args ...interface{}) {
+		if !traceActive {
+			return
+		}
+		fmt.Fprintf(os.Stderr, "[LM] t+%dms pid=%d "+format+"\n",
+			append([]interface{}{time.Since(traceStart).Milliseconds(), pid}, args...)...)
+	}
+
+	trace("begin module=%s remoteBuf=%#x", modulePath, remoteBuf)
 	pe, err := os.ReadFile(modulePath)
 	if err != nil {
-		return fmt.Errorf("read dll: %w", err)
+		return 0, fmt.Errorf("read dll: %w", err)
 	}
+	trace("read dll bytes=%d", len(pe))
 
 	img, err := parsePE(pe)
 	if err != nil {
-		return fmt.Errorf("parse pe: %w", err)
+		return 0, fmt.Errorf("parse pe: %w", err)
 	}
+	trace("parsed PE imageBase=%#x size=%#x entry=%#x importRVA=%#x relocRVA=%#x", img.imageBase, img.sizeOfImage, img.entryPointRVA, img.importRVA, img.relocRVA)
 
 	const processAccess = windows.PROCESS_CREATE_THREAD |
 		windows.PROCESS_VM_OPERATION |
@@ -42,15 +56,28 @@ func loadModule(pid uint32, modulePath string, remoteBuf uintptr) error {
 
 	hProc, err := ntapi.OpenProcess(processAccess, pid)
 	if err != nil {
-		return fmt.Errorf("open target: %w", err)
+		return 0, fmt.Errorf("open target: %w", err)
 	}
 	defer ntapi.CloseHandle(hProc)
+	trace("OpenProcess OK")
 
-	// Allocate RWX in target for the DLL image.
-	remoteBase, err := virtualAllocEx(hProc, 0, uintptr(img.sizeOfImage),
+	// Prefer the image's preferred base so we avoid relocations when possible.
+	remoteBase, err := virtualAllocEx(hProc, uintptr(img.imageBase), uintptr(img.sizeOfImage),
 		windows.MEM_COMMIT|windows.MEM_RESERVE, windows.PAGE_EXECUTE_READWRITE)
-	if err != nil {
-		return fmt.Errorf("alloc image: %w", err)
+	if err != nil || remoteBase == 0 {
+		trace("preferred VirtualAllocEx failed base=%#x err=%v; retrying anywhere", img.imageBase, err)
+		remoteBase, err = virtualAllocEx(hProc, 0, uintptr(img.sizeOfImage),
+			windows.MEM_COMMIT|windows.MEM_RESERVE, windows.PAGE_EXECUTE_READWRITE)
+		if err != nil {
+			return 0, fmt.Errorf("alloc image: %w", err)
+		}
+	}
+	trace("remote image allocated base=%#x size=%#x", remoteBase, img.sizeOfImage)
+	cleanupRemote := func() {
+		if remoteBase != 0 {
+			_ = virtualFreeEx(hProc, remoteBase, 0, windows.MEM_RELEASE)
+			remoteBase = 0
+		}
 	}
 
 	// Build mapped image locally.
@@ -66,22 +93,42 @@ func loadModule(pid uint32, modulePath string, remoteBuf uintptr) error {
 		}
 		copy(mapped[s.virtualAddr:], pe[s.rawOffset:s.rawOffset+cpLen])
 	}
+	trace("local image mapped sections=%d", len(img.sections))
 
-	// Resolve imports (kernel32/user32 — same base in all processes).
-	if err := resolveImports(mapped, img.importRVA); err != nil {
-		return fmt.Errorf("imports: %w", err)
+	if err := applyRelocations(mapped, img, remoteBase); err != nil {
+		cleanupRemote()
+		return 0, fmt.Errorf("relocations: %w", err)
 	}
+	trace("relocations applied")
+
+	remoteModules, err := snapshotProcessModules(pid)
+	if err != nil {
+		cleanupRemote()
+		return 0, fmt.Errorf("snapshot remote modules: %w", err)
+	}
+	trace("remote modules snapshotted count=%d", len(remoteModules))
+
+	// Resolve imports against the target process's loaded modules.
+	if err := resolveImports(pid, hProc, mapped, img.importRVA, remoteModules); err != nil {
+		cleanupRemote()
+		return 0, fmt.Errorf("imports: %w", err)
+	}
+	trace("imports resolved")
 
 	// Find Init export.
 	initRVA, err := findExportRVA(mapped, "Init")
 	if err != nil {
-		return fmt.Errorf("find Init: %w", err)
+		cleanupRemote()
+		return 0, fmt.Errorf("find Init: %w", err)
 	}
+	trace("Init export found rva=%#x", initRVA)
 
 	// Write image to target.
 	if err := windows.WriteProcessMemory(hProc, remoteBase, &mapped[0], uintptr(len(mapped)), nil); err != nil {
-		return fmt.Errorf("write image: %w", err)
+		cleanupRemote()
+		return 0, fmt.Errorf("write image: %w", err)
 	}
+	trace("image written to remote base=%#x bytes=%d", remoteBase, len(mapped))
 
 	// Build APC shellcode: calls Init(remoteBuf) then returns.
 	// TEMPORARILY reverted to static stub (pre-R3) to diagnose D2R AV on
@@ -91,7 +138,7 @@ func loadModule(pid uint32, modulePath string, remoteBuf uintptr) error {
 	sc = append(sc, 0x48, 0x83, 0xEC, 0x28) // sub rsp, 0x28
 	sc = append(sc, 0x48, 0xB9)             // mov rcx, imm64
 	sc = appendU64(sc, uint64(remoteBuf))
-	sc = append(sc, 0x48, 0xB8)             // mov rax, imm64
+	sc = append(sc, 0x48, 0xB8) // mov rax, imm64
 	sc = appendU64(sc, uint64(initAddr))
 	sc = append(sc, 0xFF, 0xD0)             // call rax
 	sc = append(sc, 0x48, 0x83, 0xC4, 0x28) // add rsp, 0x28
@@ -100,22 +147,28 @@ func loadModule(pid uint32, modulePath string, remoteBuf uintptr) error {
 
 	scAddr := remoteBase + uintptr(img.sizeOfImage) - 256
 	if err := windows.WriteProcessMemory(hProc, scAddr, &sc[0], uintptr(len(sc)), nil); err != nil {
-		return fmt.Errorf("write shellcode: %w", err)
+		cleanupRemote()
+		return 0, fmt.Errorf("write shellcode: %w", err)
 	}
+	trace("shellcode written addr=%#x size=%d initAddr=%#x", scAddr, len(sc), initAddr)
 
 	// Queue APC on a D2R thread (bypasses CreateRemoteThread hooks).
 	if err := queueAPC(pid, hProc, scAddr); err != nil {
-		return fmt.Errorf("apc: %w", err)
+		cleanupRemote()
+		return 0, fmt.Errorf("apc: %w", err)
 	}
+	trace("APC queued addr=%#x", scAddr)
 
 	// Wait for APC to execute.
 	time.Sleep(2 * time.Second)
+	trace("post-APC settle wait complete")
 
 	// Erase PE header.
 	zeros := make([]byte, 0x200)
 	_ = windows.WriteProcessMemory(hProc, remoteBase, &zeros[0], uintptr(len(zeros)), nil)
+	trace("PE header erased base=%#x", remoteBase)
 
-	return nil
+	return remoteBase, nil
 }
 
 // buildPolymorphicAPCShellcode emits the APC init stub with per-session
@@ -154,14 +207,14 @@ func buildPolymorphicAPCShellcode(remoteBuf, initAddr uintptr) []byte {
 	// 2. Load initAddr first into a scratch register (rax, r10, or r11),
 	//    then reload into our final call target. Two hops = more variants
 	//    than direct-MOV.
-	scratch := []byte{0x48, 0xB8}                  // mov rax, imm64 (default)
-	reloadFromScratch := []byte{0xFF, 0xD0}        // call rax
+	scratch := []byte{0x48, 0xB8}           // mov rax, imm64 (default)
+	reloadFromScratch := []byte{0xFF, 0xD0} // call rax
 	switch ntapi.CryptRandN(3) {
 	case 1:
-		scratch = []byte{0x49, 0xBA}                // mov r10, imm64
+		scratch = []byte{0x49, 0xBA}                 // mov r10, imm64
 		reloadFromScratch = []byte{0x41, 0xFF, 0xD2} // call r10
 	case 2:
-		scratch = []byte{0x49, 0xBB}                // mov r11, imm64
+		scratch = []byte{0x49, 0xBB}                 // mov r11, imm64
 		reloadFromScratch = []byte{0x41, 0xFF, 0xD3} // call r11
 	}
 	sc = append(sc, scratch...)
@@ -261,6 +314,8 @@ type peImage struct {
 	entryPointRVA uint32
 	sections      []peSection
 	importRVA     uint32
+	relocRVA      uint32
+	relocSize     uint32
 }
 
 func parsePE(data []byte) (*peImage, error) {
@@ -287,6 +342,8 @@ func parsePE(data []byte) (*peImage, error) {
 		sizeOfImage:   binary.LittleEndian.Uint32(data[optBase+56:]),
 		sizeOfHeaders: binary.LittleEndian.Uint32(data[optBase+60:]),
 		importRVA:     binary.LittleEndian.Uint32(data[optBase+112+8:]),
+		relocRVA:      binary.LittleEndian.Uint32(data[optBase+112+5*8:]),
+		relocSize:     binary.LittleEndian.Uint32(data[optBase+112+5*8+4:]),
 	}
 
 	secBase := int(coff) + 20 + int(optSize)
@@ -305,13 +362,212 @@ func parsePE(data []byte) (*peImage, error) {
 	return img, nil
 }
 
+func applyRelocations(mapped []byte, img *peImage, remoteBase uintptr) error {
+	if img == nil {
+		return fmt.Errorf("nil image")
+	}
+	if uint64(remoteBase) == img.imageBase {
+		return nil
+	}
+	if img.relocRVA == 0 || img.relocSize == 0 {
+		// rmod is a no_std x64 Rust DLL and currently emits no .reloc table.
+		// The code is RIP-relative; failing here prevents re-attaching to a
+		// live D2R after a prior app.exe session occupied the preferred base.
+		// Let the image run and rely on Init's ready flag/error code to catch
+		// a real loader failure.
+		return nil
+	}
+
+	delta := int64(remoteBase) - int64(img.imageBase)
+	relocEnd := img.relocRVA + img.relocSize
+	for blockOff := img.relocRVA; blockOff < relocEnd; {
+		if int(blockOff)+8 > len(mapped) {
+			return fmt.Errorf("reloc block header out of range")
+		}
+		pageRVA := binary.LittleEndian.Uint32(mapped[blockOff:])
+		blockSize := binary.LittleEndian.Uint32(mapped[blockOff+4:])
+		if blockSize < 8 {
+			return fmt.Errorf("invalid reloc block size %d", blockSize)
+		}
+		if blockOff+blockSize > uint32(len(mapped)) {
+			return fmt.Errorf("reloc block out of range")
+		}
+		entryCount := (blockSize - 8) / 2
+		entryBase := blockOff + 8
+		for i := uint32(0); i < entryCount; i++ {
+			entry := binary.LittleEndian.Uint16(mapped[entryBase+i*2:])
+			typ := entry >> 12
+			offset := entry & 0x0FFF
+			targetRVA := pageRVA + uint32(offset)
+			switch typ {
+			case 0:
+				continue
+			case 10: // IMAGE_REL_BASED_DIR64
+				if int(targetRVA)+8 > len(mapped) {
+					return fmt.Errorf("dir64 reloc target out of range")
+				}
+				value := binary.LittleEndian.Uint64(mapped[targetRVA:])
+				binary.LittleEndian.PutUint64(mapped[targetRVA:], uint64(int64(value)+delta))
+			case 3: // IMAGE_REL_BASED_HIGHLOW
+				if int(targetRVA)+4 > len(mapped) {
+					return fmt.Errorf("highlow reloc target out of range")
+				}
+				value := binary.LittleEndian.Uint32(mapped[targetRVA:])
+				binary.LittleEndian.PutUint32(mapped[targetRVA:], uint32(int64(value)+delta))
+			default:
+				return fmt.Errorf("unsupported relocation type %d", typ)
+			}
+		}
+		blockOff += blockSize
+	}
+	return nil
+}
+
 // ---------------------------------------------------------------------------
 // Import resolution
 // ---------------------------------------------------------------------------
 
-func resolveImports(mapped []byte, importRVA uint32) error {
+type processModule struct {
+	name string
+	base uintptr
+	size uint32
+}
+
+func snapshotProcessModules(pid uint32) ([]processModule, error) {
+	snap, err := windows.CreateToolhelp32Snapshot(windows.TH32CS_SNAPMODULE|windows.TH32CS_SNAPMODULE32, pid)
+	if err != nil {
+		return nil, err
+	}
+	defer windows.CloseHandle(snap)
+
+	var me windows.ModuleEntry32
+	me.Size = uint32(unsafe.Sizeof(me))
+	if err := windows.Module32First(snap, &me); err != nil {
+		return nil, err
+	}
+
+	var modules []processModule
+	for {
+		modules = append(modules, processModule{
+			name: strings.ToLower(windows.UTF16ToString(me.Module[:])),
+			base: uintptr(me.ModBaseAddr),
+			size: me.ModBaseSize,
+		})
+		if err := windows.Module32Next(snap, &me); err != nil {
+			break
+		}
+	}
+	return modules, nil
+}
+
+func findModuleByName(modules []processModule, name string) (processModule, bool) {
+	target := strings.ToLower(name)
+	for _, mod := range modules {
+		if mod.name == target {
+			return mod, true
+		}
+	}
+	return processModule{}, false
+}
+
+func findModuleForAddress(modules []processModule, addr uintptr) (processModule, bool) {
+	for _, mod := range modules {
+		if addr >= mod.base && addr < mod.base+uintptr(mod.size) {
+			return mod, true
+		}
+	}
+	return processModule{}, false
+}
+
+func ensureRemoteModuleLoaded(pid uint32, hProc windows.Handle, remoteModules []processModule, dllName string) ([]processModule, error) {
+	if _, ok := findModuleByName(remoteModules, dllName); ok {
+		return remoteModules, nil
+	}
+	if err := loadRemoteLibraryViaAPC(pid, hProc, dllName, remoteModules); err != nil {
+		return remoteModules, fmt.Errorf("remote module %s not found and LoadLibraryW APC failed: %w", dllName, err)
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		mods, err := snapshotProcessModules(pid)
+		if err == nil {
+			remoteModules = mods
+			if _, ok := findModuleByName(remoteModules, dllName); ok {
+				return remoteModules, nil
+			}
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	return remoteModules, fmt.Errorf("remote module %s not found after LoadLibraryW APC", dllName)
+}
+
+func loadRemoteLibraryViaAPC(pid uint32, hProc windows.Handle, dllName string, remoteModules []processModule) error {
+	kernel32 := modkernel32
+	loadLibraryW := kernel32.NewProc("LoadLibraryW")
+	if err := loadLibraryW.Find(); err != nil {
+		return fmt.Errorf("resolve local LoadLibraryW: %w", err)
+	}
+	localAddr := loadLibraryW.Addr()
+	localPID := windows.GetCurrentProcessId()
+	localModules, err := snapshotProcessModules(localPID)
+	if err != nil {
+		return fmt.Errorf("snapshot local modules: %w", err)
+	}
+	localOwner, ok := findModuleForAddress(localModules, localAddr)
+	if !ok {
+		localOwner, ok = findModuleByName(localModules, "kernel32.dll")
+		if !ok {
+			return fmt.Errorf("local LoadLibraryW owner not found")
+		}
+	}
+	remoteOwner, ok := findModuleByName(remoteModules, localOwner.name)
+	if !ok {
+		return fmt.Errorf("remote LoadLibraryW owner %s not found", localOwner.name)
+	}
+	remoteLoadLibraryW := remoteOwner.base + (localAddr - localOwner.base)
+
+	wide, err := windows.UTF16FromString(dllName)
+	if err != nil {
+		return fmt.Errorf("utf16 dll name: %w", err)
+	}
+	nameBytes := unsafe.Slice((*byte)(unsafe.Pointer(&wide[0])), len(wide)*2)
+	nameSize := uintptr(len(nameBytes))
+	sc := make([]byte, 0, 64)
+	sc = append(sc, 0x48, 0x83, 0xEC, 0x28) // sub rsp, 0x28
+	sc = append(sc, 0x48, 0xB9)             // mov rcx, imm64
+	sc = appendU64(sc, 0)                   // patched with remote string address
+	sc = append(sc, 0x48, 0xB8)             // mov rax, imm64
+	sc = appendU64(sc, uint64(remoteLoadLibraryW))
+	sc = append(sc, 0xFF, 0xD0)             // call rax
+	sc = append(sc, 0x48, 0x83, 0xC4, 0x28) // add rsp, 0x28
+	sc = append(sc, 0xC3)                   // ret
+
+	total := uintptr(len(sc)) + nameSize
+	remoteBlock, err := virtualAllocEx(hProc, 0, total, windows.MEM_COMMIT|windows.MEM_RESERVE, windows.PAGE_EXECUTE_READWRITE)
+	if err != nil {
+		return fmt.Errorf("alloc remote LoadLibraryW stub: %w", err)
+	}
+	remoteName := remoteBlock + uintptr(len(sc))
+	binary.LittleEndian.PutUint64(sc[6:], uint64(remoteName))
+	if err := windows.WriteProcessMemory(hProc, remoteBlock, &sc[0], uintptr(len(sc)), nil); err != nil {
+		return fmt.Errorf("write remote LoadLibraryW stub: %w", err)
+	}
+	if err := windows.WriteProcessMemory(hProc, remoteName, &nameBytes[0], nameSize, nil); err != nil {
+		return fmt.Errorf("write remote LoadLibraryW name: %w", err)
+	}
+	if err := queueAPC(pid, hProc, remoteBlock); err != nil {
+		return fmt.Errorf("queue LoadLibraryW APC: %w", err)
+	}
+	return nil
+}
+
+func resolveImports(pid uint32, hProc windows.Handle, mapped []byte, importRVA uint32, remoteModules []processModule) error {
 	if importRVA == 0 {
 		return nil
+	}
+	localPID := windows.GetCurrentProcessId()
+	localModules, err := snapshotProcessModules(localPID)
+	if err != nil {
+		return fmt.Errorf("snapshot local modules: %w", err)
 	}
 	for off := importRVA; ; off += 20 {
 		if int(off)+20 > len(mapped) {
@@ -327,6 +583,14 @@ func resolveImports(mapped []byte, importRVA uint32) error {
 		hMod, err := windows.LoadLibrary(dllName)
 		if err != nil {
 			return fmt.Errorf("load %s: %w", dllName, err)
+		}
+		defer windows.FreeLibrary(hMod)
+		importLocalMod, ok := findModuleByName(localModules, dllName)
+		if !ok {
+			importLocalMod = processModule{
+				name: strings.ToLower(dllName),
+				base: uintptr(hMod),
+			}
 		}
 		thunkRVA := iltRVA
 		if thunkRVA == 0 {
@@ -353,8 +617,31 @@ func resolveImports(mapped []byte, importRVA uint32) error {
 					return fmt.Errorf("resolve %s!%s: %w", dllName, funcName, err)
 				}
 			}
+			if procAddr == 0 {
+				return fmt.Errorf("resolve %s import at thunk %d returned 0", dllName, i)
+			}
+			localOwner, ok := findModuleForAddress(localModules, procAddr)
+			if !ok {
+				localOwner = importLocalMod
+			}
+			remoteOwner, ok := findModuleByName(remoteModules, localOwner.name)
+			if !ok {
+				var loadErr error
+				remoteModules, loadErr = ensureRemoteModuleLoaded(pid, hProc, remoteModules, localOwner.name)
+				if loadErr != nil {
+					return loadErr
+				}
+				remoteOwner, ok = findModuleByName(remoteModules, localOwner.name)
+				if !ok {
+					return fmt.Errorf("remote owner module %s not found after load", localOwner.name)
+				}
+			}
+			if localOwner.base == 0 {
+				return fmt.Errorf("local owner module %s has zero base", localOwner.name)
+			}
+			remoteProcAddr := remoteOwner.base + (procAddr - localOwner.base)
 			if int(iOff)+8 <= len(mapped) {
-				binary.LittleEndian.PutUint64(mapped[iOff:], uint64(procAddr))
+				binary.LittleEndian.PutUint64(mapped[iOff:], uint64(remoteProcAddr))
 			}
 		}
 	}
@@ -411,6 +698,15 @@ func virtualAllocEx(hProcess windows.Handle, addr, size uintptr, allocType, prot
 		return 0, e1
 	}
 	return r0, nil
+}
+
+func virtualFreeEx(hProcess windows.Handle, addr, size uintptr, freeType uint32) error {
+	r0, _, e1 := modkernel32.NewProc("VirtualFreeEx").Call(
+		uintptr(hProcess), addr, size, uintptr(freeType))
+	if r0 == 0 {
+		return e1
+	}
+	return nil
 }
 
 func min32(a, b uint32) uint32 {

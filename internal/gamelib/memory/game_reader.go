@@ -8,6 +8,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"local/internal/svc/internal/gamelib/data"
@@ -34,6 +35,15 @@ type GameReader struct {
 	cachedMonsters  data.Monsters
 	cachedInventory data.Inventory
 	cachedObjects   []data.Object
+
+	itemTxtCostMu      sync.Mutex
+	itemTxtCostScanned bool
+	itemTxtBaseCosts   map[string]int
+
+	vendorShopRootMu   sync.Mutex
+	vendorShopRootPtr  uintptr
+	vendorShopRootKey  uintptr
+	vendorShopRootSeen time.Time
 
 	// Per-tick widget-state cache. GetWidgetState walks an FNV-hash chain
 	// in D2R via 11 RPM reads per call; GetActiveWeaponSlot alone fires it
@@ -359,6 +369,22 @@ func (gd *GameReader) HoveredData() data.HoverData {
 	}
 
 	return data.HoverData{}
+}
+
+func (gd *GameReader) MouseXY() (int, int, []byte) {
+	if gd.offset.MouseXY == 0 {
+		return 0, 0, nil
+	}
+
+	mouseAddressPtr := gd.Process.moduleBaseAddressPtr + gd.offset.MouseXY
+	mouseBuffer := gd.reader.ReadBytesFromMemory(mouseAddressPtr, 8)
+	if len(mouseBuffer) < 8 {
+		return 0, 0, mouseBuffer
+	}
+
+	x := ReadIntFromBuffer(mouseBuffer, 0, Int32)
+	y := ReadIntFromBuffer(mouseBuffer, 4, Int32)
+	return x, y, mouseBuffer
 }
 
 func (gd *GameReader) getStatsList(statListPtr uintptr) stat.Stats {

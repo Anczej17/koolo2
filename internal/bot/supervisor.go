@@ -5,16 +5,17 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"os"
 	"strings"
 	"time"
 
+	"github.com/lxn/win"
 	"local/internal/svc/internal/config"
 	ct "local/internal/svc/internal/context"
 	"local/internal/svc/internal/event"
 	"local/internal/svc/internal/game"
 	"local/internal/svc/internal/run"
 	"local/internal/svc/internal/utils/winproc"
-	"github.com/lxn/win"
 )
 
 type Supervisor interface {
@@ -91,7 +92,14 @@ func (s *baseSupervisor) Stop() {
 	s.bot.ctx.SwitchPriority(ct.PriorityStop)
 	s.bot.ctx.ManualModeActive = false // Clear manual mode flag
 
-	s.bot.ctx.MemoryInjector.Unload()
+	if s.bot.ctx.MemoryInjector != nil {
+		if err := s.bot.ctx.MemoryInjector.UninstallPresenter(); err != nil {
+			s.bot.ctx.Logger.Warn("presenter uninstall during stop",
+				slog.Any("error", err),
+				slog.String("configuration", s.name))
+		}
+		s.bot.ctx.MemoryInjector.Unload()
+	}
 	s.bot.ctx.GameReader.Close()
 
 	if s.bot.ctx.CharacterCfg.KillD2OnStop || s.bot.ctx.CharacterCfg.Scheduler.Enabled {
@@ -118,6 +126,16 @@ func (s *baseSupervisor) KillClient() error {
 
 func (s *baseSupervisor) ensureProcessIsRunningAndPrepare() error {
 	winproc.SetThreadExecutionState.Call(winproc.EXECUTION_STATE_ES_DISPLAY_REQUIRED | winproc.EXECUTION_STATE_ES_CONTINUOUS)
+	if s.bot.ctx != nil && s.bot.ctx.ClaudeModeActive {
+		s.bot.ctx.Logger.Info("Claude mode: deferring MemoryInjector.Load until after game entry")
+		return nil
+	}
+	if s.bot.ctx != nil && !s.bot.ctx.ManualModeActive &&
+		os.Getenv("DISABLE_CLAUDE_PRESENTER") != "1" &&
+		os.Getenv("DISABLE_NORMAL_PRESENTER") != "1" {
+		s.bot.ctx.Logger.Info("Normal mode: deferring MemoryInjector.Load until Claude-equivalent presenter init after game entry")
+		return nil
+	}
 	return s.bot.ctx.MemoryInjector.Load()
 }
 
@@ -132,36 +150,9 @@ func (s *baseSupervisor) logGameStart(runs []run.Run) {
 func (s *baseSupervisor) waitUntilCharacterSelectionScreen() error {
 	s.bot.ctx.Logger.Info("Waiting for character selection screen...")
 
-	// Cycle through 3 input types per iteration (every ~750 ms):
-	//  1. (100,100) left click — safe corner, dismisses most intro overlays
-	//  2. (640,602) left click — hits Continue on Gamma/ScreenSpace/ColorBlind
-	//     calibration dialogs D2R re-shows on every fresh boot without a persisted
-	//     calibration state
-	//  3. VK_G (0x47) — tiny mod's "PRESS G TO PLAY" custom char-select flow
-	//     bypasses vanilla's click-PLAY-button + click-difficulty sequence and
-	//     jumps straight into the last-played character's game. Also harmless on
-	//     vanilla char select (G maps to a chat shortcut in-game, doesn't affect
-	//     menu UI).
-	// InGame() short-circuits because tiny-mod's G jumps straight from title
-	// screen to in-game with no separate char-select panel — we detect success
-	// via InGame, not a specific "char select panel visible" signal.
-	clickIdx := 0
-	for !s.bot.ctx.GameReader.IsInCharacterSelectionScreen() && !s.bot.ctx.GameReader.InGame() {
-		switch clickIdx % 6 {
-		case 0:
-			s.bot.ctx.HID.Click(game.LeftButton, 100, 100) // corner
-		case 1:
-			s.bot.ctx.HID.Click(game.LeftButton, 640, 602) // Continue button on calibration dialogs
-		case 2:
-			s.bot.ctx.HID.Click(game.LeftButton, 640, 360) // screen centre — title InputPrompt hitbox
-		case 3:
-			s.bot.ctx.HID.PressKey(0x47) // VK_G — tiny mod "PRESS G TO PLAY"
-		case 4:
-			s.bot.ctx.HID.PressKey(0x20) // VK_SPACE — dismiss "Press Any Key" intro prompt
-		case 5:
-			s.bot.ctx.HID.PressKey(0x0D) // VK_RETURN — offline profile default-select
-		}
-		clickIdx++
+	for !s.bot.ctx.GameReader.IsInCharacterSelectionScreen() {
+		// Spam left click to skip to the char select screen
+		s.bot.ctx.HID.Click(game.LeftButton, 100, 100)
 		time.Sleep(250 * time.Millisecond)
 	}
 
@@ -191,9 +182,13 @@ func (s *baseSupervisor) waitUntilCharacterSelectionScreen() error {
 		if s.bot.ctx.CharacterCfg.AutoCreateCharacter {
 			targetName := s.bot.ctx.CharacterCfg.CharacterName
 			currentName := s.bot.ctx.GameReader.GameReader.GetSelectedCharacterName()
-			originalName := currentName
+			seenNames := make(map[string]int)
 
 			s.bot.ctx.Logger.Debug(fmt.Sprintf("Auto-create enabled, starting scan. Current selected character: %s", currentName))
+			normalizedCurrentName := strings.ToLower(strings.TrimSpace(currentName))
+			if normalizedCurrentName != "" {
+				seenNames[normalizedCurrentName] = 1
+			}
 
 			// Check currently selected character first
 			if strings.EqualFold(currentName, targetName) {
@@ -227,8 +222,17 @@ func (s *baseSupervisor) waitUntilCharacterSelectionScreen() error {
 
 					return nil
 				}
-				// If we came back to the original entry, we've scanned the full list.
-				if strings.EqualFold(currentName, originalName) {
+				normalizedCurrentName = strings.ToLower(strings.TrimSpace(currentName))
+				if normalizedCurrentName == "" {
+					continue
+				}
+
+				seenNames[normalizedCurrentName]++
+				// Character names are unique per account. Seeing the same name twice means we've looped.
+				if seenNames[normalizedCurrentName] >= 2 {
+					s.bot.ctx.Logger.Debug("Auto-create scan completed after detecting repeated character name",
+						slog.String("name", currentName),
+						slog.Int("attempt", i+1))
 					break
 				}
 			}
@@ -259,9 +263,12 @@ func (s *baseSupervisor) waitUntilCharacterSelectionScreen() error {
 			return nil
 		}
 
-		// Auto-create disabled: try to select the character up to 25 times.
-		for i := 0; i < 25; i++ {
+		// Auto-create disabled: try to select the character up to 27 times.
+		seenNames := make(map[string]int)
+		scanAttempts := 0
+		for i := 0; i < 27; i++ {
 			characterName := s.bot.ctx.GameReader.GameReader.GetSelectedCharacterName()
+			scanAttempts = i + 1
 
 			s.bot.ctx.Logger.Debug(fmt.Sprintf("Checking character: %s", characterName))
 
@@ -270,12 +277,24 @@ func (s *baseSupervisor) waitUntilCharacterSelectionScreen() error {
 				return nil
 			}
 
+			normalizedCharacterName := strings.ToLower(strings.TrimSpace(characterName))
+			if normalizedCharacterName != "" {
+				seenNames[normalizedCharacterName]++
+				// Character names are unique per account. Seeing the same name twice means we've looped.
+				if seenNames[normalizedCharacterName] >= 2 {
+					s.bot.ctx.Logger.Debug("Character scan completed after detecting repeated character name",
+						slog.String("name", characterName),
+						slog.Int("attempt", i+1))
+					break
+				}
+			}
+
 			s.bot.ctx.HID.PressKey(win.VK_DOWN)
 			time.Sleep(250 * time.Millisecond)
 		}
 
 		s.bot.ctx.Logger.Error(
-			fmt.Sprintf("Character %s not found after 25 attempts and auto-create is disabled.", s.bot.ctx.CharacterCfg.CharacterName),
+			fmt.Sprintf("Character %s not found after %d scan attempts and auto-create is disabled.", s.bot.ctx.CharacterCfg.CharacterName, scanAttempts),
 			slog.String("class", s.bot.ctx.CharacterCfg.Character.Class),
 		)
 

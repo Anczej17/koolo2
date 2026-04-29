@@ -34,8 +34,8 @@ func PickupItem(it data.Item, itemPickupAttempt int) error {
 	ctx := context.Get()
 	ctx.SetLastStep("PickupItem")
 
-	// Check if packet casting is enabled for item pickup
-	if ctx.CharacterCfg.PacketCasting.UseForItemPickup {
+	// Packet path is primary; fall back only when no sender is available.
+	if ctx.PacketSender != nil {
 		ctx.Logger.Debug("Attempting item pickup via packet method")
 		return PickupItemPacket(it, itemPickupAttempt)
 	}

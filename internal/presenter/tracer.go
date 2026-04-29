@@ -33,21 +33,21 @@ type TraceEntry struct {
 
 // TraceStatus is a status summary for /debug/packettrace/status.
 type TraceStatus struct {
-	Magic           uint32
-	Enabled         uint32
-	Head            uint32
-	Tail            uint32
-	Total           uint32
-	Dropped         uint32
-	SendFnVA        uint64
-	DualSendWrapVA  uint64
-	StubAddr        uint64
-	InstalledFlags  uint32
-	LastErrorCode   uint32
-	D2RBase         uint64
-	D2RTextEnd      uint64
-	GameThreadID    uint32
-	OrigSendFn      []byte // 16 bytes
+	Magic            uint32
+	Enabled          uint32
+	Head             uint32
+	Tail             uint32
+	Total            uint32
+	Dropped          uint32
+	SendFnVA         uint64
+	DualSendWrapVA   uint64
+	StubAddr         uint64
+	InstalledFlags   uint32
+	LastErrorCode    uint32
+	D2RBase          uint64
+	D2RTextEnd       uint64
+	GameThreadID     uint32
+	OrigSendFn       []byte // 16 bytes
 	OrigDualSendWrap []byte // 16 bytes
 }
 
@@ -144,20 +144,20 @@ func (t *Tracer) IsEnabled() bool {
 // Status returns the current SHM header snapshot.
 func (t *Tracer) Status() TraceStatus {
 	st := TraceStatus{
-		Magic:           readU32(t.localView, TraceOffMagic),
-		Enabled:         readU32(t.localView, TraceOffEnabled),
-		Head:            readU32(t.localView, TraceOffHead),
-		Tail:            readU32(t.localView, TraceOffTail),
-		Total:           readU32(t.localView, TraceOffTotal),
-		Dropped:         readU32(t.localView, TraceOffDropped),
-		SendFnVA:        readU64(t.localView, TraceOffSendFnVA),
-		DualSendWrapVA:  readU64(t.localView, TraceOffDualSendWrapVA),
-		StubAddr:        readU64(t.localView, TraceOffStubAddr),
-		InstalledFlags:  readU32(t.localView, TraceOffInstalledFlags),
-		LastErrorCode:   readU32(t.localView, TraceOffLastErrorCode),
-		D2RBase:         readU64(t.localView, TraceOffD2RBase),
-		D2RTextEnd:      readU64(t.localView, TraceOffD2RTextEnd),
-		GameThreadID:    readU32(t.localView, TraceOffGameThreadID),
+		Magic:          readU32(t.localView, TraceOffMagic),
+		Enabled:        readU32(t.localView, TraceOffEnabled),
+		Head:           readU32(t.localView, TraceOffHead),
+		Tail:           readU32(t.localView, TraceOffTail),
+		Total:          readU32(t.localView, TraceOffTotal),
+		Dropped:        readU32(t.localView, TraceOffDropped),
+		SendFnVA:       readU64(t.localView, TraceOffSendFnVA),
+		DualSendWrapVA: readU64(t.localView, TraceOffDualSendWrapVA),
+		StubAddr:       readU64(t.localView, TraceOffStubAddr),
+		InstalledFlags: readU32(t.localView, TraceOffInstalledFlags),
+		LastErrorCode:  readU32(t.localView, TraceOffLastErrorCode),
+		D2RBase:        readU64(t.localView, TraceOffD2RBase),
+		D2RTextEnd:     readU64(t.localView, TraceOffD2RTextEnd),
+		GameThreadID:   readU32(t.localView, TraceOffGameThreadID),
 	}
 	st.OrigSendFn = readBytes(t.localView, TraceOffOrigBytesSendFn, 16)
 	st.OrigDualSendWrap = readBytes(t.localView, TraceOffOrigBytesDual, 16)
@@ -293,6 +293,31 @@ func AnnotatePayload(p []byte) string {
 		return ""
 	}
 	switch p[0] {
+	case 0x2F:
+		if len(p) >= 5 {
+			gid := binary.LittleEndian.Uint32(p[1:5])
+			return fmt.Sprintf("0x2F NPCInit npc=0x%X", gid)
+		}
+	case 0x30:
+		if len(p) >= 5 {
+			gid := binary.LittleEndian.Uint32(p[1:5])
+			return fmt.Sprintf("0x30 NPCCancel npc=0x%X", gid)
+		}
+	case 0x38:
+		if len(p) >= 9 {
+			action := binary.LittleEndian.Uint32(p[1:5])
+			gid := binary.LittleEndian.Uint32(p[5:9])
+			return fmt.Sprintf("0x38 NPCAction9 action=%d npc=0x%X", action, gid)
+		}
+		if len(p) >= 6 {
+			action := binary.LittleEndian.Uint32(p[1:5])
+			return fmt.Sprintf("0x38 NPCAction6 action=%d term=0x%02X", action, p[5])
+		}
+	case 0x4D:
+		if len(p) >= 5 {
+			gid := binary.LittleEndian.Uint32(p[1:5])
+			return fmt.Sprintf("0x4D PreInteract unit=0x%X", gid)
+		}
 	case 0x54:
 		if len(p) >= 20 {
 			gid := binary.LittleEndian.Uint32(p[1:5])
@@ -317,6 +342,16 @@ func AnnotatePayload(p []byte) string {
 			gid := binary.LittleEndian.Uint32(p[1:5])
 			action := binary.LittleEndian.Uint32(p[5:9])
 			return fmt.Sprintf("0x41 Interact gid=0x%X action=%d", gid, action)
+		}
+	case 0x40:
+		if len(p) >= 13 {
+			unitType := binary.LittleEndian.Uint32(p[1:5])
+			gid := binary.LittleEndian.Uint32(p[5:9])
+			return fmt.Sprintf("0x40 UnitInteract type=%d gid=0x%X", unitType, gid)
+		}
+		if len(p) >= 5 {
+			gid := binary.LittleEndian.Uint32(p[1:5])
+			return fmt.Sprintf("0x40 UnitInteract gid=0x%X", gid)
 		}
 	case 0x33:
 		if len(p) >= 22 {

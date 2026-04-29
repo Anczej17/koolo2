@@ -22,6 +22,13 @@ Please know that this project is still in development, so you may encounter issu
 
 Important information:
 
+Local D2R/vendor debugging rules:
+
+- Do not start the bot or D2R hidden/headless during live D2R debugging.
+- Start D2R through the bot/Claude-mode flow so the bot owns exactly one D2R process.
+- When closing the bot during live debugging, close the matching D2R process too.
+- Do not run multiple bot processes against one D2R process.
+
 As written more detailed below you need to install:
 
 - Go (1.24, not 1.25!)

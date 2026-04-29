@@ -2,14 +2,10 @@ package step
 
 import (
 	"fmt"
-	"time"
 
+	"local/internal/svc/internal/context"
 	"local/internal/svc/internal/gamelib/data"
 	"local/internal/svc/internal/gamelib/data/npc"
-	"local/internal/svc/internal/context"
-	"local/internal/svc/internal/game"
-	"local/internal/svc/internal/pather"
-	"local/internal/svc/internal/ui"
 	"local/internal/svc/internal/utils"
 )
 
@@ -18,104 +14,118 @@ func InteractNPC(npcID npc.ID) error {
 	ctx.SetLastStep("InteractNPC")
 
 	const (
-		maxAttempts     = 8
-		minMenuOpenWait = 300 * time.Millisecond
-		maxDistance     = 15
-		hoverWait       = 800 * time.Millisecond
+		maxDistance   = 6
+		standDistance = 2
 	)
 
-	// Packet-based NPC interaction path
-	if ctx.CharacterCfg.PacketCasting.UseForNPCInteraction && ctx.PacketSender != nil {
-		townNPC, found := ctx.Data.Monsters.FindOne(npcID, data.MonsterTypeNone)
-		if found {
-			distance := ctx.PathFinder.DistanceFromMe(townNPC.Position)
-			if distance <= maxDistance {
-				npcX := uint16(townNPC.Position.X)
-				npcY := uint16(townNPC.Position.Y)
-				playerX := uint16(ctx.Data.PlayerUnit.Position.X)
-				playerY := uint16(ctx.Data.PlayerUnit.Position.Y)
-				playerGID := ctx.Data.PlayerUnit.ID
-				ctx.Logger.Debug("Attempting NPC interaction via packet 0x4D+0x2F", "npc", npcID, "unitID", townNPC.UnitID, "npcX", npcX, "npcY", npcY, "playerX", playerX, "playerY", playerY)
-				err := ctx.PacketSender.InteractNPC(townNPC.UnitID, playerGID, playerX, playerY, npcX, npcY)
-				if err == nil {
-					utils.Sleep(200)
-					// Wait for NPC dialog to open — refresh game data each tick
-					for i := 0; i < 15; i++ {
-						ctx.RefreshGameData()
-						if ctx.Data.OpenMenus.NPCInteract || ctx.Data.OpenMenus.NPCShop {
-							ctx.Logger.Info("NPC dialog opened via packet", "npc", npcID, "waitMs", (i+1)*100+200)
-							return nil
-						}
-						utils.Sleep(100)
-					}
-					ctx.Logger.Warn("Packet NPC interaction: 0x4D+0x2F sent but dialog did not open after 1.7s, falling back to HID", "npc", npcID)
-				} else {
-					ctx.Logger.Warn("Packet NPC interaction failed, falling back to mouse method", "npc", npcID, "error", err.Error())
-				}
+	// Packet-based NPC interaction — use AMB's canonical NPCInit flow when a
+	// sender is available. We intentionally do not mask packet failures with
+	// HID so live validation stays unambiguous.
+	if ctx.PacketSender != nil {
+		for attempt := 0; attempt < 4; attempt++ {
+			ctx.RefreshGameData()
+			townNPC, found := ctx.Data.Monsters.FindOne(npcID, data.MonsterTypeNone)
+			if !found {
+				return fmt.Errorf("packet NPC interaction failed: npc %d not found", npcID)
 			}
-		}
-	}
+			distance := ctx.PathFinder.DistanceFromMe(townNPC.Position)
+			if distance > standDistance {
+				ctx.Logger.Debug("NPC packet interaction: moving next to NPC",
+					"npc", npcID, "unitID", townNPC.UnitID, "distance", distance, "targetDistance", standDistance, "attempt", attempt+1)
+				if err := MoveTo(townNPC.Position, WithDistanceToFinish(standDistance), WithIgnoreMonsters()); err != nil {
+					return fmt.Errorf("packet NPC interaction failed: move next to npc %d failed: %w", npcID, err)
+				}
+				ctx.RefreshGameData()
+				if refreshedNPC, ok := ctx.Data.Monsters.FindOne(npcID, data.MonsterTypeNone); ok {
+					townNPC = refreshedNPC
+				}
+				distance = ctx.PathFinder.DistanceFromMe(townNPC.Position)
+			}
+			if distance > maxDistance {
+				return fmt.Errorf("packet NPC interaction failed: npc %d out of range (distance: %d)", npcID, distance)
+			}
 
-	var targetNPCID data.UnitID
+			playerPos := ctx.Data.PlayerUnit.Position
+			ctx.Logger.Debug("NPC packet interaction: AMB 0x04 RunToUnit prime",
+				"npc", npcID, "unitID", townNPC.UnitID, "playerX", playerPos.X, "playerY", playerPos.Y, "attempt", attempt+1)
+			if err := ctx.PacketSender.NPCPrimeInteraction(townNPC.UnitID, ctx.Data.PlayerUnit.ID, playerPos, townNPC.Position); err != nil {
+				return fmt.Errorf("packet NPC interaction failed: NPCPrimeInteraction send failed for npc %d: %w", npcID, err)
+			}
+			utils.Sleep(150)
+			ctx.RefreshGameData()
+			if refreshedNPC, ok := ctx.Data.Monsters.FindOne(npcID, data.MonsterTypeNone); ok {
+				townNPC = refreshedNPC
+			}
+			distance = ctx.PathFinder.DistanceFromMe(townNPC.Position)
 
-	for attempts := 0; attempts < maxAttempts; attempts++ {
-		// Pause the execution if the priority is not the same as the execution priority
-		ctx.PauseIfNotPriority()
-
-		// Check if interaction succeeded and menu is open
-		if ctx.Data.OpenMenus.NPCInteract || ctx.Data.OpenMenus.NPCShop {
-			// Find current NPC position
-			if targetNPCID != 0 {
-				if currentNPC, found := ctx.Data.Monsters.FindByID(targetNPCID); found {
-					currentDistance := pather.DistanceFromPoint(currentNPC.Position, ctx.Data.PlayerUnit.Position)
-					if currentDistance <= maxDistance {
-						time.Sleep(minMenuOpenWait)
+			stage := "direct 0x2F"
+			var interactErr error
+			switch attempt {
+			case 0:
+				// This is the proven 2026-04-25/26 Akara path: prime movement,
+				// then NPCInit directly. Extra 0x40/0x41/0x13 pre-open packets
+				// are only retries because they can perturb the native NPC state.
+			case 1:
+				stage = "0x41 NPCInteractEx"
+				interactErr = ctx.PacketSender.NPCInteractEx(townNPC)
+			case 2:
+				stage = "0x40 UnitInteract"
+				interactErr = ctx.PacketSender.UnitInteract(townNPC.UnitID)
+			default:
+				stage = "0x13 NPCInteract"
+				interactErr = ctx.PacketSender.NPCInteract0x13(townNPC, ctx.Data.PlayerUnit.ID)
+			}
+			if attempt > 0 {
+				ctx.Logger.Debug("NPC packet interaction: AMB pre-open interaction",
+					"npc", npcID, "unitID", townNPC.UnitID, "stage", stage, "distance", distance, "attempt", attempt+1)
+				if interactErr != nil {
+					return fmt.Errorf("packet NPC interaction failed: %s send failed for npc %d: %w", stage, npcID, interactErr)
+				}
+				for i := 0; i < 3; i++ {
+					utils.Sleep(50)
+					ctx.RefreshGameData()
+					if ctx.Data.OpenMenus.NPCInteract || ctx.Data.OpenMenus.NPCShop {
+						ctx.Logger.Info("NPC dialog opened via packet",
+							"npc", npcID, "stage", stage, "waitMs", (i+1)*50, "distance", distance, "attempt", attempt+1)
 						return nil
 					}
 				}
 			}
 
-			// Wrong NPC, too far, or NPC moved - close menu and retry
-			CloseAllMenus()
-			time.Sleep(200 * time.Millisecond)
-			targetNPCID = 0
-			continue
-		}
-
-		townNPC, found := ctx.Data.Monsters.FindOne(npcID, data.MonsterTypeNone)
-		if !found {
-			if attempts == maxAttempts-1 {
-				return fmt.Errorf("NPC %d not found after %d attempts", npcID, maxAttempts)
+			if refreshedNPC, ok := ctx.Data.Monsters.FindOne(npcID, data.MonsterTypeNone); ok {
+				townNPC = refreshedNPC
 			}
-			time.Sleep(200 * time.Millisecond)
-			continue
-		}
+			distance = ctx.PathFinder.DistanceFromMe(townNPC.Position)
 
-		distance := ctx.PathFinder.DistanceFromMe(townNPC.Position)
-		if distance > maxDistance {
-			return fmt.Errorf("NPC %d is too far away (distance: %d)", npcID, distance)
-		}
-
-		// Calculate click position
-		x, y := ui.GameCoordsToScreenCords(townNPC.Position.X, townNPC.Position.Y)
-		if npcID == npc.Tyrael2 || npcID == npc.Tyrael {
-			y = y - 40 // Tyrael has a super weird hitbox
-		}
-
-		// Move mouse and wait for hover
-		ctx.HID.MovePointer(x, y)
-		hoverStart := time.Now()
-
-		for time.Since(hoverStart) < hoverWait {
-			if currentNPC, found := ctx.Data.Monsters.FindOne(npcID, data.MonsterTypeNone); found && currentNPC.IsHovered {
-				targetNPCID = currentNPC.UnitID
-				ctx.HID.Click(game.LeftButton, x, y)
-				time.Sleep(minMenuOpenWait)
-				break
+			ctx.Logger.Debug("NPC packet interaction: 0x2F NPCInit",
+				"npc", npcID, "unitID", townNPC.UnitID, "distance", distance, "attempt", attempt+1)
+			if err := ctx.PacketSender.NPCInit(townNPC.UnitID); err != nil {
+				return fmt.Errorf("packet NPC interaction failed: NPCInit send failed for npc %d: %w", npcID, err)
 			}
-			time.Sleep(50 * time.Millisecond)
+			utils.Sleep(100)
+			ctx.RefreshGameData()
+			playerPos = ctx.Data.PlayerUnit.Position
+			ctx.Logger.Debug("NPC packet interaction: AMB 0x03 dialog position sync",
+				"npc", npcID, "unitID", townNPC.UnitID, "playerX", playerPos.X, "playerY", playerPos.Y, "attempt", attempt+1)
+			if err := ctx.PacketSender.NPCDialogPositionSync(playerPos); err != nil {
+				return fmt.Errorf("packet NPC interaction failed: NPCDialogPositionSync failed for npc %d: %w", npcID, err)
+			}
+
+			utils.Sleep(200)
+			for i := 0; i < 20; i++ {
+				ctx.RefreshGameData()
+				if ctx.Data.OpenMenus.NPCInteract || ctx.Data.OpenMenus.NPCShop {
+					ctx.Logger.Info("NPC dialog opened via packet",
+						"npc", npcID, "stage", stage+" + 0x2F", "waitMs", (i+1)*100+200, "distance", distance, "attempt", attempt+1)
+					return nil
+				}
+				utils.Sleep(100)
+			}
+			ctx.Logger.Warn("NPC packet interaction: dialog did not open after NPCInit",
+				"npc", npcID, "unitID", townNPC.UnitID, "distance", distance, "attempt", attempt+1)
 		}
+		return fmt.Errorf("packet NPC interaction failed: dialog did not open for npc %d after AMB retry flow", npcID)
 	}
 
-	return fmt.Errorf("failed to interact with NPC after %d attempts", maxAttempts)
+	return fmt.Errorf("packet NPC interaction unavailable for npc %d: refusing HID fallback", npcID)
 }

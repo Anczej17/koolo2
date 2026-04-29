@@ -22,3 +22,12 @@ internal/buildnoise/noise_gen.go
 /dist/
 /tools/*.dll
 /tools/*.exe
+
+# Local scratch/debug artifacts
+.tmp/
+__pycache__/
+*.pyc
+*.log
+go-test-all.json
+tmp_*.png
+stash_*.png

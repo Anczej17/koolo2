@@ -6,11 +6,11 @@ import (
 	"strings"
 	"time"
 
+	"local/internal/svc/internal/context"
+	"local/internal/svc/internal/game"
 	"local/internal/svc/internal/gamelib/data"
 	"local/internal/svc/internal/gamelib/data/skill"
 	"local/internal/svc/internal/gamelib/data/state"
-	"local/internal/svc/internal/context"
-	"local/internal/svc/internal/game"
 	"local/internal/svc/internal/ui"
 	"local/internal/svc/internal/utils"
 )
@@ -338,8 +338,14 @@ func MoveTo(dest data.Position, options ...MoveOption) error {
 					// Already destroyed, move on
 					continue
 				}
-				x, y := ui.GameCoordsToScreenCords(obj.Position.X, obj.Position.Y)
-				ctx.HID.Click(game.LeftButton, x, y)
+				if ctx.PacketSender != nil {
+					if err := ctx.PacketSender.UnitInteract(obj.ID); err != nil {
+						ctx.Logger.Warn("packet destructible interaction failed", "error", err, "object", obj.ID)
+					}
+				} else {
+					x, y := ui.GameCoordsToScreenCords(obj.Position.X, obj.Position.Y)
+					ctx.HID.Click(game.LeftButton, x, y)
+				}
 
 				// Adaptive delay for obstacle interaction based on ping
 				time.Sleep(time.Millisecond * time.Duration(utils.PingMultiplier(utils.Light, 100)))

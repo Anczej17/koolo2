@@ -148,12 +148,18 @@ function updateExpandAllButton() {
 function fetchDebugData() {
     const urlParams = new URLSearchParams(window.location.search);
     const characterName = urlParams.get('characterName') || 'nullref';
-    fetch(`/debug-data?characterName=${characterName}`)
+    const source = urlParams.get('source') || 'debug-data';
+    const endpoint = source === 'live'
+        ? `/debug/live?character=${encodeURIComponent(characterName)}`
+        : `/debug-data?characterName=${encodeURIComponent(characterName)}`;
+    fetch(endpoint)
         .then(response => response.json())
         .then(data => {
             delete data.CollisionGrid;
             updateDebugContainer(data);
-            if (data.PlayerUnit && data.PlayerUnit.Name) {
+            if (data.character) {
+                supervisorNameElement.textContent = `Supervisor: ${data.character} (live)`;
+            } else if (data.PlayerUnit && data.PlayerUnit.Name) {
                 supervisorNameElement.textContent = `Supervisor: ${data.PlayerUnit.Name}`;
             } else {
                 supervisorNameElement.textContent = `Supervisor: ${characterName}`;

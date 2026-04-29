@@ -3,10 +3,10 @@ package action
 import (
 	"time"
 
-	"local/internal/svc/internal/gamelib/data"
-	"local/internal/svc/internal/gamelib/data/npc"
 	"local/internal/svc/internal/action/step"
 	"local/internal/svc/internal/context"
+	"local/internal/svc/internal/gamelib/data"
+	"local/internal/svc/internal/gamelib/data/npc"
 	"local/internal/svc/internal/utils"
 )
 
@@ -70,6 +70,9 @@ func HidePortraits() error {
 
 	// Hide portraits if configured
 	if ctx.CharacterCfg.HidePortraits && ctx.Data.OpenMenus.PortraitsShown {
+		if ctx.HID != nil && ctx.HID.IsDisabled() {
+			return nil
+		}
 		ctx.HID.PressKey(ctx.Data.KeyBindings.ShowPortraits.Key1[0])
 	}
 	return nil
@@ -77,11 +80,17 @@ func HidePortraits() error {
 func ClearMessages() error {
 	ctx := context.Get()
 	ctx.SetLastAction("ClearMessages")
+	if ctx.HID != nil && ctx.HID.IsDisabled() {
+		return nil
+	}
 	ctx.HID.PressKey(ctx.Data.KeyBindings.ClearMessages.Key1[0])
 	return nil
 }
 func HoldKey(keyCode byte, durationMs int) {
 	ctx := context.Get()
+	if ctx.HID != nil && ctx.HID.IsDisabled() {
+		return
+	}
 	kb := ToKeyBinding(keyCode)                              // Convert byte to data.KeyBinding
 	ctx.HID.KeyDown(kb)                                      // Simulate pressing the key down
 	time.Sleep(time.Duration(durationMs) * time.Millisecond) // Wait for the specified duration

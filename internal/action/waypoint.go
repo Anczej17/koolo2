@@ -5,9 +5,12 @@ import (
 	"log/slog"
 	"slices"
 
-	"local/internal/svc/internal/gamelib/data/area"
+	"github.com/lxn/win"
+
 	"local/internal/svc/internal/context"
 	"local/internal/svc/internal/game"
+	"local/internal/svc/internal/gamelib/data"
+	"local/internal/svc/internal/gamelib/data/area"
 	"local/internal/svc/internal/ui"
 	"local/internal/svc/internal/utils"
 )
@@ -41,12 +44,14 @@ func WayPoint(dest area.ID) error {
 			if err != nil {
 				return err
 			}
-			if ctx.Data.LegacyGraphics {
-				actTabX := ui.WpTabStartXClassic + (wpCoords.Tab-1)*ui.WpTabSizeXClassic + (ui.WpTabSizeXClassic / 2)
-				ctx.HID.Click(game.LeftButton, actTabX, ui.WpTabStartYClassic)
-			} else {
-				actTabX := ui.WpTabStartX + (wpCoords.Tab-1)*ui.WpTabSizeX + (ui.WpTabSizeX / 2)
-				ctx.HID.Click(game.LeftButton, actTabX, ui.WpTabStartY)
+			if ctx.PacketSender == nil {
+				if ctx.Data.LegacyGraphics {
+					actTabX := ui.WpTabStartXClassic + (wpCoords.Tab-1)*ui.WpTabSizeXClassic + (ui.WpTabSizeXClassic / 2)
+					ctx.HID.Click(game.LeftButton, actTabX, ui.WpTabStartYClassic)
+				} else {
+					actTabX := ui.WpTabStartX + (wpCoords.Tab-1)*ui.WpTabSizeX + (ui.WpTabSizeX / 2)
+					ctx.HID.Click(game.LeftButton, actTabX, ui.WpTabStartY)
+				}
 			}
 			utils.PingSleep(utils.Medium, 250) // Medium operation: Wait for waypoint tab to load
 			// Just to make sure no message like TZ change or public game spam prevent bot from clicking on waypoint
@@ -60,13 +65,8 @@ func WayPoint(dest area.ID) error {
 		return err
 	}
 
-	// Wait for the game to load after using the waypoint
-	ctx.WaitForGameToLoad()
-
-	// Verify that we've reached the destination
-	ctx.RefreshGameData()
-	if ctx.Data.PlayerUnit.Area != dest {
-		return fmt.Errorf("failed to reach destination area %s using waypoint", area.Areas[dest].Name)
+	if err := finishWaypointTravel(dest); err != nil {
+		return err
 	}
 
 	// apply buffs after exiting a waypoint if configured
@@ -101,12 +101,14 @@ func FieldWayPoint(dest area.ID) error {
 			if err != nil {
 				return err
 			}
-			if ctx.Data.LegacyGraphics {
-				actTabX := ui.WpTabStartXClassic + (wpCoords.Tab-1)*ui.WpTabSizeXClassic + (ui.WpTabSizeXClassic / 2)
-				ctx.HID.Click(game.LeftButton, actTabX, ui.WpTabStartYClassic)
-			} else {
-				actTabX := ui.WpTabStartX + (wpCoords.Tab-1)*ui.WpTabSizeX + (ui.WpTabSizeX / 2)
-				ctx.HID.Click(game.LeftButton, actTabX, ui.WpTabStartY)
+			if ctx.PacketSender == nil {
+				if ctx.Data.LegacyGraphics {
+					actTabX := ui.WpTabStartXClassic + (wpCoords.Tab-1)*ui.WpTabSizeXClassic + (ui.WpTabSizeXClassic / 2)
+					ctx.HID.Click(game.LeftButton, actTabX, ui.WpTabStartYClassic)
+				} else {
+					actTabX := ui.WpTabStartX + (wpCoords.Tab-1)*ui.WpTabSizeX + (ui.WpTabSizeX / 2)
+					ctx.HID.Click(game.LeftButton, actTabX, ui.WpTabStartY)
+				}
 			}
 			utils.Sleep(200)
 			// Just to make sure no message like TZ change or public game spam prevent bot from clicking on waypoint
@@ -120,13 +122,8 @@ func FieldWayPoint(dest area.ID) error {
 		return err
 	}
 
-	// Wait for the game to load after using the waypoint
-	ctx.WaitForGameToLoad()
-
-	// Verify that we've reached the destination
-	ctx.RefreshGameData()
-	if ctx.Data.PlayerUnit.Area != dest {
-		return fmt.Errorf("failed to reach destination area %s using waypoint", area.Areas[dest].Name)
+	if err := finishWaypointTravel(dest); err != nil {
+		return err
 	}
 
 	// apply buffs after exiting a waypoint if configured
@@ -168,7 +165,12 @@ func useWP(dest area.ID) error {
 	currentWP = area.WPAddresses[dest]
 
 	// First use the previous available waypoint that we have discovered
-	if ctx.Data.LegacyGraphics {
+	if ctx.PacketSender != nil {
+		ctx.Logger.Info("Waypoint: sending AMB 0x4B destination packet", slog.String("destination", area.Areas[dest].Name))
+		if err := ctx.PacketSender.WaypointInteractAMB(dest); err != nil {
+			return err
+		}
+	} else if ctx.Data.LegacyGraphics {
 		areaBtnY := ui.WpListStartYClassic + (currentWP.Row-1)*ui.WpAreaBtnHeightClassic + (ui.WpAreaBtnHeightClassic / 2)
 		ctx.HID.Click(game.LeftButton, ui.WpListPositionXClassic, areaBtnY)
 	} else {
@@ -226,4 +228,80 @@ func useWP(dest area.ID) error {
 	}
 
 	return nil
+}
+
+func finishWaypointTravel(dest area.ID) error {
+	ctx := context.Get()
+
+	ctx.WaitForGameToLoad()
+	utils.Sleep(500)
+
+	ctx.RefreshGameData()
+	if ctx.Data.PlayerUnit.Area != dest {
+		return fmt.Errorf("failed to reach destination area %s using waypoint", area.Areas[dest].Name)
+	}
+
+	for attempt := 1; attempt <= 5; attempt++ {
+		ctx.RefreshGameData()
+		if !ctx.Data.OpenMenus.IsMenuOpen() {
+			break
+		}
+		ctx.Logger.Warn("Menu still open after waypoint travel; selecting packet-aware close path",
+			slog.Int("attempt", attempt),
+			slog.String("destination", area.Areas[dest].Name),
+			slog.Bool("waypoint", ctx.Data.OpenMenus.Waypoint),
+			slog.Bool("inventory", ctx.Data.OpenMenus.Inventory),
+			slog.Bool("npc", ctx.Data.OpenMenus.NPCInteract),
+			slog.Bool("shop", ctx.Data.OpenMenus.NPCShop),
+			slog.Bool("quit", ctx.Data.OpenMenus.QuitMenu))
+		if ctx.PacketSender == nil {
+			return fmt.Errorf("menu remained open after waypoint travel to %s and PacketSender is not initialized", area.Areas[dest].Name)
+		}
+		if ctx.Data.OpenMenus.NPCInteract || ctx.Data.OpenMenus.NPCShop {
+			townNPC, ok := closestWaypointVisibleNPC(ctx)
+			if !ok {
+				return fmt.Errorf("NPC menu remained open after waypoint travel to %s but no visible NPC was found for NPCCancel", area.Areas[dest].Name)
+			}
+			ctx.Logger.Warn("Menu still open after waypoint travel; closing NPC menu via 0x30 NPCCancel",
+				slog.Int("attempt", attempt),
+				slog.String("destination", area.Areas[dest].Name),
+				slog.Int("npcGID", int(townNPC.UnitID)),
+				slog.Int("npcID", int(townNPC.Name)))
+			if err := ctx.PacketSender.NPCCancel(townNPC.UnitID); err != nil {
+				return fmt.Errorf("close NPC menu after waypoint travel via NPCCancel: %w", err)
+			}
+		} else if ctx.Data.OpenMenus.Waypoint {
+			if ctx.GameReader != nil && ctx.GameReader.HWND != 0 {
+				game.PostWindowKey(ctx.GameReader.HWND, byte(win.VK_ESCAPE))
+			} else if err := ctx.PacketSender.PostKeyInProcess(byte(win.VK_ESCAPE)); err != nil {
+				return fmt.Errorf("close waypoint menu via packet-safe ESC: %w", err)
+			}
+		} else {
+			return fmt.Errorf("unexpected non-waypoint menu remained open after waypoint travel to %s", area.Areas[dest].Name)
+		}
+		utils.Sleep(250)
+	}
+
+	ctx.RefreshGameData()
+	if ctx.Data.OpenMenus.IsMenuOpen() {
+		return fmt.Errorf("menu remained open after waypoint travel to %s", area.Areas[dest].Name)
+	}
+
+	return nil
+}
+
+func closestWaypointVisibleNPC(ctx *context.Status) (data.Monster, bool) {
+	var best data.Monster
+	bestDistance := 1 << 30
+	for _, m := range ctx.Data.Monsters {
+		if m.Type != data.MonsterTypeNone {
+			continue
+		}
+		distance := ctx.PathFinder.DistanceFromMe(m.Position)
+		if distance < bestDistance {
+			best = m
+			bestDistance = distance
+		}
+	}
+	return best, bestDistance != 1<<30
 }
